@@ -3,6 +3,41 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — phase 1 wired end to end; first real call through the SFU
+
+The three shells now run the real protocol, and two browsers held a call
+through the Cloudflare Realtime SFU on the user's account.
+
+- Worker: `RoomObject` loads the record, runs `meeting_core::step`, stores,
+  then carries out effects (socket effects first, SFU calls after, so a
+  kicked client cannot rejoin during an `await`). `sfu-api` holds the typed
+  SFU client (serde types from Cloudflare's OpenAPI schema). `/api/new`
+  needs the creation secret ([D7](links/README.md#d7-only-the-owner-creates-meetings-with-a-creation-secret-2026-10-09)
+  changed from Cloudflare Access to a secret until a domain is attached).
+  The built web app is served as static assets. Spike 1 reruns with 43
+  checks against a mock SFU ([spikes/01](spikes/01-do-hibernation.md)).
+- Web: types come from the core through tsify; frames are decoded and
+  encoded by the core in WASM; a pure reducer drives the UI; both
+  negotiations, layer selection, keepalive pings, consent and host controls
+  are wired; 54 vitest tests.
+- Core follow-ups: `Unpublish`, a publish timeout, `parseServerMsg` and
+  `encodeClientMsg`, and rids `q`/`h`/`f` so the SFU's asciibetical fallback
+  degrades one step at a time ([D11](media/README.md)).
+- First real call ([spikes/02](spikes/02-first-call.md)): guest and third
+  participant received 640x360 H.264 at about 300 kbit/s with three
+  simulcast layers published; lock, knock, admit, camera off/on and end all
+  worked. The host received nothing: a pull before the publisher was
+  connected returned an offer with a `not_found_track_error`, the client
+  dropped the offer, and the session was stuck (406, then 410). Fixed in
+  `sfu-api`: the offer is always handed to the client, missing tracks are
+  retried. A second run is pending.
+- Reviews fixed: alarm loop after the core's alarm time passed, stale
+  sockets closed before the store, KV errors aborting the end of a meeting.
+
+Open: the core has no reply for an SFU offer on the publish session, does
+not replace a subscribe session after a 410, and treats a partial publish
+as fully published. Recording effects are logged, not executed (phase 3).
+
 ## 2026-10-09 — meeting-core review fixes: consent gate, resume, subscription retry
 
 A review of `crates/meeting-core` found seven problems; all are fixed in the
