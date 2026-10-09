@@ -4,32 +4,36 @@
 //! - `POST /api/new` (`Authorization: Bearer <CREATE_SECRET>`, optional body
 //!   `{"recording": "fromStart" | "hostDecides"}`) creates a meeting and returns
 //!   `{"meeting", "hostToken"}` with status 201.
+//! - `GET /api/meetings` (`Authorization: Bearer <CREATE_SECRET>`) returns the owner's last
+//!   meetings, newest first: `{"meetings": [{"meeting", "createdAt", "ended", "transcript"?}]}`.
 //! - `GET /api/meeting/:words` returns `{"recordingPolicy", "ended"}`, or 404.
 //! - `GET /api/ice` returns the ICE servers for `RTCPeerConnection`.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
 
 mod internal;
+mod meetings;
 mod random;
 mod record;
 mod room;
 mod sfu;
 
-use meeting_core::{HostToken, MeetingId, RecordingPolicy};
+use meeting_core::{HostToken, MeetingId, Millis, RecordingPolicy};
 use serde::{Deserialize, Serialize};
 use worker::{
-    Context, Env, KvStore, Method, Request, RequestInit, Response, Result, RouteContext, Router,
-    console_error, event,
+    Context, Date, Env, KvStore, Method, Request, RequestInit, Response, Result, RouteContext,
+    Router, console_error, event,
 };
 
 use crate::internal::{INFO, INIT, InitRoom, ORIGIN};
 
-/// KV namespace mapping meeting words to the Room Durable Object id (hex).
+/// KV namespace mapping meeting words to the Room Durable Object id (hex); also holds the
+/// owner's meeting index under [`meetings::KEY`].
 const MEETINGS: &str = "MEETINGS";
 /// Durable Object namespace of `RoomObject`.
 const ROOMS: &str = "ROOMS";
 /// Var naming the jurisdiction new rooms are pinned to; see [`Jurisdiction`].
 const ROOM_JURISDICTION: &str = "ROOM_JURISDICTION";
-/// Secret that `POST /api/new` requires as a bearer token (D7 in `docs/links`).
+/// Secret that `POST /api/new` and `GET /api/meetings` require as a bearer token (D7 in `docs/links`).
 const CREATE_SECRET: &str = "CREATE_SECRET";
 /// Upper bound for a meeting link's life; the room usually releases it much earlier.
 const MEETING_TTL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -117,6 +121,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     };
     Router::with_data(Config { jurisdiction })
         .post_async("/api/new", new_meeting)
+        .get_async("/api/meetings", past_meetings)
         .get_async("/api/meeting/:words", meeting_info)
         .get("/api/ice", |_, _| {
             Response::from_json(&IceServers {
@@ -131,15 +136,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 }
 
 async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
-    let Ok(secret) = ctx.secret(CREATE_SECRET) else {
-        console_error!("{CREATE_SECRET} is not set; nobody can create meetings");
-        return Response::error("meeting creation is not configured", 500);
-    };
-    if !is_bearer(
-        req.headers().get("Authorization")?.as_deref(),
-        &secret.to_string(),
-    ) {
-        return Response::error("unauthorized", 401);
+    if let Some(refusal) = refuse_non_owner(&req, &ctx)? {
+        return Ok(refusal);
     }
     let body = req.text().await?;
     let request: NewMeetingRequest = match serde_json::from_str(match body.trim() {
@@ -160,9 +158,11 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
         Some(jurisdiction) => rooms.unique_id_with_jurisdiction(jurisdiction.as_str())?,
     };
     let host_token = random::host_token()?;
+    let transcript = random::transcript_ref()?;
     let init = InitRoom {
         meeting: meeting.clone(),
         host_token: host_token.clone(),
+        transcript: transcript.clone(),
         recording_policy: request.recording,
     };
     let mut init_request = RequestInit::new();
@@ -186,11 +186,51 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
         .expiration_ttl(MEETING_TTL_SECS)
         .execute()
         .await?;
+    // Logged, not returned: the meeting exists and works without its index entry.
+    let entry = meetings::Entry {
+        meeting: meeting.clone(),
+        room: room.to_string(),
+        created_at: now(),
+        transcript,
+        ended_at: None,
+    };
+    if let Err(e) = meetings::update(&kv, |index| Some(meetings::added(index, entry))).await {
+        console_error!("adding {meeting:?} to the meeting index failed: {e}");
+    }
     Ok(Response::from_json(&NewMeeting {
         meeting,
         host_token,
     })?
     .with_status(201))
+}
+
+/// `GET /api/meetings`: the owner's last [`meetings::MAX_ENTRIES`] meetings, newest first, from
+/// the index in KV. The index is eventually consistent and changed by read-modify-write (see
+/// [`meetings`]), so a meeting created or ended in the last minute may be missing or not yet
+/// show as ended.
+async fn past_meetings(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+    if let Some(refusal) = refuse_non_owner(&req, &ctx)? {
+        return Ok(refusal);
+    }
+    let index = meetings::load(&ctx.kv(MEETINGS)?).await?;
+    Response::from_json(&meetings::listing(index))
+}
+
+/// The error response for a request without the owner's creation secret, or `None` for the
+/// owner (D7 in `docs/links`).
+fn refuse_non_owner(req: &Request, ctx: &RouteContext<Config>) -> Result<Option<Response>> {
+    let Ok(secret) = ctx.secret(CREATE_SECRET) else {
+        console_error!("{CREATE_SECRET} is not set; nobody can create or list meetings");
+        return Response::error("meeting creation is not configured", 500).map(Some);
+    };
+    if is_bearer(
+        req.headers().get("Authorization")?.as_deref(),
+        &secret.to_string(),
+    ) {
+        Ok(None)
+    } else {
+        Response::error("unauthorized", 401).map(Some)
+    }
 }
 
 async fn meeting_info(_req: Request, ctx: RouteContext<Config>) -> Result<Response> {
@@ -238,6 +278,11 @@ async fn room_stub(ctx: &RouteContext<Config>) -> Result<Option<worker::Stub>> {
             .id_from_string(&room)?
             .get_stub()?,
     ))
+}
+
+/// The Worker's clock.
+fn now() -> Millis {
+    Millis(Date::now().as_millis())
 }
 
 fn is_websocket_upgrade(req: &Request) -> Result<bool> {

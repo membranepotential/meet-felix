@@ -29,6 +29,7 @@ Self-hosted, serverless video meetings on Cloudflare, written in Rust with a fun
 
 ## Rules
 
+- One owner, one host ([D32](docs/architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)): the app has exactly one host, authenticated by one password; everyone else is a guest. Never add accounts, sign-up, roles beyond host/guest, or anything that lets other people host.
 - Core first ([D20](docs/core/README.md#d20-core-first-2026-10-09)): new behaviour goes into `meeting-core` as events/effects with tests; the worker and web shells only execute effects.
 - Recording state is part of `RoomState` and broadcast on every change; never add a recording path that bypasses it ([D15](docs/recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
 - Meeting ids are three short English words from `meeting-core::words`; they are ephemeral and recycled ([D6](docs/links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)).

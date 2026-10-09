@@ -16,6 +16,7 @@ Decisions on this page:
 - [D3: The browser runs a TypeScript and Svelte shell over the core as WASM (2026-10-09)](#d3-the-browser-runs-a-typescript-and-svelte-shell-over-the-core-as-wasm-2026-10-09)
 - [D4: The backend is Rust on Workers, with Durable Objects that hibernate (2026-10-09)](#d4-the-backend-is-rust-on-workers-with-durable-objects-that-hibernate-2026-10-09)
 - [D5: Pin data to the EU where Cloudflare allows it (2026-10-09)](#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)
+- [D32: One owner is the only host; everyone else is a guest (2026-10-09)](#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)
 
 Code: [`crates/meeting-core/`](../../crates/meeting-core/),
 [`crates/worker/`](../../crates/worker/), [`web/`](../../web/),
@@ -32,7 +33,9 @@ numbers; "unverified" marks claims without a primary source.
 
 ## Goal
 
-A self-hosted replacement for Google Meet for small meetings (2–10 people) that:
+A **personal** meeting app: one owner (Felix) is the only host, everyone
+else joins as a guest through a link ([D32](#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)).
+It replaces Google Meet for small meetings (2–10 people) and:
 
 - costs nothing while no meeting runs, and less per month than Google
   Workspace Business Standard (13.60 € net, ≈16.18 € gross per user; see
@@ -66,6 +69,9 @@ Terms used in all docs:
 
 ## Non-goals
 
+- **Not a product for other hosts.** There are no accounts, no sign-up, no
+  teams and no second host. Anyone who wants their own instance deploys
+  their own copy ([D32](#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)).
 - **No live captions.** The transcript arrives after the meeting. The
   research on live speech-to-text ([07](../research/07-live-transcription.md))
   informed the post-meeting design but is not built.
@@ -81,6 +87,40 @@ Terms used in all docs:
 - **No knock queue by default.** Rooms are open to anyone with the link; the
   host can lock the room, and late joiners then knock
   ([D6](../links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)).
+
+## D32: One owner is the only host; everyone else is a guest (2026-10-09)
+
+meet-felix is a personal meeting app. Exactly one person, the owner, can
+create meetings and act as host. Everyone else is a guest: they open a link,
+give a name, consent to recording, and join. There is no sign-up, no user
+database, no team, no second host, and no "host password" handed to anyone
+else.
+
+What follows from this, and is binding for every feature:
+
+- **Authentication is one password, the owner's.** It unlocks the index page
+  (new meeting, past meetings) and the "join as host" fallback on a meeting
+  page. The Worker checks it against the `CREATE_SECRET` secret and sets a
+  signed session cookie for that browser. Nothing else identifies anyone.
+- **Guests never authenticate.** A guest's identity is the name they type.
+  Guests cannot create, lock, record, admit, mute or end anything.
+- **The owner's browsers are the host.** A browser with a valid session joins
+  every meeting as host automatically; a browser without one can become the
+  host by entering the password. The core learns this from the shell as an
+  `owner` flag on each client event, not from a token the client holds.
+- **No multi-tenancy, ever.** Do not add accounts, roles beyond host and
+  guest, per-user storage, or anything that would make the app usable by
+  several hosts. Someone who wants their own meet-felix deploys their own
+  copy with their own password and Cloudflare account.
+- **Data belongs to the owner.** Past meetings, recordings and transcripts
+  are listed only behind the password; guests get exactly the transcript link
+  they are shown at the end ([D19](../recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09), [D26](../ui/README.md)).
+
+Why: the user said so on 2026-10-09 ("a private meeting app, me as the host
+and the only host, nobody else will use it as a host"). Building for one owner
+removes whole classes of work (accounts, permissions, billing, abuse) and keeps
+the cost model honest ([cost/](../cost/README.md)). It also replaces the
+earlier host-token design, where the creating browser held a secret.
 
 ## D1: Cloudflare is the only platform (2026-10-09)
 

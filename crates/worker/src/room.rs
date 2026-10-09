@@ -19,14 +19,14 @@ use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
 use worker::wasm_bindgen::JsCast;
 use worker::{
-    Date, DurableObject, Env, Method, Request, Response, Result, State, WebSocket,
+    DurableObject, Env, Method, Request, Response, Result, State, WebSocket,
     WebSocketIncomingMessage, WebSocketPair, WebSocketRequestResponsePair, console_error,
     console_log, console_warn, durable_object,
 };
 
 use crate::internal::{INFO, INIT, InitRoom, RoomInfo};
 use crate::record::{Attachment, Record, alarm_time, is_stale};
-use crate::{MEETINGS, is_websocket_upgrade, random, sfu};
+use crate::{MEETINGS, is_websocket_upgrade, meetings, now, random, sfu};
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
 /// (`setWebSocketAutoResponse` matches the raw string). Clients send it at least every
@@ -151,7 +151,7 @@ impl RoomObject {
         let (room, effects) = RoomState::new(
             init.meeting,
             init.host_token,
-            random::transcript_ref()?,
+            init.transcript,
             init.recording_policy,
             now(),
         );
@@ -300,6 +300,10 @@ impl RoomObject {
                     close(&ws, CLOSE_NORMAL, "meeting ended");
                 }
                 self.state.storage().delete_alarm().await?;
+                // Logged, not returned, like `ReleaseMeetingId`: the meeting has ended either way.
+                if let Err(e) = self.mark_ended().await {
+                    console_error!("marking the meeting ended in the index failed: {e}");
+                }
             }
             Effect::SfuNewSession { .. }
             | Effect::SfuPublish { .. }
@@ -340,6 +344,20 @@ impl RoomObject {
         let this = self.state.id().to_string();
         if kv.get(meeting.as_str()).text().await?.as_deref() == Some(this.as_str()) {
             kv.delete(meeting.as_str()).await?;
+        }
+        Ok(())
+    }
+
+    /// Marks this room's entry in the owner's meeting index ended.
+    async fn mark_ended(&self) -> Result<()> {
+        let this = self.state.id().to_string();
+        let now = now();
+        let stored = meetings::update(&self.env.kv(MEETINGS)?, |index| {
+            meetings::ended(index, &this, now)
+        })
+        .await?;
+        if !stored {
+            console_warn!("the meeting index has no running entry for room {this}");
         }
         Ok(())
     }
@@ -430,10 +448,6 @@ fn is_sfu_call(effect: &Effect) -> bool {
         | Effect::ReleaseMeetingId { .. }
         | Effect::EndMeeting => false,
     }
-}
-
-fn now() -> Millis {
-    Millis(Date::now().as_millis())
 }
 
 fn attachment(ws: &WebSocket) -> Result<Option<Attachment>> {

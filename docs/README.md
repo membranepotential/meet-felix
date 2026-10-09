@@ -7,11 +7,13 @@ the I/O. Meetings are recorded with everyone's consent and get a transcript
 afterwards. This folder holds why it is built this way, what it costs, how it
 is tested, and what changed when.
 
+**Read first:** meet-felix is a personal meeting app with one owner as the only host; everyone else is a guest ([D32](architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)). Do not build features for other hosts.
+
 ## Start here
 
 | Document | Read it for |
 |---|---|
-| [Design decisions](#design-decisions) | The decision records, D1–D31, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
+| [Design decisions](#design-decisions) | The decision records, D1–D32, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
 | [architecture/](architecture/README.md) | The cross-cutting decisions: platform, core and shells, browser stack, backend, EU location; plus goal, non-goals, component map, phases and risks. |
 | [cost/](cost/README.md) | What it costs per month and per meeting-hour, against Google Workspace. |
 | [DEVLOG.md](DEVLOG.md) | The running log, newest first: what changed, why, what's next. |
@@ -61,6 +63,7 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D29](ui/README.md#d29-a-shared-screen-keeps-people-in-a-column-on-desktops-and-in-round-chips-on-phones-2026-10-09) | A shared screen keeps people in a column on desktops and in round chips on phones | [ui/](ui/README.md) |
 | [D30](ui/README.md#d30-the-active-speaker-gets-a-fog-ring-and-level-bars-never-the-lamp-colour-2026-10-09) | The active speaker gets a fog ring and level bars, never the lamp colour | [ui/](ui/README.md) |
 | [D31](ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09) | The transcript page shows speaker-labelled paragraphs with wall-clock times | [ui/](ui/README.md) |
+| [D32](architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09) | One owner is the only host; everyone else is a guest | [architecture/](architecture/README.md) |
 
 ## Features with their own docs
 

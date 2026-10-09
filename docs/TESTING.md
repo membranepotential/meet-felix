@@ -13,7 +13,7 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
 | SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer); core SFU effects to replies | `cargo test -p sfu-api` | Exist |
 | Worker unit tests | Storage record, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules, `/api/new` input checks | `cargo test -p meet-worker` | Exist |
-| Worker spike scripts | The real `RoomObject` running the core under `wrangler dev`, with a mock SFU | `node crates/worker/spike/ws-clients.mjs` | Exists; covers the protocol end to end |
+| Worker spike scripts | The real `RoomObject` running the core under `wrangler dev`, with a mock SFU | `node crates/worker/spike/ws-clients.mjs` | Exists; covers the protocol end to end and the owner's meeting list |
 | Web checks | Types and build of the Svelte shell | `pnpm --filter web check`, `pnpm --filter web build` | Exist |
 | Device checklist | Real phones, tablets and desktop browsers | manual, phase 4 | Planned |
 | Deployed Worker checks | Hibernation and billing on Cloudflare itself | manual, dashboard | Planned |
@@ -83,8 +83,12 @@ credentials, `SFU_API_URL` pointing at the mock). It checks:
   back; a guest's kick refused;
 - resume: a new socket with the resume token keeps the participant id, the
   old socket is closed, and messages reach the new one;
-- `End`: everyone gets `Ended`, the sockets close, the next socket and the
-  meeting lookup get 404;
+- `End`: everyone gets `Ended` with the transcript token (the meeting was
+  recorded), the sockets close, the next socket and the meeting lookup get
+  404;
+- `GET /api/meetings`: 401 without or with a wrong secret; with it, the list
+  is newest first and shows the ended meeting with `ended: true` and the
+  transcript token from `Ended`;
 - with the mock SFU down, joining yields `Error{SfuUnavailable}` and the
   socket closes;
 - with `SPIKE_KEEPALIVE=1` (two more minutes): a socket that never pings is

@@ -184,6 +184,19 @@ const upgradeStatus = (meeting) =>
     "upgrade status",
   );
 
+const listMeetings = (secret = SECRET) =>
+  fetch(`${BASE}/api/meetings`, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
+/** The newest entry for `meeting` in `GET /api/meetings` once `done(entry)`, or the last seen. */
+const listedMeeting = async (meeting, done) => {
+  let entry;
+  for (const deadline = Date.now() + TIMEOUT_MS; Date.now() < deadline; await sleep(100)) {
+    const { meetings } = await (await listMeetings()).json();
+    entry = meetings.find((m) => m.meeting === meeting);
+    if (entry && done(entry)) break;
+  }
+  return entry;
+};
+
 const join = (client, fields) => client.send({ type: "join", consent: true, ...fields });
 const present = (state, id) => state.participants.some((p) => p.id === id);
 /** Resolves with the first mock SFU call matching `predicate`, or null after TIMEOUT_MS. */
@@ -369,14 +382,33 @@ async function main() {
 
   // End: everyone gets Ended, and the room refuses the next socket
   host.send({ type: "end" });
-  const ended = await Promise.all([host.gets("ended"), resumed.gets("ended")]);
-  check("End reaches everyone", ended.every(Boolean), ended.join(","));
+  const ended = await Promise.all([host, resumed].map((c) => c.take("ended").catch(() => null)));
+  check("End reaches everyone", ended.every(Boolean), ended.map(Boolean).join(","));
+  const transcript = ended[0]?.transcript;
+  check("End of a recorded meeting carries the transcript token", /^[0-9a-f]{32}$/.test(transcript ?? ""), transcript);
   const closes = await Promise.all([host.closed, resumed.closed].map((p) => withTimeout(p, "end close").catch(() => null)));
   check("every socket closes after End", closes.every((c) => c !== null), closes.map((c) => c?.code).join(","));
   const after = await upgradeStatus(meeting);
   check("the next socket is refused", after === 404 || after === 410, `status ${after}`);
   const gone = await fetch(`${BASE}/api/meeting/${meeting}`);
   check("the words are released", gone.status === 404, `status ${gone.status}`);
+
+  // Past meetings: owner-only, and the ended meeting is listed with its transcript token
+  check("GET /api/meetings without a secret -> 401", (await listMeetings("")).status === 401);
+  check("GET /api/meetings with a wrong secret -> 401", (await listMeetings("wrong")).status === 401);
+  const listing = await listMeetings();
+  const { meetings } = await listing.json();
+  check(
+    "GET /api/meetings with the secret -> newest first",
+    listing.status === 200 && meetings.every((m, i) => i === 0 || meetings[i - 1].createdAt >= m.createdAt),
+    `status ${listing.status}, ${meetings.length} meetings`,
+  );
+  const past = await listedMeeting(meeting, (m) => m.ended);
+  check(
+    "GET /api/meetings lists the meeting as ended with its transcript token",
+    past?.ended === true && past.transcript === transcript && typeof past.createdAt === "number",
+    JSON.stringify(past),
+  );
 
   // SFU down: joining fails with SfuUnavailable and the socket closes
   const second = await (await createMeeting({ recording: "hostDecides" })).json();
