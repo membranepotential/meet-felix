@@ -84,9 +84,11 @@ Rules that follow from the SFU limits:
 - Track names (2026-10-09): `mic-N`, `cam-N` and `screen-N`, where `N`
   counts the tracks published in this publish session. The core rejects a
   name already in use. Publishing a kind again replaces the old track on
-  every subscriber. Subscribers notice a turned-off track because it
-  stops delivering frames (the browser reports `mute`), and show the
-  participant's initials instead.
+  every subscriber. A tile shows video only while the room view lists
+  that kind in the participant's `tracks` and the subscriber holds a live
+  track for it; otherwise it shows the participant's initials. The browser's
+  `mute` event is not used: Chromium 153 does not raise it when RTP stops
+  (2026-10-09).
 - Unpublishing (2026-10-09): `ClientMsg::Unpublish { kind }` stops a track
   at once, so a turned-off camera does not stay listed until the SFU drops it
   after 30 idle seconds. The core closes the track on the publish session

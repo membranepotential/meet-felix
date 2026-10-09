@@ -20,12 +20,16 @@
 	/** The participant a host is about to remove; the confirmation dialog is open while set. */
 	let removing = $state.raw<ParticipantView | null>(null);
 
-	const received = (owner: ParticipantId, kind: TrackKind) =>
-		session.remote.get(trackKey({ owner, kind }))?.track ?? null;
-
-	/** A received track turned off by its publisher stays in place but stops delivering. */
-	const liveStream = (track: MediaStreamTrack | null) =>
-		track !== null && isLive(track) ? streamFor(track) : null;
+	/**
+	 * The stream of `p`'s `kind` track, or `null` to show the initials. The room view decides
+	 * whether `p` publishes `kind`, so a camera turned off switches the tile with the room's
+	 * `State`, before the SFU closes the received track.
+	 */
+	function remoteStream(p: ParticipantView, kind: TrackKind): MediaStream | null {
+		if (!p.tracks.includes(kind)) return null;
+		const track = session.remote.get(trackKey({ owner: p.id, kind }))?.track;
+		return track && isLive(track) ? streamFor(track) : null;
+	}
 
 	let tiles: TileModel[] = $derived.by(() => {
 		const self: TileModel[] = [
@@ -55,15 +59,15 @@
 			});
 		}
 		const others = session.others.flatMap((p): TileModel[] => {
-			const camera = received(p.id, 'video');
-			const screen = liveStream(received(p.id, 'screen'));
+			const camera = remoteStream(p, 'video');
+			const screen = remoteStream(p, 'screen');
 			const base = { name: p.name, self: false, host: p.role === 'host', actions: null };
 			return [
 				{
 					...base,
 					key: String(p.id),
 					source: 'camera',
-					stream: liveStream(camera),
+					stream: camera,
 					micOn: p.tracks.includes('audio'),
 					layerTrack: camera ? { owner: p.id, kind: 'video' } : null,
 					actions: session.isHost
@@ -93,8 +97,8 @@
 
 	let audio = $derived(
 		session.others.flatMap((p) => {
-			const track = received(p.id, 'audio');
-			return track ? [{ key: p.id, stream: streamFor(track) }] : [];
+			const stream = remoteStream(p, 'audio');
+			return stream ? [{ key: p.id, stream }] : [];
 		})
 	);
 

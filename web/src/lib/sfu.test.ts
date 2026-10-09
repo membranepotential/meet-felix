@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { NO_OUTGOING, orderVideoCodecs, planPublish, Publisher, trackName } from './sfu.ts';
-import type { ClientMsg, TrackKind } from './protocol.ts';
+import {
+	NO_OUTGOING,
+	orderVideoCodecs,
+	planPublish,
+	Publisher,
+	Subscriber,
+	trackName,
+	type RemoteTracks
+} from './sfu.ts';
+import type { ClientMsg, Sdp, TrackKind, TrackRef } from './protocol.ts';
 
 describe('orderVideoCodecs', () => {
 	it('puts H.264 first, then VP8, keeps helpers and drops VP9 and AV1', () => {
@@ -126,5 +134,62 @@ describe('Publisher', () => {
 		expect(sent.at(-1)).toEqual({ type: 'unpublish', kind: 'video' });
 		publisher.retryFailed();
 		expect(sent).toHaveLength(2);
+	});
+});
+
+/** The part of `RTCPeerConnection` the subscriber uses; each offer brings the transceivers `mids`. */
+function fakeSubscribePeerConnection() {
+	let mids: string[] = [];
+	const pc = {
+		localDescription: null as { sdp: string } | null,
+		setRemoteDescription: vi.fn(() => Promise.resolve()),
+		getTransceivers: () =>
+			mids.map((mid) => ({ mid, receiver: { track: { id: `track-${mid}` } } })),
+		createAnswer: () => Promise.resolve({ type: 'answer', sdp: 'answer' }),
+		setLocalDescription: () => {
+			pc.localDescription = { sdp: 'answer' };
+			return Promise.resolve();
+		},
+		close: () => {}
+	};
+	const offerMids = (next: string[]) => (mids = next);
+	return { pc, offerMids };
+}
+
+describe('Subscriber', () => {
+	function setup() {
+		const { pc, offerMids } = fakeSubscribePeerConnection();
+		const answers: Sdp[] = [];
+		const updates: { tracks: RemoteTracks; delivered: TrackRef[] }[] = [];
+		const subscriber = new Subscriber(
+			pc as unknown as RTCPeerConnection,
+			(sdp) => answers.push(sdp),
+			(tracks, delivered) => updates.push({ tracks, delivered })
+		);
+		return { subscriber, pc, offerMids, answers, updates };
+	}
+
+	it('answers an offer that carries no track', async () => {
+		const { subscriber, pc, answers, updates } = setup();
+		subscriber.offer('offer', []);
+		await vi.waitFor(() => expect(answers).toEqual(['answer']));
+		expect(pc.setRemoteDescription).toHaveBeenCalledWith({ type: 'offer', sdp: 'offer' });
+		expect(updates).toEqual([{ tracks: new Map(), delivered: [] }]);
+	});
+
+	it("drops an unpublished kind but keeps the owner's other tracks", async () => {
+		const { subscriber, offerMids, updates } = setup();
+		const audio: TrackRef = { owner: 2, kind: 'audio' };
+		const video: TrackRef = { owner: 2, kind: 'video' };
+		offerMids(['0', '1']);
+		subscriber.offer('offer', [
+			{ mid: '0', track: audio },
+			{ mid: '1', track: video }
+		]);
+		await vi.waitFor(() => expect(updates).toHaveLength(1));
+		subscriber.retain([audio]);
+		expect([...(updates.at(-1)?.tracks.keys() ?? [])]).toEqual(['2:audio']);
+		subscriber.retain([audio]);
+		expect(updates).toHaveLength(2);
 	});
 });

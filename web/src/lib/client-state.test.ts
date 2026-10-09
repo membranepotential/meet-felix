@@ -86,7 +86,9 @@ describe('reduce', () => {
 		expect(publish.map((c) => c.kind)).toEqual(['publish-rejected', 'toast']);
 		const host = reduce(INITIAL, { type: 'error', code: 'invalidHostToken' })[1];
 		expect(host.map((c) => c.kind)).toEqual(['rejoin-as-guest', 'toast']);
-		expect(reduce(welcomed(), { type: 'error', code: 'notSubscribed' })[1]).toEqual([]);
+		expect(reduce(welcomed(), { type: 'error', code: 'notSubscribed' })[1]).toEqual([
+			{ kind: 'layer-refused' }
+		]);
 		const unpublish = reduce(welcomed(), { type: 'error', code: 'notPublished' })[1];
 		expect(unpublish.map((c) => c.kind)).toEqual(['warn']);
 	});

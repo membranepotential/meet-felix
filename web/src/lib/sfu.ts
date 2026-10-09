@@ -15,7 +15,6 @@ import {
 	type ClientMsg,
 	type IncomingTrack,
 	type LocalTrack,
-	type ParticipantId,
 	type Rid,
 	type Sdp,
 	type TrackKind,
@@ -327,9 +326,13 @@ export class Subscriber {
 			});
 	}
 
-	/** Drops the tracks of participants no longer in the room. */
-	retain(owners: readonly ParticipantId[]): void {
-		const kept = new Map([...this.#tracks].filter(([, t]) => owners.includes(t.ref.owner)));
+	/**
+	 * Drops the tracks the room no longer lists as `published`: participants who left and
+	 * kinds unpublished. The room's `State` comes before the SFU closes the tracks.
+	 */
+	retain(published: readonly TrackRef[]): void {
+		const keys = new Set(published.map(trackKey));
+		const kept = new Map([...this.#tracks].filter(([key]) => keys.has(key)));
 		if (kept.size === this.#tracks.size) return;
 		this.#tracks = kept;
 		this.#onTracks(kept, []);
@@ -342,22 +345,28 @@ export class Subscriber {
 	async #apply(sdp: Sdp, incoming: IncomingTrack[]): Promise<void> {
 		await this.#pc.setRemoteDescription({ type: 'offer', sdp });
 		const byMid = new Map(this.#pc.getTransceivers().map((t) => [t.mid, t]));
-		const tracks = new Map(this.#tracks);
-		const delivered: TrackRef[] = [];
-		for (const { mid, track: ref } of incoming) {
+		// An offer may carry no track the room could pull (its publisher is not connected
+		// yet); the SFU still waits for the answer.
+		const arrived = incoming.flatMap(({ mid, track: ref }): RemoteTrack[] => {
 			const transceiver = byMid.get(mid);
-			if (!transceiver) continue;
-			// The SFU may reuse a transceiver for another track: one entry per mid.
-			for (const [key, t] of tracks) if (t.mid === mid) tracks.delete(key);
-			tracks.set(trackKey(ref), { ref, mid, track: transceiver.receiver.track });
-			delivered.push(ref);
-		}
+			return transceiver ? [{ ref, mid, track: transceiver.receiver.track }] : [];
+		});
 		await this.#pc.setLocalDescription(await this.#pc.createAnswer());
 		const answer = this.#pc.localDescription?.sdp;
 		if (!answer) throw new Error('subscribe answer has no local description');
 		this.#sendAnswer(answer);
+		// Applied to the tracks as they are now: `retain` may have dropped some meanwhile.
+		const tracks = new Map(this.#tracks);
+		for (const remote of arrived) {
+			// The SFU may reuse a transceiver for another track: one entry per mid.
+			for (const [key, t] of tracks) if (t.mid === remote.mid) tracks.delete(key);
+			tracks.set(trackKey(remote.ref), remote);
+		}
 		this.#tracks = tracks;
-		this.#onTracks(tracks, delivered);
+		this.#onTracks(
+			tracks,
+			arrived.map((t) => t.ref)
+		);
 	}
 }
 

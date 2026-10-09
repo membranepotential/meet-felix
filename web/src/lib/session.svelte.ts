@@ -148,8 +148,10 @@ export class Session {
 		this.state = next;
 		for (const command of commands) this.#run(command);
 		if (next.stage.kind === 'in') {
-			const owners = next.stage.room.participants.map((p) => p.id);
-			void this.#link?.then(({ subscriber }) => subscriber.retain(owners));
+			const published = next.stage.room.participants.flatMap((p) =>
+				p.tracks.map((kind) => ({ owner: p.id, kind }))
+			);
+			void this.#link?.then(({ subscriber }) => subscriber.retain(published));
 		}
 	}
 
@@ -184,6 +186,9 @@ export class Session {
 				return;
 			case 'subscribe-offer':
 				void this.#link?.then(({ subscriber }) => subscriber.offer(command.sdp, command.tracks));
+				return;
+			case 'layer-refused':
+				this.layers.notSubscribed();
 				return;
 			case 'mute-mic':
 				this.#media.mute();

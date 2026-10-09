@@ -56,6 +56,8 @@ export type Command =
 	| { kind: 'publish-answer'; sdp: Sdp }
 	| { kind: 'publish-rejected' }
 	| { kind: 'subscribe-offer'; sdp: Sdp; tracks: IncomingTrack[] }
+	/** The room refused a `SetLayer` for a track it does not deliver yet: ask again later. */
+	| { kind: 'layer-refused' }
 	| { kind: 'mute-mic' }
 	/** The stored host token is not this meeting's: forget it and join again as a guest. */
 	| { kind: 'rejoin-as-guest' }
@@ -152,6 +154,7 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			const commands: Command[] = [];
 			if (PUBLISH_ERRORS.has(msg.code)) commands.push({ kind: 'publish-rejected' });
 			if (msg.code === 'invalidHostToken') commands.push({ kind: 'rejoin-as-guest' });
+			if (msg.code === 'notSubscribed') commands.push({ kind: 'layer-refused' });
 			// An `Unpublish` that crossed a reconnect: the room no longer had the track.
 			if (msg.code === 'notPublished') {
 				commands.push({ kind: 'warn', text: 'the room had no track to unpublish' });

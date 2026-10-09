@@ -1,26 +1,24 @@
 /**
- * Reactive views of remote tracks. When its publisher turns the camera off or stops sharing,
- * a received track stops delivering frames (the browser reports `mute`) or ends, until the
- * room renegotiates the subscription. Tiles show video only while the track is live.
+ * Reactive views of remote tracks. Whether a participant publishes a kind comes from the room
+ * view (`ParticipantView.tracks`), not from the track: Chromium does not raise `mute` on a
+ * received track when its publisher stops sending, so a stopped camera would keep a frozen
+ * frame. A received track that ends (its transceiver stopped) stops showing at once.
  */
 import { createSubscriber } from 'svelte/reactivity';
 
 const readers = new WeakMap<MediaStreamTrack, () => boolean>();
 
-/** Whether `track` delivers media now. Reactive: re-reads on `mute`, `unmute` and `ended`. */
+/** Whether `track` has not ended. Reactive: re-reads on `ended`. */
 export function isLive(track: MediaStreamTrack): boolean {
 	let read = readers.get(track);
 	if (!read) {
 		const subscribe = createSubscriber((update) => {
-			const events = ['mute', 'unmute', 'ended'] as const;
-			for (const e of events) track.addEventListener(e, update);
-			return () => {
-				for (const e of events) track.removeEventListener(e, update);
-			};
+			track.addEventListener('ended', update);
+			return () => track.removeEventListener('ended', update);
 		});
 		read = () => {
 			subscribe();
-			return track.readyState === 'live' && !track.muted;
+			return track.readyState === 'live';
 		};
 		readers.set(track, read);
 	}

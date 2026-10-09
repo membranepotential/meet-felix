@@ -10,6 +10,8 @@ export const QUARTER_BELOW_PX = 240;
 /** Tiles narrower than this (CSS pixels) get the half-resolution layer; wider ones get full. */
 export const HALF_BELOW_PX = 640;
 export const LAYER_DEBOUNCE_MS = 400;
+/** How long to wait before asking again after the room refused a `SetLayer`. */
+export const LAYER_RETRY_MS = 1_000;
 
 /** The layer a new subscription starts at (D11). */
 export const DEFAULT_LAYER: Rid = 'f';
@@ -18,8 +20,11 @@ export const DEFAULT_LAYER: Rid = 'f';
 export const layerFor = (width: number): Rid =>
 	width < QUARTER_BELOW_PX ? 'q' : width < HALF_BELOW_PX ? 'h' : DEFAULT_LAYER;
 
-/** What the room was last asked for, per track key; absent means `DEFAULT_LAYER`. */
-export type SentLayers = ReadonlyMap<string, Rid>;
+/**
+ * What the room was last asked for, per track key; absent means `DEFAULT_LAYER`, and `null`
+ * means the request may have been refused, so the layer is unknown and asked for again.
+ */
+export type SentLayers = ReadonlyMap<string, Rid | null>;
 
 /**
  * Pure: the `SetLayer` requests that bring each received track to the layer its tile needs.
@@ -34,7 +39,7 @@ export function layerChanges(
 	return [...widths]
 		.filter(([key]) => received.has(key))
 		.map(([key, { track, width }]) => ({ key, track, rid: layerFor(width) }))
-		.filter(({ key, rid }) => (sent.get(key) ?? DEFAULT_LAYER) !== rid)
+		.filter(({ key, rid }) => (sent.has(key) ? sent.get(key) : DEFAULT_LAYER) !== rid)
 		.map(({ track, rid }) => ({ track, rid }));
 }
 
@@ -43,7 +48,7 @@ export class LayerControl {
 	readonly #send: (track: TrackRef, rid: Rid) => void;
 	readonly #widths = new Map<string, { track: TrackRef; width: number }>();
 	readonly #received = new Set<string>();
-	readonly #sent = new Map<string, Rid>();
+	readonly #sent = new Map<string, Rid | null>();
 	#timer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(send: (track: TrackRef, rid: Rid) => void) {
@@ -61,7 +66,10 @@ export class LayerControl {
 		this.#widths.delete(trackKey(track));
 	}
 
-	/** A subscribe negotiation delivered `tracks`: they start at the SFU default again. */
+	/**
+	 * A subscribe negotiation delivered `tracks`: they start at the SFU default again, and the
+	 * layer their tiles need is sent anew, including one the room refused before.
+	 */
 	received(tracks: readonly TrackRef[]): void {
 		for (const track of tracks) {
 			const key = trackKey(track);
@@ -71,13 +79,24 @@ export class LayerControl {
 		this.#schedule();
 	}
 
+	/**
+	 * The room refused a `SetLayer` (`ErrorCode::NotSubscribed`): it was still negotiating the
+	 * track. The error names no track, so every layer sent so far becomes unknown and is sent
+	 * again on the next delivery, or after `LAYER_RETRY_MS`. Repeating a layer the room
+	 * already has changes nothing there.
+	 */
+	notSubscribed(): void {
+		for (const key of this.#sent.keys()) this.#sent.set(key, null);
+		this.#schedule(LAYER_RETRY_MS);
+	}
+
 	dispose(): void {
 		clearTimeout(this.#timer);
 	}
 
-	#schedule(): void {
+	#schedule(delay = LAYER_DEBOUNCE_MS): void {
 		clearTimeout(this.#timer);
-		this.#timer = setTimeout(() => this.#flush(), LAYER_DEBOUNCE_MS);
+		this.#timer = setTimeout(() => this.#flush(), delay);
 	}
 
 	#flush(): void {
