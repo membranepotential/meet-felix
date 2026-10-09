@@ -127,8 +127,8 @@ earlier host-token design, where the creating browser held a secret.
 
 Everything runs on Cloudflare: Workers and Durable Objects for signaling and
 room state, Realtime SFU and TURN for media, R2 for recordings and
-transcripts, KV for the meeting-id lookup, Workers AI for transcription, and
-Access for the owner's login. That is one account, one bill and one deploy
+transcripts, KV for the meeting-id lookup, and Workers AI for transcription.
+That is one account, one bill and one deploy
 tool (`wrangler`).
 
 The media path decides this. A meeting needs a server that receives and
