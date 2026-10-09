@@ -89,8 +89,7 @@
 	</div>
 
 	<form onsubmit={submit}>
-		<p class="meeting">{meeting}</p>
-		<h1>Ready to join?</h1>
+		<h1 class="meeting">{meeting}</h1>
 
 		{#if media.error}
 			<div class="error" role="alert">
@@ -113,32 +112,36 @@
 			/>
 		</label>
 
-		{#if media.devices.microphones.length > 0}
-			<label class="field">
-				<span>Microphone</span>
-				<select
-					value={media.tracks.audio?.getSettings().deviceId ?? media.choice.microphone ?? ''}
-					onchange={(e) => media.selectMicrophone(e.currentTarget.value)}
-				>
-					{#each media.devices.microphones as device (device.id)}
-						<option value={device.id}>{device.label}</option>
-					{/each}
-				</select>
-			</label>
-		{/if}
-
-		{#if media.devices.cameras.length > 0}
-			<label class="field">
-				<span>Camera</span>
-				<select
-					value={media.tracks.video?.getSettings().deviceId ?? media.choice.camera ?? ''}
-					onchange={(e) => media.selectCamera(e.currentTarget.value)}
-				>
-					{#each media.devices.cameras as device (device.id)}
-						<option value={device.id}>{device.label}</option>
-					{/each}
-				</select>
-			</label>
+		{#if media.devices.microphones.length > 0 || media.devices.cameras.length > 0}
+			<details class="devices">
+				<summary>Microphone and camera</summary>
+				{#if media.devices.microphones.length > 0}
+					<label class="field">
+						<span>Microphone</span>
+						<select
+							value={media.tracks.audio?.getSettings().deviceId ?? media.choice.microphone ?? ''}
+							onchange={(e) => media.selectMicrophone(e.currentTarget.value)}
+						>
+							{#each media.devices.microphones as device (device.id)}
+								<option value={device.id}>{device.label}</option>
+							{/each}
+						</select>
+					</label>
+				{/if}
+				{#if media.devices.cameras.length > 0}
+					<label class="field">
+						<span>Camera</span>
+						<select
+							value={media.tracks.video?.getSettings().deviceId ?? media.choice.camera ?? ''}
+							onchange={(e) => media.selectCamera(e.currentTarget.value)}
+						>
+							{#each media.devices.cameras as device (device.id)}
+								<option value={device.id}>{device.label}</option>
+							{/each}
+						</select>
+					</label>
+				{/if}
+			</details>
 		{/if}
 
 		{#if lookup.kind === 'failed'}
@@ -153,8 +156,8 @@
 					This meeting is recorded
 				</p>
 				<p>
-					Everyone’s voice is recorded and turned into a written transcript after the meeting.
-					Everyone in the meeting gets the transcript link at the end. Video is not recorded.
+					Voices become a written transcript that everyone in the meeting gets. Video is not
+					recorded.
 				</p>
 			</div>
 		{:else if policy === 'hostDecides'}
@@ -164,13 +167,15 @@
 			</p>
 		{/if}
 
-		<button class="button primary join" type="submit" disabled={!canJoin}>
-			{lookup.kind === 'loading'
-				? 'Checking the meeting…'
-				: recorded
-					? 'Join and accept recording'
-					: 'Join'}
-		</button>
+		<div class="join-bar">
+			<button class="button primary join" type="submit" disabled={!canJoin}>
+				{lookup.kind === 'loading'
+					? 'Checking the meeting…'
+					: recorded
+						? 'Join and accept recording'
+						: 'Join'}
+			</button>
+		</div>
 	</form>
 </main>
 
@@ -186,10 +191,23 @@
 		padding: var(--gutter);
 	}
 
+	/* Phones: one column; the join button stays at the bottom, in thumb reach. */
 	@media (max-width: 760px) {
 		main {
 			grid-template-columns: 1fr;
-			align-items: start;
+			grid-template-rows: auto 1fr;
+			align-items: stretch;
+			gap: 1rem;
+			padding-top: calc(var(--gutter) + env(safe-area-inset-top));
+			padding-bottom: 0;
+		}
+
+		.join-bar {
+			position: sticky;
+			bottom: 0;
+			margin-top: auto;
+			padding: 0.75rem 0 calc(var(--gutter) + env(safe-area-inset-bottom));
+			background: linear-gradient(to top, var(--lake) 75%, transparent);
 		}
 	}
 
@@ -203,8 +221,8 @@
 
 	@media (max-width: 760px) and (orientation: portrait) {
 		.preview {
-			aspect-ratio: 4 / 5;
-			max-height: 52dvh;
+			aspect-ratio: auto;
+			height: min(42dvh, 120vw);
 			width: 100%;
 		}
 	}
@@ -255,19 +273,31 @@
 	}
 
 	form {
-		display: grid;
+		display: flex;
+		flex-direction: column;
 		gap: 1.25rem;
 	}
 
-	.meeting {
+	h1.meeting {
 		color: var(--lichen);
+		font-size: var(--step-0);
 		font-weight: 650;
+		line-height: 1.5;
 	}
 
-	h1 {
-		font-size: var(--step-2);
-		line-height: 1.15;
-		margin-top: -0.75rem;
+	.devices summary {
+		padding: 0.625rem 0;
+		color: var(--lichen);
+		font-size: var(--step--1);
+		cursor: pointer;
+	}
+
+	.devices[open] summary {
+		margin-bottom: 0.5rem;
+	}
+
+	.devices .field + .field {
+		margin-top: 1rem;
 	}
 
 	.field {
@@ -334,5 +364,7 @@
 
 	.join {
 		width: 100%;
+		min-height: 64px;
+		font-size: var(--step-1);
 	}
 </style>

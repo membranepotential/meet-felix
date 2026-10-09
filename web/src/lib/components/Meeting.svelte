@@ -1,5 +1,7 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import type { LocalMedia } from '../local-media.svelte.ts';
+	import { AudioLevels } from '../media/audio-levels.svelte.ts';
 	import { isLive, streamFor } from '../media/remote.ts';
 	import { playAudio } from '../media/video.ts';
 	import {
@@ -16,6 +18,11 @@
 
 	let { meeting, media, session }: { meeting: MeetingId; media: LocalMedia; session: Session } =
 		$props();
+
+	/** Voice levels for the speaking ring, keyed like the camera tiles. */
+	const SELF = 'self';
+	const levels = new AudioLevels();
+	const levelOf = (key: string) => levels.levels[key] ?? 0;
 
 	/** The participant a host is about to remove; the confirmation dialog is open while set. */
 	let removing = $state.raw<ParticipantView | null>(null);
@@ -34,13 +41,14 @@
 	let tiles: TileModel[] = $derived.by(() => {
 		const self: TileModel[] = [
 			{
-				key: 'self',
+				key: SELF,
 				name: session.me?.name ?? 'You',
 				self: true,
 				host: session.isHost,
 				source: 'camera',
 				stream: media.cameraStream,
 				micOn: media.micOn,
+				level: () => levelOf(SELF),
 				layerTrack: null,
 				actions: null
 			}
@@ -54,6 +62,7 @@
 				source: 'screen',
 				stream: media.screenStream,
 				micOn: true,
+				level: () => 0,
 				layerTrack: null,
 				actions: null
 			});
@@ -69,6 +78,7 @@
 					source: 'camera',
 					stream: camera,
 					micOn: p.tracks.includes('audio'),
+					level: () => levelOf(String(p.id)),
 					layerTrack: camera ? { owner: p.id, kind: 'video' } : null,
 					actions: session.isHost
 						? {
@@ -86,6 +96,7 @@
 								source: 'screen' as const,
 								stream: screen,
 								micOn: true,
+								level: () => 0,
 								layerTrack: null
 							}
 						]
@@ -102,8 +113,24 @@
 		})
 	);
 
+	/** Every voice to measure: our microphone and each received audio track. */
+	let voices: ReadonlyMap<string, MediaStreamTrack> = $derived(
+		new Map([
+			...(media.tracks.audio ? [[SELF, media.tracks.audio] as const] : []),
+			...audio.flatMap(({ key, stream }) =>
+				stream.getAudioTracks().map((track) => [String(key), track] as const)
+			)
+		])
+	);
+
+	// Web Audio lives outside Svelte: keep its meters in step with the tracks.
+	$effect(() => levels.sync(voices));
+	onMount(() => () => levels.dispose());
+
 	/** A shared screen gets the large tile. */
 	let featured = $derived(tiles.find((t) => t.source === 'screen') ?? null);
+
+	let noticeCount = $derived(session.knocking.length + session.toasts.items.length);
 
 	let connectionNote = $derived.by(() => {
 		const c = session.connection;
@@ -145,7 +172,8 @@
 		<audio {@attach playAudio(stream)}></audio>
 	{/each}
 
-	<div class="notices" aria-live="polite">
+	<!-- In the layout flow above the bar, so notices never cover tiles or their buttons. -->
+	<div class={['notices', noticeCount > 0 && 'showing']} aria-live="polite">
 		{#each session.knocking as knock (knock.id)}
 			<div class="toast knock">
 				<p>{knock.name} wants to join</p>
@@ -197,7 +225,7 @@
 <style>
 	.meeting {
 		display: grid;
-		grid-template-rows: auto minmax(0, 1fr) auto;
+		grid-template-rows: auto minmax(0, 1fr) auto auto;
 		height: 100dvh;
 		overflow: hidden;
 	}
@@ -258,32 +286,31 @@
 	}
 
 	.notices {
-		position: fixed;
-		top: calc(3.75rem + env(safe-area-inset-top));
-		left: 50%;
-		translate: -50% 0;
 		display: grid;
+		justify-items: center;
 		gap: 0.5rem;
-		width: min(26rem, calc(100vw - 32px));
-		z-index: 10;
-		pointer-events: none;
+		padding: 0 var(--gutter);
+	}
+
+	.notices.showing {
+		padding-top: 0.75rem;
+	}
+
+	.notices > :global(*) {
+		width: min(26rem, 100%);
 	}
 
 	.toast {
 		padding: 0.75rem 1rem;
 		border-radius: var(--radius-s);
 		background: var(--water);
-		box-shadow:
-			inset 0 0 0 1px var(--reed),
-			0 8px 24px rgb(0 0 0 / 0.35);
-		pointer-events: auto;
+		box-shadow: inset 0 0 0 1px var(--reed);
 	}
 
 	.toast.alert {
 		box-shadow:
 			inset 3px 0 0 var(--signal),
-			inset 0 0 0 1px var(--reed),
-			0 8px 24px rgb(0 0 0 / 0.35);
+			inset 0 0 0 1px var(--reed);
 	}
 
 	.knock {

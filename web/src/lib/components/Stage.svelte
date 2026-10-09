@@ -21,13 +21,26 @@
 </script>
 
 <div class="stage" bind:clientWidth={width} bind:clientHeight={height}>
-	{#if featured}
-		<div class={['spotlight', landscape ? 'beside' : 'below']}>
+	{#if featured && landscape}
+		<div class="spotlight beside">
 			<div class="featured"><Tile tile={featured} {layers} /></div>
 			{#if rest.length > 0}
 				<ul class="strip" aria-label="Other participants">
 					{#each rest as tile (tile.key)}
-						<li><Tile {tile} {layers} compact /></li>
+						<li><Tile {tile} {layers} variant="strip" /></li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+	{:else if featured}
+		<div class="spotlight below">
+			<div class="featured">
+				<div class="screen-box"><Tile tile={featured} {layers} /></div>
+			</div>
+			{#if rest.length > 0}
+				<ul class="chips" aria-label="Other participants">
+					{#each rest as tile (tile.key)}
+						<li><Tile {tile} {layers} variant="chip" /></li>
 					{/each}
 				</ul>
 			{/if}
@@ -94,23 +107,35 @@
 		aspect-ratio: 16 / 9;
 	}
 
-	/* Portrait: big tile on top, a scrolling row of small tiles below. */
+	/* Portrait (phones): the screen as wide as the stage, faces as round chips below it. */
 	.spotlight.below {
-		--strip: clamp(5.5rem, 16vh, 8rem);
-		grid-template-rows: minmax(0, 1fr) var(--strip);
+		grid-template-rows: minmax(0, 1fr) auto;
 	}
 
-	.spotlight.below .strip {
+	.spotlight.below .featured {
 		display: grid;
-		grid-auto-flow: column;
-		grid-auto-columns: max-content;
-		gap: 8px;
+		align-items: center;
+	}
+
+	/* A 16:9 box, so the shared screen is not a thin band inside a tall tile. */
+	.screen-box {
+		width: 100%;
+		max-height: 100%;
+		aspect-ratio: 16 / 9;
+	}
+
+	.chips {
+		display: flex;
+		justify-content: safe center;
+		gap: 10px;
+		padding: 4px 2px 8px;
 		overflow-x: auto;
 	}
 
-	.spotlight.below .strip li {
-		width: calc(var(--strip) * 3 / 4);
-		height: var(--strip);
+	.chips li {
+		flex: none;
+		width: 64px;
+		height: 64px;
 	}
 
 	.featured {

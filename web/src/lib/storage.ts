@@ -5,8 +5,11 @@
 import type { HostToken, MeetingId } from './protocol.ts';
 
 const DISPLAY_NAME = 'meet-felix:name';
-/** The Worker's create secret, entered once by the owner on the start page. */
-const CREATE_SECRET = 'meet-felix:create-secret';
+/**
+ * Where earlier versions kept the Worker's create secret. The owner's password manager fills
+ * it now; nothing stores it, and `dropStoredCreateSecret` removes the old copy.
+ */
+const LEGACY_CREATE_SECRET = 'meet-felix:create-secret';
 const hostTokenKey = (meeting: MeetingId) => `meet-felix:host:${meeting}`;
 
 function read(key: string): string | null {
@@ -36,9 +39,7 @@ function remove(key: string): void {
 export const loadDisplayName = (): string => read(DISPLAY_NAME) ?? '';
 export const saveDisplayName = (name: string): void => write(DISPLAY_NAME, name);
 
-export const loadCreateSecret = (): string | null => read(CREATE_SECRET);
-export const saveCreateSecret = (secret: string): void => write(CREATE_SECRET, secret);
-export const forgetCreateSecret = (): void => remove(CREATE_SECRET);
+export const dropStoredCreateSecret = (): void => remove(LEGACY_CREATE_SECRET);
 
 /**
  * Meeting words are recycled, so a stored token may belong to an earlier meeting with the

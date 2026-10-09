@@ -78,9 +78,18 @@ successful create; that goes.
 Why "Password" and not "Create secret": "Create secret" is the system's word;
 a password manager offers to fill a field labelled "Password" more reliably.
 
-Why not remember it: nothing secret stays in the browser's storage, so a
-shared or lost device holds no password. The cost is one autofill tap per
-meeting (mockup question H1, option "ask every time").
+Why not remember it: the password itself never stays in the browser's
+storage, so a shared or lost device holds no password. The cost is one
+autofill tap (mockup question H1, option "ask every time").
+
+Changed on 2026-10-09, same day: the user then asked for a login-first index
+page. Entering the password now creates an owner session, a signed, HttpOnly
+cookie valid for 30 days that the Worker issues (`POST /api/login`) and
+checks on the owner routes and on the WebSocket upgrade, where it makes the
+socket the host ([D32](../architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)).
+So one device asks for the password once a month, not per meeting; the
+password is still never stored, only the session cookie is. A lost device
+is handled by changing the password, which invalidates every session.
 
 ## D25: The start page has one recording switch, shows the words on one line, and ends in Join now (2026-10-09)
 

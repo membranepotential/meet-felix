@@ -1,13 +1,10 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { createMeeting, type ApiError, type NewMeeting } from '#lib/api.ts';
 	import CopyButton from '#lib/components/CopyButton.svelte';
-	import type { RecordingPolicy } from '#lib/protocol.ts';
-	import {
-		forgetCreateSecret,
-		loadCreateSecret,
-		saveCreateSecret,
-		saveHostToken
-	} from '#lib/storage.ts';
+	import PasswordField from '#lib/components/PasswordField.svelte';
+	import ShareButton from '#lib/components/ShareButton.svelte';
+	import { dropStoredCreateSecret, saveHostToken } from '#lib/storage.ts';
 
 	type HostState =
 		| { kind: 'idle' }
@@ -16,30 +13,24 @@
 		| { kind: 'failed'; error: ApiError };
 
 	let hostState = $state.raw<HostState>({ kind: 'idle' });
-	/** The Worker's create secret; asked for once, then kept in this browser. */
-	let secret = $state(loadCreateSecret() ?? '');
-	let askSecret = $state(loadCreateSecret() === null);
-	let policy = $state<RecordingPolicy>('fromStart');
+	/** Typed or filled by the password manager each time; never stored. */
+	let password = $state('');
+	/** On: `fromStart`. Off: `hostDecides`. */
+	let record = $state(true);
 
-	const origin = window.location.host;
+	onMount(dropStoredCreateSecret);
 
 	async function start(event: SubmitEvent) {
 		event.preventDefault();
-		const key = secret.trim();
+		const key = password.trim();
 		if (key === '') return;
 		hostState = { kind: 'creating' };
-		const result = await createMeeting(key, policy);
+		const result = await createMeeting(key, record ? 'fromStart' : 'hostDecides');
 		if (!result.ok) {
-			if (result.error.kind === 'unauthorized') {
-				forgetCreateSecret();
-				secret = '';
-				askSecret = true;
-			}
 			hostState = { kind: 'failed', error: result.error };
 			return;
 		}
-		saveCreateSecret(key);
-		askSecret = false;
+		password = '';
 		saveHostToken(result.value.meeting, result.value.hostToken);
 		hostState = { kind: 'created', meeting: result.value };
 	}
@@ -47,7 +38,7 @@
 	function describe(error: ApiError): string {
 		switch (error.kind) {
 			case 'unauthorized':
-				return 'That create secret is wrong. Only the owner can start meetings. Enter it again.';
+				return 'That password is wrong. Only the owner can start meetings.';
 			case 'rate-limited':
 				return 'Too many new meetings in a short time. Wait a minute, then try again.';
 			case 'network':
@@ -69,79 +60,64 @@
 
 	{#if hostState.kind === 'created'}
 		{@const meeting = hostState.meeting.meeting}
+		{@const url = `${window.location.origin}/${meeting}`}
 		<section class="created" aria-labelledby="link-heading">
-			<h1 id="link-heading" class="visually-hidden">Your meeting link</h1>
-			<p class="lede">
-				Send this link to the people you are meeting. It works until the meeting ends.
+			<h1 id="link-heading" class="eyebrow">Your meeting</h1>
+			<p class="words">
+				{#each meeting.split('-') as word, i (i)}{#if i > 0}<span class="dash">-</span
+						>{/if}{word}{/each}
 			</p>
-			<p class="link">
-				<span class="host">{origin}/</span>{#each meeting.split('-') as word, i (i)}{#if i > 0}<span
-							class="dash">-</span
-						>{/if}<span class="word">{word}</span>{/each}
-			</p>
-			<div class="actions">
-				<a class="button primary" href="/{meeting}">Join now</a>
-				<CopyButton text="{window.location.origin}/{meeting}" />
+			<p class="link"><span class="host">{window.location.origin}/</span>{meeting}</p>
+			<p class="hint">The link works until the meeting ends.</p>
+			<div class="spacer"></div>
+			<div class="pair">
+				<CopyButton text={url} />
+				<ShareButton {url} title="Join my meeting" />
 			</div>
+			<a class="button primary big" href="/{meeting}">Join now</a>
 		</section>
 	{:else}
-		<section aria-labelledby="start-heading">
-			<h1 id="start-heading">Start a meeting</h1>
-			<p class="lede">
-				You get a three-word link that anyone can open on a phone, tablet or computer. Meetings are
-				recorded with everyone's consent and turned into a transcript afterwards.
-			</p>
-			<form class="create" onsubmit={start}>
-				<fieldset>
-					<legend>Recording</legend>
-					<label class="choice">
-						<input type="radio" name="policy" value="fromStart" bind:group={policy} />
-						<span>
-							<strong>Record from the start</strong>
-							<span class="hint">Everyone accepts recording when they join.</span>
-						</span>
-					</label>
-					<label class="choice">
-						<input type="radio" name="policy" value="hostDecides" bind:group={policy} />
-						<span>
-							<strong>Decide during the meeting</strong>
-							<span class="hint">Nothing is recorded until a host starts it.</span>
-						</span>
-					</label>
-				</fieldset>
-				{#if askSecret}
-					<label class="field">
-						<span>Create secret</span>
-						<input type="password" bind:value={secret} autocomplete="current-password" required />
-						<span class="hint">Asked once; this browser remembers it.</span>
-					</label>
-				{/if}
-				<div class="actions">
-					<button
-						class="button primary"
-						type="submit"
-						disabled={hostState.kind === 'creating' || secret.trim() === ''}
-					>
-						{hostState.kind === 'creating' ? 'Creating…' : 'New meeting'}
-					</button>
-				</div>
-			</form>
+		<form class="create" onsubmit={start} aria-labelledby="start-heading">
+			<h1 id="start-heading">New meeting</h1>
+			<PasswordField bind:value={password} />
+			<label class="switch">
+				<span class="switch-text">
+					<strong>Record and transcribe</strong>
+					<span class="hint">
+						{record
+							? 'Everyone agrees when they join. Video is not recorded.'
+							: 'Nothing is recorded unless a host starts it during the meeting.'}
+					</span>
+				</span>
+				<input type="checkbox" role="switch" bind:checked={record} />
+			</label>
 			{#if hostState.kind === 'failed'}
 				<p class="error" role="alert">{describe(hostState.error)}</p>
 			{/if}
-		</section>
+			<div class="spacer"></div>
+			<button
+				class="button primary big"
+				type="submit"
+				disabled={hostState.kind === 'creating' || password.trim() === ''}
+			>
+				{hostState.kind === 'creating' ? 'Creating…' : 'New meeting'}
+			</button>
+			<a class="past" href="/meetings">Past meetings</a>
+		</form>
 	{/if}
 </main>
 
 <style>
+	/* One column sized for a phone; on a desktop it stays a narrow column on the left. */
 	main {
-		display: grid;
-		grid-template-rows: auto 1fr;
-		gap: 3rem;
+		display: flex;
+		flex-direction: column;
+		gap: 2rem;
 		min-height: 100dvh;
-		max-width: 52rem;
+		max-width: 30rem;
 		padding: var(--gutter);
-		padding-bottom: calc(var(--gutter) * 2);
+		padding-top: calc(var(--gutter) + env(safe-area-inset-top));
+		padding-bottom: calc(var(--gutter) + env(safe-area-inset-bottom));
 	}
 
 	.brand {
@@ -150,11 +126,18 @@
 		letter-spacing: 0.01em;
 	}
 
-	section {
-		display: grid;
-		align-content: center;
-		gap: 1.5rem;
-		padding-bottom: 10dvh;
+	.create,
+	.created {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 1.25rem;
+	}
+
+	/* Keeps the main button in thumb reach at the bottom of a phone screen. */
+	.spacer {
+		flex: 1;
+		min-height: 1rem;
 	}
 
 	h1 {
@@ -163,88 +146,39 @@
 		font-weight: 700;
 	}
 
-	.lede {
-		max-width: 36rem;
+	h1.eyebrow {
 		color: var(--lichen);
-		font-size: var(--step-1);
-		line-height: 1.45;
+		font-size: var(--step-0);
+		font-weight: 500;
+		line-height: 1.5;
+		margin-bottom: -0.75rem;
 	}
 
-	/* The link is the one loud element: big enough to read aloud across a room. */
-	.link {
-		font-size: var(--step-4);
-		line-height: 1.05;
+	/* The words are the one loud element: one line, big enough to read aloud across a room. */
+	.words {
+		color: var(--lamp);
+		font-size: clamp(1.5rem, 7.6vw, 3rem);
+		line-height: 1.1;
 		font-weight: 750;
 		letter-spacing: -0.02em;
-		overflow-wrap: anywhere;
-	}
-
-	.host {
-		display: block;
-		font-size: var(--step-1);
-		font-weight: 500;
-		letter-spacing: 0;
-		color: var(--lichen);
-		margin-bottom: 0.4rem;
+		white-space: nowrap;
 	}
 
 	.dash {
 		color: var(--reed-strong);
 	}
 
-	.word {
-		color: var(--lamp);
-	}
-
-	.actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-	}
-
-	.create {
-		display: grid;
-		gap: 1.25rem;
-		max-width: 36rem;
-	}
-
-	fieldset {
-		display: grid;
-		gap: 0.5rem;
-		margin: 0;
-		padding: 0;
-		border: 0;
-	}
-
-	legend {
-		margin-bottom: 0.5rem;
-		color: var(--lichen);
-		font-size: var(--step--1);
-	}
-
-	.choice {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.75rem;
-		padding: 0.875rem 1rem;
+	.link {
+		padding: 0.75rem 1rem;
 		border-radius: var(--radius-s);
 		background: var(--water);
 		box-shadow: inset 0 0 0 1px var(--reed);
-		cursor: pointer;
+		overflow-wrap: anywhere;
+		user-select: all;
 	}
 
-	.choice:has(input:checked) {
-		box-shadow: inset 0 0 0 2px var(--lamp);
-	}
-
-	.choice input {
-		margin-top: 0.3rem;
-		accent-color: var(--lamp);
-	}
-
-	.choice strong {
-		display: block;
-		font-weight: 650;
+	.host {
+		color: var(--lichen);
 	}
 
 	.hint {
@@ -252,31 +186,88 @@
 		font-size: var(--step--1);
 	}
 
-	.field {
+	.pair {
 		display: grid;
-		gap: 0.375rem;
-		font-size: var(--step--1);
-		color: var(--lichen);
+		grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+		gap: 0.75rem;
 	}
 
-	.field input {
-		min-height: 48px;
-		padding: 0 0.875rem;
-		border: 1px solid var(--reed);
+	.big {
+		width: 100%;
+		min-height: 64px;
+		font-size: var(--step-1);
+	}
+
+	.switch {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 1rem;
 		border-radius: var(--radius-s);
 		background: var(--water);
-		font-size: var(--step-0);
-		color: var(--fog);
+		box-shadow: inset 0 0 0 1px var(--reed);
+		cursor: pointer;
 	}
 
-	.field input:focus-visible {
-		border-color: var(--lamp);
+	.switch-text {
+		display: grid;
+		gap: 0.125rem;
+	}
+
+	.switch strong {
+		font-weight: 650;
+	}
+
+	/* A native checkbox drawn as a switch: the lamp track means on. */
+	.switch input {
+		appearance: none;
+		flex: none;
+		position: relative;
+		width: 52px;
+		height: 32px;
+		margin: 0;
+		border-radius: 999px;
+		background: var(--reed);
+		cursor: pointer;
+		transition: background-color 120ms ease;
+	}
+
+	.switch input::after {
+		content: '';
+		position: absolute;
+		top: 4px;
+		left: 4px;
+		width: 24px;
+		height: 24px;
+		border-radius: 50%;
+		background: var(--fog);
+		transition: translate 120ms ease;
+	}
+
+	.switch input:checked {
+		background: var(--lamp);
+	}
+
+	.switch input:checked::after {
+		translate: 20px 0;
+		background: var(--lamp-ink);
 	}
 
 	.error {
-		max-width: 36rem;
 		padding: 0.875rem 1rem;
 		border-left: 3px solid var(--signal);
 		background: var(--water);
+	}
+
+	.past {
+		align-self: center;
+		padding: 0.75rem 1rem;
+		color: var(--lichen);
+		text-underline-offset: 0.2em;
+	}
+
+	.past:hover {
+		color: var(--fog);
 	}
 </style>

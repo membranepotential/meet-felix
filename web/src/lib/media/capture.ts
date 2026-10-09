@@ -86,12 +86,36 @@ function classifyError(e: unknown): CaptureError {
 	}
 }
 
+/** What the browser reports about itself, read from features and media queries only (D13). */
+export interface DeviceTraits {
+	/** `navigator.mediaDevices.getDisplayMedia` exists. */
+	displayMedia: boolean;
+	/** The primary pointer is a finger: `(pointer: coarse)`. */
+	coarsePointer: boolean;
+	/** Some input device can hover: `(any-hover: hover)`. */
+	hover: boolean;
+}
+
+export function deviceTraits(): DeviceTraits {
+	const matches = (query: string) => typeof matchMedia === 'function' && matchMedia(query).matches;
+	return {
+		displayMedia:
+			typeof navigator !== 'undefined' &&
+			typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+		coarsePointer: matches('(pointer: coarse)'),
+		hover: matches('(any-hover: hover)')
+	};
+}
+
+/** A phone or tablet: touch is the main input and nothing can hover. */
+export const isPhoneLike = (traits: DeviceTraits): boolean => traits.coarsePointer && !traits.hover;
+
 /**
- * Screen sharing exists on desktop browsers only; phone and tablet browsers lack
- * `getDisplayMedia`, so the UI hides the button there.
+ * Screen sharing is for desktops. Phone and tablet browsers lack `getDisplayMedia`; a touch
+ * device that claims it anyway (an emulator, a headless browser) is still treated as a phone.
  */
-export const canShareScreen = (): boolean =>
-	typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+export const canShareScreen = (traits: DeviceTraits = deviceTraits()): boolean =>
+	traits.displayMedia && !isPhoneLike(traits);
 
 export type ScreenResult =
 	| { ok: true; track: MediaStreamTrack }

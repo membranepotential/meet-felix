@@ -7,6 +7,7 @@
 	import { loadDisplayName, loadHostToken, saveDisplayName } from '../storage.ts';
 	import ConsentDialog from './ConsentDialog.svelte';
 	import CopyButton from './CopyButton.svelte';
+	import ShareButton from './ShareButton.svelte';
 	import Lobby from './Lobby.svelte';
 	import Meeting from './Meeting.svelte';
 	import PreJoin, { type PolicyLookup } from './PreJoin.svelte';
@@ -35,11 +36,11 @@
 	);
 
 	let end = $derived(session?.end ?? null);
-	let transcriptUrl = $derived(
-		end?.kind === 'ended' && end.transcript !== null
-			? `${window.location.origin}/t/${encodeURIComponent(end.transcript)}`
-			: null
+	/** Everyone present when a recorded meeting ends gets the transcript link (D19). */
+	let transcriptToken = $derived(
+		end?.kind === 'ended' && end.transcript !== null ? encodeURIComponent(end.transcript) : null
 	);
+	const transcriptBase = `${window.location.origin}/t/`;
 
 	async function lookUp() {
 		meetingInfo = { kind: 'loading' };
@@ -106,15 +107,20 @@
 			<div class="actions"><a class="button quiet" href="/">Start page</a></div>
 		{:else if end.kind === 'ended'}
 			<h1>The meeting has ended</h1>
-			{#if transcriptUrl}
+			{#if transcriptToken}
+				{@const url = transcriptBase + transcriptToken}
 				<p>
-					The transcript will appear at this link once it is ready. Save the link now; this page
-					does not show it again.
+					The transcript will be at this link once it is ready. Save the link now; this page does
+					not show it again.
 				</p>
-				<p class="transcript">
-					<a href={transcriptUrl}>{transcriptUrl}</a>
-				</p>
-				<div class="actions"><CopyButton text={transcriptUrl} /></div>
+				<a class="transcript" href={url}
+					><span class="host">{transcriptBase}</span>{transcriptToken}</a
+				>
+				<div class="actions">
+					<ShareButton {url} title="Meeting transcript" primary />
+					<CopyButton text={url} />
+					<a class="button quiet" href="/">Start page</a>
+				</div>
 			{:else}
 				<div class="actions"><a class="button quiet" href="/">Start page</a></div>
 			{/if}
@@ -145,9 +151,22 @@
 		color: var(--lichen);
 	}
 
-	.transcript a {
-		color: var(--lamp);
+	.transcript {
+		padding: 0.75rem 1rem;
+		border-radius: var(--radius-s);
+		background: var(--water);
+		box-shadow: inset 0 0 0 1px var(--reed);
+		color: var(--fog);
 		overflow-wrap: anywhere;
+		text-decoration: none;
+	}
+
+	.transcript:hover {
+		box-shadow: inset 0 0 0 1px var(--reed-strong);
+	}
+
+	.host {
+		color: var(--lichen);
 	}
 
 	.actions {

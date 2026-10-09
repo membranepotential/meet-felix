@@ -13,7 +13,9 @@
 		| 'copy'
 		| 'check'
 		| 'host'
-		| 'remove';
+		| 'remove'
+		| 'share'
+		| 'download';
 </script>
 
 <script lang="ts">
@@ -62,5 +64,9 @@
 	{:else if name === 'remove'}
 		<circle cx="9" cy="8" r="4" />
 		<path d="M2 20a7 7 0 0 1 14 0M16 11h6" />
+	{:else if name === 'share'}
+		<path d="M12 3v12M8 7l4-4 4 4M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" />
+	{:else if name === 'download'}
+		<path d="M12 4v11M8 11l4 4 4-4M5 20h14" />
 	{/if}
 </svg>

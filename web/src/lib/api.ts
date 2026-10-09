@@ -6,13 +6,25 @@ import {
 	parseMeetingId,
 	type HostToken,
 	type MeetingId,
-	type RecordingPolicy
+	type Millis,
+	type RecordingPolicy,
+	type TranscriptRef
 } from './protocol.ts';
 
 export interface NewMeeting {
 	meeting: MeetingId;
 	/** Makes the creator a host; sent as `hostToken` in `ClientMsg::Join`. */
 	hostToken: HostToken;
+}
+
+/** One of the owner's meetings, as `GET /api/meetings` lists it. */
+export interface PastMeeting {
+	meeting: MeetingId;
+	/** When the meeting was created, in milliseconds since the Unix epoch. */
+	createdAt: Millis;
+	ended: boolean;
+	/** The transcript link token; `null` if the meeting was not recorded. */
+	transcript: TranscriptRef | null;
 }
 
 /** What the pre-join screen needs to know about a meeting. */
@@ -73,7 +85,7 @@ export function createMeeting(
 		'/api/new',
 		{
 			method: 'POST',
-			headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+			headers: { ...bearer(secret), 'Content-Type': 'application/json' },
 			body: JSON.stringify({ recording })
 		},
 		(body) => {
@@ -86,6 +98,33 @@ export function createMeeting(
 			return id ? { meeting: id, hostToken } : null;
 		}
 	);
+}
+
+const bearer = (secret: string): HeadersInit => ({ Authorization: `Bearer ${secret}` });
+
+function parsePastMeeting(value: unknown): PastMeeting | null {
+	if (!isObject(value)) return null;
+	const { meeting, createdAt, ended, transcript } = value;
+	const id = typeof meeting === 'string' ? parseMeetingId(meeting) : null;
+	if (id === null || typeof createdAt !== 'number' || typeof ended !== 'boolean') return null;
+	if (transcript !== undefined && (typeof transcript !== 'string' || transcript === '')) {
+		return null;
+	}
+	return { meeting: id, createdAt, ended, transcript: transcript ?? null };
+}
+
+/**
+ * Lists the owner's meetings, newest first. Only the owner can: `secret` is the Worker's
+ * create secret.
+ */
+export function listMeetings(secret: string): Promise<ApiResult<PastMeeting[]>> {
+	return request('/api/meetings', { headers: bearer(secret) }, (body) => {
+		if (!isObject(body) || !Array.isArray(body.meetings)) return null;
+		const meetings = body.meetings.map(parsePastMeeting);
+		return meetings.every((m): m is PastMeeting => m !== null)
+			? meetings.toSorted((a, b) => b.createdAt - a.createdAt)
+			: null;
+	});
 }
 
 /** Looks a meeting up for the pre-join screen. */

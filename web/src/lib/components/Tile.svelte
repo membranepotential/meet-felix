@@ -10,6 +10,12 @@
 		/** `null` shows the initials (or a screen icon). */
 		stream: MediaStream | null;
 		micOn: boolean;
+		/**
+		 * Reads how loud this person's voice is now, 0..1 (see `media/speaking.ts`). A function,
+		 * so a level change re-renders only the ring and bars, not the tile list (which would
+		 * rebind the video).
+		 */
+		level: () => number;
 		/** A received camera track: its simulcast layer follows this tile's width. */
 		layerTrack: TrackRef | null;
 		/** Host actions on the participant shown; `null` unless we are a host. */
@@ -20,18 +26,30 @@
 	export interface TileModel extends TileView {
 		key: string;
 	}
+
+	/**
+	 * `tile`: a grid or featured tile. `strip`: small, next to a shared screen. `chip`: a round
+	 * face below a shared screen on a phone; the name is for screen readers only.
+	 */
+	export type TileVariant = 'tile' | 'strip' | 'chip';
 </script>
 
 <script lang="ts">
 	import type { LayerControl } from '../layers.ts';
+	import { isSpeaking, levelBars } from '../media/speaking.ts';
 	import { observeWidth, showStream } from '../media/video.ts';
 	import Icon from './Icon.svelte';
 
 	let {
 		tile,
 		layers,
-		compact = false
-	}: { tile: TileView; layers: LayerControl; compact?: boolean } = $props();
+		variant = 'tile'
+	}: { tile: TileView; layers: LayerControl; variant?: TileVariant } = $props();
+
+	let level = $derived(tile.level());
+	let speaking = $derived(isSpeaking(level));
+	let bars = $derived(levelBars(level));
+	let label = $derived(tile.self ? `${tile.name} (you)` : tile.name);
 
 	let initials = $derived(
 		tile.name
@@ -55,7 +73,8 @@
 </script>
 
 <figure
-	class={['tile', compact && 'compact']}
+	class={['tile', variant, speaking && 'speaking']}
+	title={variant === 'chip' ? label : undefined}
 	{@attach tile.layerTrack && reportWidth(tile.layerTrack)}
 >
 	{#if tile.stream}
@@ -68,7 +87,7 @@
 	{:else}
 		<div class="avatar" aria-hidden="true">{initials}</div>
 	{/if}
-	{#if tile.actions && !compact}
+	{#if tile.actions && variant === 'tile'}
 		<div class="actions">
 			<button type="button" onclick={tile.actions.mute} title="Mute {tile.name}">
 				<Icon name="mic-off" size={18} />
@@ -80,9 +99,15 @@
 			</button>
 		</div>
 	{/if}
-	<figcaption>
+	<figcaption class={[variant === 'chip' && 'visually-hidden']}>
 		{#if !tile.micOn}<span class="muted"><Icon name="mic-off" size={16} /></span>{/if}
-		<span class="name">{tile.self ? `${tile.name} (you)` : tile.name}</span>
+		{#if speaking}
+			<span class="bars" aria-hidden="true">
+				{#each bars as height, i (i)}<span style:--h={height}></span>{/each}
+			</span>
+		{/if}
+		<span class="name">{label}</span>
+		{#if speaking}<span class="visually-hidden">(speaking)</span>{/if}
 		{#if tile.host}<span class="visually-hidden">(host)</span>{/if}
 	</figcaption>
 </figure>
@@ -96,12 +121,35 @@
 		border-radius: var(--radius-m);
 		background: var(--water);
 		overflow: hidden;
-		box-shadow: inset 0 0 0 1px var(--reed);
 		container-type: size;
 	}
 
-	.compact {
+	/* The outline sits above the video, so the speaking ring stays visible on camera tiles. */
+	.tile::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		box-shadow: inset 0 0 0 1px var(--reed);
+		pointer-events: none;
+	}
+
+	.strip {
 		border-radius: var(--radius-s);
+	}
+
+	.chip {
+		border-radius: 50%;
+		box-shadow: 0 0 0 2px var(--lake);
+	}
+
+	.chip .avatar {
+		width: 100%;
+	}
+
+	/* The active speaker: a fog ring. Lamp stays reserved for the next action, red for recording. */
+	.speaking::after {
+		box-shadow: inset 0 0 0 3px var(--fog);
 	}
 
 	video {
@@ -154,7 +202,7 @@
 		line-height: 1.4;
 	}
 
-	.compact figcaption {
+	.strip figcaption {
 		left: 0.25rem;
 		bottom: 0.25rem;
 		padding: 0.1rem 0.5rem;
@@ -193,5 +241,22 @@
 	.muted {
 		display: inline-flex;
 		color: var(--signal);
+	}
+
+	/* Three level bars, scaled by `levelBars`. */
+	.bars {
+		display: inline-flex;
+		align-items: flex-end;
+		gap: 2px;
+		flex: none;
+		height: 0.8em;
+	}
+
+	.bars span {
+		width: 3px;
+		height: calc(var(--h) * 100%);
+		border-radius: 1px;
+		background: var(--fog);
+		transition: height 100ms linear;
 	}
 </style>
