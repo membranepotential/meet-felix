@@ -3,6 +3,39 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — one owner, login session, scheduled meetings, meet.example.com
+
+The user set the product frame: a personal meeting app with one owner as the
+only host ([D32](architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)).
+Three changes followed on the same day.
+
+- **Owner session.** The index page is a login. `POST /api/login` checks
+  the password and sets a signed HttpOnly cookie (30 days); the owner routes
+  accept it or the bearer; the cookie on the WebSocket upgrade makes the
+  socket the host. Host tokens are gone from the core, the worker and the
+  web app ([D7](links/README.md), [D24](ui/README.md)).
+- **Scheduled meetings.** A room is `Scheduled` until the first host is
+  joined, then `Live`, then `Ended`. Scheduled rooms expire after 60 unused
+  days; the two-minute empty rule applies only to live rooms; guests who
+  arrive early wait and are admitted when the host joins
+  ([D8](links/README.md)). KV keeps the words for 90 days.
+- **Custom domain.** `https://meet.example.com` serves the Worker through a
+  Cloudflare Pages project (`edge/`) with a service binding, so DNS stays at the
+  external provider ([research/10](research/10-custom-hostname-external-dns.md)). A
+  real WebSocket join through it answered in 626 ms.
+- **UI decisions D22–D31** from the mockup review are implemented: phone-first
+  start and pre-join pages, past-meetings page, grid fix, phone chips for a
+  shared screen, fog ring and level bars for the speaker, toasts off the
+  tiles, transcript placeholder.
+- Worker: `GET /api/meetings` with a KV index; spike 62 checks.
+- First deploy to `meet-felix.example.workers.dev` and secrets set;
+  the call test run 4 accepted phase 1 locally ([spikes/02](spikes/02-first-call.md)).
+
+Open: a guest inside a live meeting has no "Join as host" control; a late
+visitor of an ended meeting sees "does not exist" (the words are released on
+end, by design); stored room records from before today do not deserialize
+(nothing was in use).
+
 ## 2026-10-09 — UI decisions from the mockup review (D22–D31)
 
 The user reviewed a mockup of every screen (screenshots of the app as it

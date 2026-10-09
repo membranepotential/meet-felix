@@ -4,12 +4,11 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- core-lifecycle — meeting-core: Scheduled/Live/Ended phases, 60-day unused expiry, guests wait for the host, owner flag replaces host tokens — implementer running — next: worker login cookie + host injection, web login page + join as host
-- web-ui-decisions — web/: D22–D31 (start page, past meetings page, phone chips, active speaker ring, toasts, transcript page) — implementer running — next: rebase onto the login-first index page
-- worker-meetings — crates/worker: GET /api/meetings + index in KV, endedAt on end — implementer running — next: commit
-- deployed-check — user tests from phone + laptop (two networks, 10 min) — waiting
+- redeploy — `wrangler deploy` retrying after a Cloudflare API 504 — background — next: production probe (login, scheduled join), call test run 5
+- deployed-check — user tests https://meet.example.com from phone + laptop — waiting
 
 ## Done
+- 2026-10-09 D32 one owner; owner session cookie (worker 23 tests, spike 62/62); scheduled lifecycle in the core (37 tests); login-first web with join-as-host (93 tests); UI decisions D22–D31 implemented. Commits 626bf6a…b4c8b15.
 - 2026-10-09 https://meet.example.com live: Pages front door `meet-felix-edge` (edge/dist/_worker.js, service binding) + external CNAME; HTTPS, API and a real WebSocket join verified (Welcome in 626 ms). Research in docs/research/10.
 - 2026-10-09 UI decisions D22–D31 recorded (docs/ui). User added: login-first index page with a session cookie, scheduled meetings (link valid until used), join-as-host fallback.
 - 2026-10-09 First deploy: https://meet-felix.example.workers.dev (version b9384325), secrets CREATE_SECRET/CALLS_APP_ID/CALLS_APP_SECRET set, HTTP smoke test green (200/404/401/201/426). Script renamed to `pnpm run release`.
@@ -27,7 +26,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - Core later: reply for an SFU offer on the publish session; replace a subscribe session after 410; partial publish carries accepted tracks; grace period before a dropped socket counts as Leave; negotiation ids on SFU replies; cleanup of ended-room storage.
 - Web later: active speaker, remote mute state, peer-connection failure recovery, waiting-for-consent list for hosts.
 - Observe hibernation and egress on the dashboard after real use; decide Free vs Paid plan.
-- Phase 2: SFU sessions in the worker (sfu-api crate), publish/subscribe wiring in web, simulcast, screen share, lock/knock, reconnect.
+- Phase 2 remaining: TURN credentials, screen share end-to-end test, >3 participants, 'Join as host' inside a live meeting, device checklist on real phones.
 - Phase 3: RecorderObject, adapters, R2 chunks, Whisper job, transcript page.
 
 ## Open questions
