@@ -64,7 +64,8 @@ Terms used in all docs:
 - **Adapter**: an SFU WebSocket adapter, which streams one SFU audio track as
   PCM to a WebSocket endpoint ([recording/](../recording/README.md)).
 - **Owner**: the person who runs this deployment and creates meetings.
-  **Host**: a participant who joined with the host token; hosts control the
+  **Host**: a participant whose socket carries the owner's session cookie,
+  which the owner's password sets (`POST /api/login`); hosts control the
   meeting. **Guest**: everyone else.
 
 ## Non-goals
@@ -265,7 +266,7 @@ Browser (Svelte shell + meeting-core.wasm)
    │ WebSocket (signaling)                       │ WebRTC publish + subscribe sessions
    ▼                                             ▼
 Worker router ──► Room DO (Rust, hibernating sockets, RoomState in SQLite)
-  /new (Access)        │ HTTPS rtc.live.cloudflare.com/v1  (sessions, tracks, renegotiate, adapters)
+  /api/login (cookie)  │ HTTPS rtc.live.cloudflare.com/v1  (sessions, tracks, renegotiate, adapters)
   /{a-b-c}             ▼
   /t/{token}     Cloudflare Realtime SFU ◄── Cloudflare TURN
                        │ one WebSocket adapter per audio track: 48 kHz stereo s16le PCM
@@ -288,21 +289,21 @@ truth for what exists today.
 |---|---|---|
 | `meeting-core` | [`crates/meeting-core`](../../crates/meeting-core/) | Pure Rust library for `wasm32` and native: `RoomState`, participants, tracks, roles, `Recording`, `ClientMsg`/`ServerMsg` (serde + tsify), `Event`, `Effect`, `step()`. Planned: simulcast layer policy, the state machine that cuts chunks and gates silence, transcript merge. |
 | `sfu-api` | `crates/sfu-api` (not started) | Typed client for the SFU HTTPS API and the adapter protobuf (`prost`). |
-| `worker` | [`crates/worker`](../../crates/worker/) | Router (Access check on `/new`, words → DO lookup, static assets); `RoomObject`; `RecorderObject` (adapter ingress, resampling, one R2 `put` per chunk, transcript job in the alarm loop, R2 multipart stitch); `Transcriber` trait with `WhisperTurbo` and `Nova3Http` implementations through `worker::Ai`. |
+| `worker` | [`crates/worker`](../../crates/worker/) | Router (owner session cookie or bearer on `/api/login`, `/api/new`, `/api/meetings`; words → DO lookup; static assets); `RoomObject`; `RecorderObject` (adapter ingress, resampling, one R2 `put` per chunk, transcript job in the alarm loop, R2 multipart stitch); `Transcriber` trait with `WhisperTurbo` and `Nova3Http` implementations through `worker::Ai`. |
 | `web` | [`web/`](../../web/) | SvelteKit static site: new-meeting page, pre-join with consent, meeting grid, device picker, end-of-meeting page, transcript page. Loads the core as WASM built with `wasm-pack`. |
 | Realtime SFU | `rtc.live.cloudflare.com/v1` | Forwards media; sessions, tracks, simulcast, adapters ([media/](../media/README.md)). |
 | TURN | Cloudflare TURN | Relays media for clients behind strict firewalls. |
 | KV | binding `MEETINGS` | Meeting words → `RoomObject` id, with a TTL ([links/](../links/README.md)). |
 | R2 | EU bucket | Audio chunks, transcripts, stitched per-speaker WAVs ([recording/](../recording/README.md)). |
 | Workers AI | `worker::Ai` | Whisper large-v3-turbo; Nova-3 behind the same trait. |
-| Access | Cloudflare Zero Trust | Owner login on `/new`; free for up to 50 users. |
+| Access | Cloudflare Zero Trust | Not used today: the owner logs in with one password (D7, D32). Could protect the owner routes later once a domain is attached. |
 
 ## Phases
 
 | Phase | Scope | Done when |
 |---|---|---|
 | **0. Spikes** | 1. Rust DO with 10 hibernating sockets; try the Free plan for SFU + Workers AI. 2. Adapter → `RecorderObject` → R2 with 10 synthetic tracks: CPU, memory, loss on reconnect. 3. Whisper turbo vs Nova-3 HTTP on German and mixed German/English audio; confirm chunk size limits. 4. Real iPhone/iPad: simulcast, lock screen, app switch, phone call. 5. Measure egress for a real 4-person hour incl. adapters. | Each spike has a written result in [`docs/spikes/`](../spikes/); [cost/](../cost/README.md) updated with measured numbers. |
-| **1. Walking skeleton** | Cargo workspace + pnpm `web/`, `meeting-core` with `step`, `RoomObject`, word links with KV, Access on `/new`, 2-person audio+video through the SFU, deploy with `wrangler`. | Two browsers on different networks hold a 10-minute call; the DO hibernates between messages; CI runs the core property tests. |
+| **1. Walking skeleton** | Cargo workspace + pnpm `web/`, `meeting-core` with `step`, `RoomObject`, word links with KV, owner password on `/api/new`, 2-person audio+video through the SFU, deploy with `wrangler`. | Two browsers on different networks hold a 10-minute call; the DO hibernates between messages; CI runs the core property tests. |
 | **2. Multi-party** | Simulcast + per-tile layer selection, active-speaker detection, desktop screen share with `contentHint: "detail"`, room lock/knock, host controls (mute, kick, end), ICE restart and network-switch reconnect, responsive grid. | 8 participants incl. one phone and one shared screen for 30 min without manual intervention. |
 | **3. Recording + transcript** | `RecorderObject`, consent flow and badge, chunking, R2 layout, transcription job, transcript page (`/t/{token}`), stitched per-speaker WAVs. | A recorded 4-person meeting yields a correctly attributed German/English transcript within 15 minutes of ending; every participant saw the notice. |
 | **4. Mobile polish** | iOS background handling, Wake Lock, PWA manifest, speaker selection, Picture-in-Picture. | Checklist run on iPhone, iPad, Android, desktop Chrome/Firefox/Safari. |

@@ -2,8 +2,8 @@
 
 use super::support::{Room, T0, local_track, meeting, session, track_name};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Presence, RemoteTrack, Rid, Sdp,
+    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, Mid, NEGOTIATION_TIMEOUT_MS,
+    OfferedTrack, ParticipantId, Phase, Presence, RemoteTrack, Rid, SCHEDULED_TTL_MS, Sdp,
     ServerMsg, SessionKind, SfuReply, TrackKind, TrackRef,
 };
 
@@ -147,15 +147,18 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
 
 #[test]
 fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
+    // The owner created the meeting ahead of time; it waits for its first host.
     let (mut room, effects) = Room::new();
     assert_eq!(
         effects,
         [Effect::SetAlarm {
-            at: T0.after(EMPTY_ROOM_TIMEOUT_MS)
+            at: T0.after(SCHEDULED_TTL_MS)
         }]
     );
+    assert_eq!(room.state.view().phase, Phase::Scheduled);
 
-    // The host creates the meeting by joining with the token.
+    // Days later, the owner joins from their authenticated socket and becomes the host.
+    room.now = T0.after(3 * 24 * 60 * 60 * 1000);
     assert_eq!(
         room.join(HOST, true, true),
         [
@@ -169,6 +172,7 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
             },
         ]
     );
+    // Once the host is in, the meeting is live and the expiry alarm no longer applies.
     let effects = room.connect(HOST);
     let [
         Effect::Send {
@@ -182,6 +186,7 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
         panic!("unexpected effects {effects:#?}");
     };
     assert_eq!(state.meeting, meeting());
+    assert_eq!(state.phase, Phase::Live);
     assert_eq!(state.participants[0].presence, Presence::Joined);
 
     // The guest joins; the host sees them connect, then join.
@@ -247,7 +252,7 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
     );
 
     // The host's socket drops; the room is empty and arms the alarm.
-    room.now = Millis(T0.0 + 60_000);
+    room.now = room.now.after(60_000);
     let left_at = room.now;
     assert_eq!(
         room.apply(Event::SocketClosed { who: HOST }),

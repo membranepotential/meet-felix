@@ -10,7 +10,7 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     use crate::RoomView;
 
     assert!(ClientMsg::DECL.contains(
-        r#"{ type: "join"; name: DisplayName; consent: boolean; hostToken?: HostToken; resume?: ResumeToken }"#
+        r#"{ type: "join"; name: DisplayName; consent: boolean; resume?: ResumeToken }"#
     ));
     assert!(ClientMsg::DECL.contains(r#"{ type: "setConsent"; consent: boolean }"#));
     assert!(ServerMsg::DECL.contains(
@@ -20,6 +20,9 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     assert!(ServerMsg::DECL.contains(r#"{ type: "ended"; transcript?: TranscriptRef }"#));
     assert!(RoomView::DECL.contains("recording?: Recording;"));
     assert!(RoomView::DECL.contains("recordingPolicy: RecordingPolicy;"));
+    assert!(RoomView::DECL.contains("phase: Phase;"));
+    assert!(crate::Phase::DECL.contains(r#""scheduled" | "live" | "ended""#));
+    assert!(crate::Presence::DECL.contains(r#""waitingForHost""#));
     assert!(ClientMsg::DECL.contains(r#"{ type: "unpublish"; kind: TrackKind }"#));
     assert!(crate::Rid::DECL.contains(r#""q" | "h" | "f""#));
 }
@@ -29,13 +32,15 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
 #[test]
 fn every_server_msg_round_trips_through_json() {
     use crate::{
-        ErrorCode, IncomingTrack, MeetingId, Mid, Millis, ParticipantId, Presence, Recording,
-        RecordingPolicy, ResumeToken, Role, RoomView, Sdp, TrackKind, TrackRef, TranscriptRef,
+        ErrorCode, IncomingTrack, MeetingId, Mid, Millis, ParticipantId, Phase, Presence,
+        Recording, RecordingPolicy, ResumeToken, Role, RoomView, Sdp, TrackKind, TrackRef,
+        TranscriptRef,
     };
 
     let you = ParticipantId(7);
     let state = RoomView {
         meeting: MeetingId::parse("amber-otter-ocean").expect("listed words"),
+        phase: Phase::Live,
         locked: true,
         recording_policy: RecordingPolicy::FromStart,
         recording: Some(Recording {
@@ -116,7 +121,7 @@ fn json_uses_camel_case_tags_and_omits_absent_options() {
     let msg: ClientMsg =
         serde_json::from_str(r#"{"type":"join","name":" Ada ","consent":true}"#).expect("valid");
     assert!(
-        matches!(msg, ClientMsg::Join { host_token: None, ref name, .. } if name.as_str() == "Ada")
+        matches!(msg, ClientMsg::Join { resume: None, ref name, .. } if name.as_str() == "Ada")
     );
     let msg: ClientMsg =
         serde_json::from_str(r#"{"type":"setRecording","on":true}"#).expect("valid");

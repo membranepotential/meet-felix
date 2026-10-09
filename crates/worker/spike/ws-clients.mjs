@@ -2,13 +2,14 @@
 // Starts a mock Realtime SFU on SPIKE_SFU_PORT (default 8788), so the run needs no network.
 //
 // Start the Worker first (from the repo root):
-//   pnpm exec wrangler dev --port 8797 --var ROOM_JURISDICTION: --var CREATE_SECRET:spike-secret \
+//   pnpm exec wrangler dev --port 8801 --var ROOM_JURISDICTION: --var CREATE_SECRET:spike-secret \
 //     --var CALLS_APP_ID:spike --var CALLS_APP_SECRET:spike-sfu \
 //     --var SFU_API_URL:http://localhost:8788/v1
 // Then: node crates/worker/spike/ws-clients.mjs [base-url]   (default http://localhost:8787,
-// so pass http://localhost:8797 for the command above)
+// so pass http://localhost:8801 for the command above)
 // SPIKE_IDLE_MS sets the idle phase (default 15000). SPIKE_KEEPALIVE=1 adds the keepalive check,
-// which waits about two minutes. Needs Node >= 22 for the global WebSocket.
+// which waits about two minutes. Needs Node >= 26: the owner's sockets send the session cookie
+// through the global WebSocket's non-standard `headers` option (undici).
 
 import { createServer, request } from "node:http";
 import { randomBytes } from "node:crypto";
@@ -109,11 +110,12 @@ class Client {
     });
   }
 
-  static open(meeting) {
+  /** Opens a socket; `headers` go on the upgrade, e.g. the owner's session cookie. */
+  static open(meeting, headers = {}) {
     const url = `${WS_BASE}/ws/${meeting}`;
     return withTimeout(
       new Promise((resolve, reject) => {
-        const ws = new WebSocket(url);
+        const ws = new WebSocket(url, { headers });
         ws.addEventListener("open", () => resolve(new Client(ws)), { once: true });
         ws.addEventListener("error", () => reject(new Error(`cannot open ${url}`)), { once: true });
       }),
@@ -151,12 +153,20 @@ class Client {
   }
 }
 
-const createMeeting = (body, secret = SECRET) =>
+const bearer = (secret) => (secret ? { authorization: `Bearer ${secret}` } : {});
+/** `auth` is request headers: a bearer token or the owner's cookie. */
+const createMeeting = (body, auth = bearer(SECRET)) =>
   fetch(`${BASE}/api/new`, {
     method: "POST",
-    headers: secret ? { authorization: `Bearer ${secret}` } : {},
+    headers: auth,
     body: body ? JSON.stringify(body) : undefined,
   });
+const login = (password) =>
+  fetch(`${BASE}/api/login`, { method: "POST", body: JSON.stringify({ password }) });
+/** The `Cookie` request header for a response's first `Set-Cookie`, or "" if none. */
+const cookieOf = (response) => response.headers.getSetCookie()[0]?.split(";")[0] ?? "";
+const me = (headers) => fetch(`${BASE}/api/me`, { headers });
+const meetingInfo = async (meeting) => (await fetch(`${BASE}/api/meeting/${meeting}`)).json();
 
 /** The status of a WebSocket upgrade request: 101 if accepted. (`fetch` forbids `Upgrade`.) */
 const upgradeStatus = (meeting) =>
@@ -184,8 +194,7 @@ const upgradeStatus = (meeting) =>
     "upgrade status",
   );
 
-const listMeetings = (secret = SECRET) =>
-  fetch(`${BASE}/api/meetings`, { headers: secret ? { authorization: `Bearer ${secret}` } : {} });
+const listMeetings = (auth = bearer(SECRET)) => fetch(`${BASE}/api/meetings`, { headers: auth });
 /** The newest entry for `meeting` in `GET /api/meetings` once `done(entry)`, or the last seen. */
 const listedMeeting = async (meeting, done) => {
   let entry;
@@ -232,20 +241,50 @@ const closesMid = (session, mid) => (c) =>
 const names = (state) => state.participants.map((p) => p.name).join(",");
 
 async function main() {
+  // Owner session
+  const wrongLogin = await login("wrong");
+  check("POST /api/login with a wrong password -> 401, no cookie", wrongLogin.status === 401 && cookieOf(wrongLogin) === "");
+  const badLogin = await fetch(`${BASE}/api/login`, { method: "POST", body: "{}" });
+  check("POST /api/login without a password -> 400", badLogin.status === 400, `status ${badLogin.status}`);
+  const loggedIn = await login(SECRET);
+  const setCookie = loggedIn.headers.getSetCookie()[0] ?? "";
+  const ownerCookie = { cookie: cookieOf(loggedIn) };
+  check(
+    "POST /api/login with the password -> 204 and the session cookie",
+    loggedIn.status === 204 &&
+      /^owner=\d+\.[0-9a-f]{64}; HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=2592000$/.test(setCookie),
+    setCookie.replace(/\.[0-9a-f]{64}/, ".<tag>"),
+  );
+  check("GET /api/me with the cookie -> 204", (await me(ownerCookie)).status === 204);
+  check("GET /api/me without a cookie -> 401", (await me({})).status === 401);
+  check("GET /api/me with a forged cookie -> 401", (await me({ cookie: `owner=99999999999999.${"0".repeat(64)}` })).status === 401);
+  const loggedOut = await fetch(`${BASE}/api/logout`, { method: "POST" });
+  check(
+    "POST /api/logout -> 204 and clears the cookie",
+    loggedOut.status === 204 && /^owner=;.*Max-Age=0$/.test(loggedOut.headers.getSetCookie()[0] ?? ""),
+  );
+
   // HTTP routes
-  check("POST /api/new without a secret -> 401", (await createMeeting(null, "")).status === 401);
-  check("POST /api/new with a wrong secret -> 401", (await createMeeting(null, "wrong")).status === 401);
+  check("POST /api/new without a secret -> 401", (await createMeeting(null, {})).status === 401);
+  check("POST /api/new with a wrong secret -> 401", (await createMeeting(null, bearer("wrong"))).status === 401);
   const created = await createMeeting({ recording: "fromStart" });
-  const { meeting, hostToken } = await created.json();
+  const createdBody = await created.json();
+  const { meeting } = createdBody;
   check("POST /api/new with the secret -> 201", created.status === 201, `status ${created.status}`);
   check("meeting is three words", /^[a-z]+-[a-z]+-[a-z]+$/.test(meeting), meeting);
-  check("hostToken is 32 bytes hex", /^[0-9a-f]{64}$/.test(hostToken));
+  check("POST /api/new returns only the meeting", Object.keys(createdBody).join() === "meeting", JSON.stringify(createdBody));
+  const byCookie = await createMeeting({ recording: "hostDecides" }, ownerCookie);
+  check("POST /api/new with the owner's cookie -> 201", byCookie.status === 201, `status ${byCookie.status}`);
+  const second = await byCookie.json();
 
   const info = await fetch(`${BASE}/api/meeting/${meeting}`);
   const infoBody = await info.json();
   check(
-    "GET /api/meeting/{words} -> recording policy, not ended",
-    info.status === 200 && infoBody.recordingPolicy === "fromStart" && infoBody.ended === false,
+    "GET /api/meeting/{words} -> recording policy, scheduled, not ended",
+    info.status === 200 &&
+      infoBody.recordingPolicy === "fromStart" &&
+      infoBody.phase === "scheduled" &&
+      infoBody.ended === false,
     JSON.stringify(infoBody),
   );
   const upper = await fetch(`${BASE}/api/meeting/${meeting.toUpperCase()}`);
@@ -257,16 +296,28 @@ async function main() {
   const ice = await (await fetch(`${BASE}/api/ice`)).json();
   check("GET /api/ice returns Cloudflare STUN", ice.iceServers?.[0]?.urls?.[0] === "stun:stun.cloudflare.com:3478");
 
-  // Host joins with the token; the room records from the start
-  const host = await Client.open(meeting);
-  join(host, { name: "Host", hostToken });
+  // A guest joins the scheduled room first and waits; a client-sent owner header changes nothing
+  const guest = await Client.open(meeting, { "x-meet-owner": "1" });
+  join(guest, { name: "Guest" });
+  check("a guest in a scheduled room gets Waiting, despite a forged x-meet-owner", await guest.gets("waiting"));
+
+  // The owner joins with the session cookie: host, the room goes live and records from the start,
+  // and the waiting guest is let in
+  const host = await Client.open(meeting, ownerCookie);
+  join(host, { name: "Host" });
   const hostWelcome = await host.take("welcome");
   const hostId = hostWelcome.you;
+  const hostView = hostWelcome.state.participants.find((p) => p.id === hostId);
+  check("the owner's socket joins as host", hostView?.role === "host", `you=${hostId}`);
+  const guestWelcome = await guest.take("welcome").catch(() => null);
+  const guestId = guestWelcome?.you;
   check(
-    "host gets Welcome as host, recording on",
-    hostWelcome.state.participants[0]?.role === "host" && hostWelcome.state.recording?.by === hostId,
-    `you=${hostId}`,
+    "the waiting guest is let in when the host joins",
+    guestWelcome?.state.phase === "live" && guestWelcome.state.participants.find((p) => p.id === guestId)?.role === "guest",
+    guestWelcome && names(guestWelcome.state),
   );
+  const liveInfo = await meetingInfo(meeting);
+  check("GET /api/meeting/{words} -> live", liveInfo.phase === "live" && liveInfo.ended === false, JSON.stringify(liveInfo));
   host.send(PING);
   check("auto-response answers the exact ping", await host.gets("pong"));
   host.send("not json");
@@ -275,15 +326,14 @@ async function main() {
     await host.gets("error", (m) => m.code === "malformedMessage"),
   );
 
-  // A guest joins with consent; everyone sees the new state
-  const guest = await Client.open(meeting);
-  join(guest, { name: "Guest" });
-  const guestWelcome = await guest.take("welcome");
-  const guestId = guestWelcome.you;
-  check("guest with consent gets Welcome", guestWelcome.state.participants.length === 2, names(guestWelcome.state));
   check(
-    "host gets the State broadcast with the guest joined",
-    await host.gets("state", (m) => m.state.participants.some((p) => p.id === guestId && p.presence === "joined")),
+    "host gets the State broadcast with the guest joined and the recording started with the host",
+    await host.gets(
+      "state",
+      (m) =>
+        m.state.recording?.by === hostId &&
+        m.state.participants.some((p) => p.id === guestId && p.presence === "joined"),
+    ),
   );
 
   // Publish through the mock SFU; the guest is offered the host's track and answers
@@ -380,13 +430,30 @@ async function main() {
   host.send({ type: "mute", who: guestId });
   check("messages for the participant reach the new socket", await resumed.gets("muted"));
 
+  // "Join as host": the guest logs in and reconnects with the cookie and its resume token
+  const promoted = await Client.open(meeting, ownerCookie);
+  promoted.send({ type: "join", name: "Guest", consent: true, resume: resumedWelcome?.resume });
+  const promotedWelcome = await promoted.take("welcome").catch(() => null);
+  check(
+    "a guest who reconnects with the owner's cookie and its resume token becomes host",
+    promotedWelcome?.you === guestId &&
+      promotedWelcome.state.participants.find((p) => p.id === guestId)?.role === "host",
+    promotedWelcome && JSON.stringify(promotedWelcome.state.participants.map((p) => [p.id, p.role])),
+  );
+  check(
+    "…and the others see it in the State",
+    await host.gets("state", (m) => m.state.participants.find((p) => p.id === guestId)?.role === "host"),
+  );
+  const replacedClose = await withTimeout(resumed.closed, "replaced socket close").catch(() => null);
+  check("the room closes the guest's old socket", replacedClose !== null, `code ${replacedClose?.code}`);
+
   // End: everyone gets Ended, and the room refuses the next socket
   host.send({ type: "end" });
-  const ended = await Promise.all([host, resumed].map((c) => c.take("ended").catch(() => null)));
+  const ended = await Promise.all([host, promoted].map((c) => c.take("ended").catch(() => null)));
   check("End reaches everyone", ended.every(Boolean), ended.map(Boolean).join(","));
   const transcript = ended[0]?.transcript;
   check("End of a recorded meeting carries the transcript token", /^[0-9a-f]{32}$/.test(transcript ?? ""), transcript);
-  const closes = await Promise.all([host.closed, resumed.closed].map((p) => withTimeout(p, "end close").catch(() => null)));
+  const closes = await Promise.all([host.closed, promoted.closed].map((p) => withTimeout(p, "end close").catch(() => null)));
   check("every socket closes after End", closes.every((c) => c !== null), closes.map((c) => c?.code).join(","));
   const after = await upgradeStatus(meeting);
   check("the next socket is refused", after === 404 || after === 410, `status ${after}`);
@@ -394,8 +461,9 @@ async function main() {
   check("the words are released", gone.status === 404, `status ${gone.status}`);
 
   // Past meetings: owner-only, and the ended meeting is listed with its transcript token
-  check("GET /api/meetings without a secret -> 401", (await listMeetings("")).status === 401);
-  check("GET /api/meetings with a wrong secret -> 401", (await listMeetings("wrong")).status === 401);
+  check("GET /api/meetings without a secret -> 401", (await listMeetings({})).status === 401);
+  check("GET /api/meetings with a wrong secret -> 401", (await listMeetings(bearer("wrong"))).status === 401);
+  check("GET /api/meetings with the owner's cookie -> 200", (await listMeetings(ownerCookie)).status === 200);
   const listing = await listMeetings();
   const { meetings } = await listing.json();
   check(
@@ -411,10 +479,9 @@ async function main() {
   );
 
   // SFU down: joining fails with SfuUnavailable and the socket closes
-  const second = await (await createMeeting({ recording: "hostDecides" })).json();
   sfu.down = true;
-  const lonely = await Client.open(second.meeting);
-  join(lonely, { name: "Host", hostToken: second.hostToken });
+  const lonely = await Client.open(second.meeting, ownerCookie);
+  join(lonely, { name: "Host" });
   check("with the SFU down, joining yields Error{SfuUnavailable}", await lonely.gets("error", (m) => m.code === "sfuUnavailable"));
   const lonelyClose = await withTimeout(lonely.closed, "sfu down close").catch(() => null);
   check("…and the room closes the socket", lonelyClose !== null, `code ${lonelyClose?.code}`);

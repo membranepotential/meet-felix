@@ -12,8 +12,8 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 200 actions) |
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
 | SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer); core SFU effects to replies | `cargo test -p sfu-api` | Exist |
-| Worker unit tests | Storage record, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules, `/api/new` input checks | `cargo test -p meet-worker` | Exist |
-| Worker spike scripts | The real `RoomObject` running the core under `wrangler dev`, with a mock SFU | `node crates/worker/spike/ws-clients.mjs` | Exists; covers the protocol end to end and the owner's meeting list |
+| Worker unit tests | Storage record, socket attachment with the owner flag, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules; the owner's session cookie (valid, expired, tampered, foreign, missing) and password; `/api/new` and `/api/login` input checks | `cargo test -p meet-worker` | Exist |
+| Worker spike scripts | The real `RoomObject` running the core under `wrangler dev`, with a mock SFU | `node crates/worker/spike/ws-clients.mjs` | Exists; covers login, scheduled and live rooms, the protocol end to end and the owner's meeting list |
 | Web checks | Types and build of the Svelte shell | `pnpm --filter web check`, `pnpm --filter web build` | Exist |
 | Device checklist | Real phones, tablets and desktop browsers | manual, phase 4 | Planned |
 | Deployed Worker checks | Hibernation and billing on Cloudflare itself | manual, dashboard | Planned |
@@ -62,12 +62,20 @@ port 8788, so it needs no network and no SFU credentials; start the Worker
 with the `--var` flags given in its header comment (creation secret, SFU
 credentials, `SFU_API_URL` pointing at the mock). It checks:
 
-- `POST /api/new`: 401 without or with a wrong secret, 201 with it, three
-  words and a 64-hex host token; `GET /api/meeting/:words` with the recording
-  policy, case-insensitive; 404 and 426 cases; `GET /api/ice`;
-- the host joins with the token (recording starts), a guest joins with
-  consent, `Welcome` and `State` broadcasts, the auto-response ping, a
-  malformed frame;
+- the owner's session: `POST /api/login` answers 401 to a wrong password,
+  400 to a body without one, and 204 with the `owner` cookie
+  (`HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`) to the right
+  one; `GET /api/me` answers 204 with the cookie and 401 without it or with
+  a forged one; `POST /api/logout` clears the cookie;
+- `POST /api/new`: 401 without or with a wrong secret, 201 with the bearer
+  secret or the owner's cookie, three words and nothing else in the
+  response; `GET /api/meeting/:words` with the recording policy and
+  `phase: "scheduled"`, case-insensitive; 404 and 426 cases; `GET /api/ice`;
+- a guest who joins the scheduled room gets `Waiting`, even with a forged
+  `x-meet-owner` header; the owner's socket (session cookie on the upgrade)
+  joins as host, the room goes live (`phase: "live"`) and records from the
+  start, and the waiting guest gets `Welcome`; `State` broadcasts, the
+  auto-response ping, a malformed frame;
 - publish (`PublishAnswer` from the SFU) and subscribe: like the live SFU
   before the publisher is connected, the mock answers the first pull of each
   track with `not_found_track_error` and an offer, which reaches the guest as
@@ -83,18 +91,23 @@ credentials, `SFU_API_URL` pointing at the mock). It checks:
   back; a guest's kick refused;
 - resume: a new socket with the resume token keeps the participant id, the
   old socket is closed, and messages reach the new one;
+- "join as host": the guest reconnects with the owner's cookie and its
+  resume token, keeps its id, becomes host in everyone's view, and its old
+  socket is closed;
 - `End`: everyone gets `Ended` with the transcript token (the meeting was
   recorded), the sockets close, the next socket and the meeting lookup get
   404;
-- `GET /api/meetings`: 401 without or with a wrong secret; with it, the list
-  is newest first and shows the ended meeting with `ended: true` and the
+- `GET /api/meetings`: 401 without or with a wrong secret; 200 with the
+  owner's cookie; with the secret, the list is newest first and shows the ended meeting with `ended: true` and the
   transcript token from `Ended`;
 - with the mock SFU down, joining yields `Error{SfuUnavailable}` and the
   socket closes;
 - with `SPIKE_KEEPALIVE=1` (two more minutes): a socket that never pings is
   closed with 1001, a pinging one stays.
 
-It prints PASS or FAIL per check and needs Node 22 or newer. Its result goes
+It prints PASS or FAIL per check and needs Node 26 or newer, whose global
+`WebSocket` sends the session cookie through its non-standard `headers`
+option. Its result goes
 to [spikes/01-do-hibernation.md](spikes/01-do-hibernation.md). Clients must
 send the exact frame `{"type":"ping"}` at least every 60 seconds, or the
 keepalive check closes their socket.

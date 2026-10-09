@@ -5,17 +5,21 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{
-    DisplayName, HostToken, MeetingId, Mid, Millis, ParticipantId, ResumeToken, SessionId,
-    TrackName, TranscriptRef,
+    DisplayName, MeetingId, Mid, Millis, ParticipantId, ResumeToken, SessionId, TrackName,
+    TranscriptRef,
 };
 use crate::protocol::{
-    LocalTrack, ParticipantView, Presence, Recording, RecordingPolicy, Rid, Role, RoomView,
+    LocalTrack, ParticipantView, Phase, Presence, Recording, RecordingPolicy, Rid, Role, RoomView,
     TrackKind, TrackRef,
 };
 use crate::shell::{Effect, RemoteTrack};
 
-/// How long a room may have no admitted participant before it ends.
+/// How long a live room may have no admitted participant before it ends.
 pub const EMPTY_ROOM_TIMEOUT_MS: u64 = 2 * 60 * 1000;
+
+/// How long a scheduled room waits for its first host, counted from its creation, before it
+/// ends unused: 60 days.
+pub const SCHEDULED_TTL_MS: u64 = 60 * 24 * 60 * 60 * 1000;
 
 /// How long one step of a negotiation may take before the room treats it as failed: the SFU's
 /// answer to a publish offer, or one step of a subscribe negotiation (the SFU's offer, the
@@ -30,17 +34,27 @@ pub const SUBSCRIBE_RETRY_MS: u64 = 3 * 1000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomState {
     pub(crate) meeting: MeetingId,
-    pub(crate) host_token: HostToken,
     /// Token of the transcript page, announced at the end if the meeting was recorded.
     pub(crate) transcript: TranscriptRef,
     pub(crate) recording_policy: RecordingPolicy,
     pub(crate) locked: bool,
     pub(crate) recording: RecordingStatus,
     pub(crate) participants: BTreeMap<ParticipantId, Participant>,
-    /// Since when no participant is admitted (connecting or joined); `None` while one is.
-    /// Knocking participants do not count, so their coming and going does not move it.
-    pub(crate) empty_since: Option<Millis>,
-    pub(crate) ended: Option<Millis>,
+    pub(crate) lifecycle: Lifecycle,
+}
+
+/// The room's [`Phase`] with the time each phase's timer counts from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Lifecycle {
+    /// No host has joined yet. The room was created at `since` and expires
+    /// [`SCHEDULED_TTL_MS`] later; it has no empty timer.
+    Scheduled { since: Millis },
+    /// A host has joined. `empty_since` is since when no participant is admitted (connecting or
+    /// joined), `None` while one is. Guests waiting outside do not count, so their coming and
+    /// going does not move it.
+    Live { empty_since: Option<Millis> },
+    /// The room ended at `at`.
+    Ended { at: Millis },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +76,9 @@ pub(crate) struct Participant {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Connection {
-    /// A guest in a locked room, waiting for a host.
+    /// A guest in a scheduled room, waiting for the first host to join.
+    WaitingForHost,
+    /// A guest in a locked live room, waiting for a host to admit them.
     Knocking,
     /// A guest let in while the room records, waiting for their own consent.
     AwaitingConsent,
@@ -155,7 +171,9 @@ pub(crate) struct Offered {
 /// Why the room needs its alarm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AlarmReason {
-    /// The room has been empty for [`EMPTY_ROOM_TIMEOUT_MS`].
+    /// The scheduled room has had no host for [`SCHEDULED_TTL_MS`] since its creation.
+    Expire,
+    /// The live room has been empty for [`EMPTY_ROOM_TIMEOUT_MS`].
     EmptyRoom,
     /// A participant's publish offer timed out.
     Publish(ParticipantId),
@@ -164,24 +182,22 @@ pub(crate) enum AlarmReason {
 }
 
 impl RoomState {
-    /// A new, empty room. The effects arm the alarm that ends it if nobody joins.
+    /// A new, empty, scheduled room. The effects arm the alarm that ends it if no host joins
+    /// within [`SCHEDULED_TTL_MS`].
     pub fn new(
         meeting: MeetingId,
-        host_token: HostToken,
         transcript: TranscriptRef,
         recording_policy: RecordingPolicy,
         now: Millis,
     ) -> (Self, Vec<Effect>) {
         let state = Self {
             meeting,
-            host_token,
             transcript,
             recording_policy,
             locked: false,
             recording: RecordingStatus::NeverStarted,
             participants: BTreeMap::new(),
-            empty_since: Some(now),
-            ended: None,
+            lifecycle: Lifecycle::Scheduled { since: now },
         };
         let effects = state
             .next_alarm()
@@ -198,7 +214,10 @@ impl RoomState {
 
     /// When the meeting ended, if it has.
     pub fn ended(&self) -> Option<Millis> {
-        self.ended
+        match self.lifecycle {
+            Lifecycle::Ended { at } => Some(at),
+            Lifecycle::Scheduled { .. } | Lifecycle::Live { .. } => None,
+        }
     }
 
     /// The public snapshot every client sees.
@@ -224,6 +243,7 @@ impl RoomState {
             .collect();
         RoomView {
             meeting: self.meeting.clone(),
+            phase: self.lifecycle.phase(),
             locked: self.locked,
             recording_policy: self.recording_policy,
             recording: self.recording.current(),
@@ -293,9 +313,15 @@ impl RoomState {
 
     /// When the room must act next, and why. Times may lie in the past.
     pub(crate) fn alarms(&self) -> impl Iterator<Item = (Millis, AlarmReason)> {
-        let empty = self
-            .empty_since
-            .map(|since| (since.after(EMPTY_ROOM_TIMEOUT_MS), AlarmReason::EmptyRoom));
+        let end = match self.lifecycle {
+            Lifecycle::Scheduled { since } => {
+                Some((since.after(SCHEDULED_TTL_MS), AlarmReason::Expire))
+            }
+            Lifecycle::Live {
+                empty_since: Some(since),
+            } => Some((since.after(EMPTY_ROOM_TIMEOUT_MS), AlarmReason::EmptyRoom)),
+            Lifecycle::Live { empty_since: None } | Lifecycle::Ended { .. } => None,
+        };
         let negotiations = self.joined().flat_map(|(who, publish, subscribe)| {
             let publish = publish.negotiation.since().map(|since| {
                 (
@@ -306,15 +332,25 @@ impl RoomState {
             let subscribe = subscribe.due().map(|at| (at, AlarmReason::Subscribe(who)));
             publish.into_iter().chain(subscribe)
         });
-        empty.into_iter().chain(negotiations)
+        end.into_iter().chain(negotiations)
     }
 
     /// The time for [`Effect::SetAlarm`]: the earliest of [`RoomState::alarms`].
     pub(crate) fn next_alarm(&self) -> Option<Millis> {
-        if self.ended.is_some() {
+        if self.ended().is_some() {
             return None;
         }
         self.alarms().map(|(at, _)| at).min()
+    }
+}
+
+impl Lifecycle {
+    pub(crate) fn phase(&self) -> Phase {
+        match self {
+            Self::Scheduled { .. } => Phase::Scheduled,
+            Self::Live { .. } => Phase::Live,
+            Self::Ended { .. } => Phase::Ended,
+        }
     }
 }
 
@@ -382,6 +418,7 @@ impl Connection {
     /// `None` once the participant left.
     pub(crate) fn presence(&self) -> Option<Presence> {
         match self {
+            Self::WaitingForHost => Some(Presence::WaitingForHost),
             Self::Knocking => Some(Presence::Knocking),
             Self::AwaitingConsent => Some(Presence::AwaitingConsent),
             Self::Connecting { .. } => Some(Presence::Connecting),
@@ -390,7 +427,8 @@ impl Connection {
         }
     }
 
-    /// Whether a host or an unlocked room let the participant in and they have not left.
+    /// Whether the participant was let in (by a host, an unlocked room or the first host's
+    /// arrival) and has not left.
     pub(crate) fn is_admitted(&self) -> bool {
         matches!(self, Self::Connecting { .. } | Self::Joined { .. })
     }

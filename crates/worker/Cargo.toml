@@ -19,3 +19,6 @@ serde_json.workspace = true
 wasm-bindgen = "0.2.129"
 # The `wasm_js` backend reads `crypto.getRandomValues`, which Workers provide.
 getrandom = { version = "0.4.3", features = ["wasm_js"] }
+# The owner's session cookie: HMAC-SHA256 in pure Rust, so it needs no SubtleCrypto.
+hmac = "0.13.0"
+sha2 = "0.11.0"

@@ -8,11 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use super::support::{Room, name, token};
-use crate::state::{AlarmReason, Connection};
+use crate::state::{AlarmReason, Connection, Lifecycle};
 use crate::{
-    ClientMsg, Effect, ErrorCode, Event, HostToken, LocalTrack, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken,
-    Rid, Role, RoomState, RoomView, Sdp, ServerMsg, SessionId, SessionKind, SfuCall, SfuReply,
+    ClientMsg, Effect, ErrorCode, Event, LocalTrack, Mid, Millis, NEGOTIATION_TIMEOUT_MS,
+    OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, Rid, Role, RoomState,
+    RoomView, SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionId, SessionKind, SfuCall, SfuReply,
     TrackKind, TrackName, TrackRef,
 };
 
@@ -21,20 +21,23 @@ const KINDS: [TrackKind; 3] = [TrackKind::Audio, TrackKind::Video, TrackKind::Sc
 
 #[derive(Debug, Clone)]
 enum Action {
+    /// A client joins from the owner's socket (as a host) or another socket (as a guest), into
+    /// whatever phase the room is in; the room starts scheduled.
     Join {
         who: u32,
-        host: bool,
-        wrong_token: bool,
+        owner: bool,
         consent: bool,
     },
     Send {
         who: u32,
         msg: Msg,
     },
-    /// A client joins from socket `socket` with the resume token `whose` was welcomed with.
+    /// A client joins from socket `socket` with the resume token `whose` was welcomed with,
+    /// possibly from the owner's socket.
     Resume {
         socket: u32,
         whose: u32,
+        owner: bool,
     },
     /// Answer a pending SFU call.
     Reply {
@@ -60,6 +63,8 @@ enum Action {
     Alarm,
     /// Time passes until the earliest negotiation deadline or retry, and the alarm fires.
     NegotiationDue,
+    /// Time passes until a scheduled room expires, and the alarm fires.
+    Expire,
     Wait {
         ms: u64,
     },
@@ -114,16 +119,17 @@ fn msg() -> impl Strategy<Value = Msg> {
 
 fn action() -> impl Strategy<Value = Action> {
     prop_oneof![
-        4 => (who(), any::<bool>(), (0..8u8).prop_map(|n| n == 0), (0..4u8).prop_map(|n| n != 0))
-            .prop_map(|(who, host, wrong_token, consent)| Action::Join { who, host, wrong_token, consent }),
+        4 => (who(), any::<bool>(), (0..4u8).prop_map(|n| n != 0))
+            .prop_map(|(who, owner, consent)| Action::Join { who, owner, consent }),
         8 => (who(), msg()).prop_map(|(who, msg)| Action::Send { who, msg }),
-        1 => (who(), who()).prop_map(|(socket, whose)| Action::Resume { socket, whose }),
+        1 => (who(), who(), (0..4u8).prop_map(|n| n == 0))
+            .prop_map(|(socket, whose, owner)| Action::Resume { socket, whose, owner }),
         16 => (any::<usize>(), (0..20u8).prop_map(|n| n == 0)).prop_map(|(pick, fail)| Action::Reply { pick, fail }),
         1 => any::<usize>().prop_map(|pick| Action::Lose { pick }),
         6 => any::<usize>().prop_map(|pick| Action::Answer { pick }),
         1 => (who(), kind()).prop_map(|(who, kind)| Action::TrackClosed { who, kind }),
         1 => who().prop_map(|who| Action::SocketClosed { who }),
-        1 => Just(Action::Alarm),
+        1 => (0..8u8).prop_map(|n| if n == 0 { Action::Expire } else { Action::Alarm }),
         1 => Just(Action::NegotiationDue),
         1 => prop_oneof![0..20_000u64, 0..90_000u64].prop_map(|ms| Action::Wait { ms }),
     ]
@@ -152,6 +158,15 @@ struct Sim {
     unpublished: usize,
     /// How many publish offers timed out.
     publish_timeouts: usize,
+    /// Whether a host was ever joined.
+    host_joined: bool,
+    /// How many guests waited for the first host and were let in, or asked for consent, when it
+    /// joined.
+    released: usize,
+    /// How many guests became hosts because the owner's socket took their place.
+    promoted: usize,
+    /// Whether the room ended unused at its scheduled expiry.
+    expired: bool,
     ended: bool,
     counter: u32,
 }
@@ -175,17 +190,22 @@ impl Sim {
             rebinds: 0,
             unpublished: 0,
             publish_timeouts: 0,
+            host_joined: false,
+            released: 0,
+            promoted: 0,
+            expired: false,
             ended: false,
             counter: 0,
         }
     }
 
     /// A client message with a fresh token, as the shell sends it.
-    fn client(&mut self, from: ParticipantId, msg: ClientMsg) -> Event {
+    fn client(&mut self, from: ParticipantId, msg: ClientMsg, owner: bool) -> Event {
         self.counter += 1;
         Event::Client {
             from,
             msg,
+            owner,
             fresh_token: token(self.counter),
         }
     }
@@ -201,35 +221,31 @@ impl Sim {
         Some(match action {
             Action::Join {
                 who,
-                host,
-                wrong_token,
+                owner,
                 consent,
+            } => self.client(
+                id(who),
+                ClientMsg::Join {
+                    name: name("Someone"),
+                    consent,
+                    resume: None,
+                },
+                owner,
+            ),
+            Action::Resume {
+                socket,
+                whose,
+                owner,
             } => {
-                let host_token = match (host, wrong_token) {
-                    (_, true) => Some(HostToken::new("wrong")),
-                    (true, false) => Some(super::support::host_token()),
-                    (false, false) => None,
-                };
-                self.client(
-                    id(who),
-                    ClientMsg::Join {
-                        name: name("Someone"),
-                        consent,
-                        host_token,
-                        resume: None,
-                    },
-                )
-            }
-            Action::Resume { socket, whose } => {
                 let resume = Some(self.tokens.get(&id(whose))?.clone());
                 self.client(
                     id(socket),
                     ClientMsg::Join {
                         name: name("Someone"),
                         consent: true,
-                        host_token: None,
                         resume,
                     },
+                    owner,
                 )
             }
             Action::Send { who, msg } => {
@@ -280,7 +296,7 @@ impl Sim {
                     Msg::End => ClientMsg::End,
                     Msg::Leave => ClientMsg::Leave,
                 };
-                self.client(id(who), msg)
+                self.client(id(who), msg, false)
             }
             Action::Reply { pick, fail } => {
                 if self.pending.is_empty() {
@@ -344,6 +360,7 @@ impl Sim {
                     ClientMsg::SubscribeAnswer {
                         sdp: Sdp::new("answer"),
                     },
+                    false,
                 )
             }
             Action::TrackClosed { who, kind } => {
@@ -356,10 +373,19 @@ impl Sim {
                     .room
                     .state
                     .alarms()
-                    .filter(|&(_, reason)| reason != AlarmReason::EmptyRoom)
+                    .filter(|&(_, reason)| {
+                        !matches!(reason, AlarmReason::EmptyRoom | AlarmReason::Expire)
+                    })
                     .map(|(at, _)| at)
                     .min()?;
                 self.room.now = self.room.now.max(due);
+                Event::AlarmFired
+            }
+            Action::Expire => {
+                let Lifecycle::Scheduled { since } = self.room.state.lifecycle else {
+                    return None;
+                };
+                self.room.now = self.room.now.max(since.after(SCHEDULED_TTL_MS));
                 Event::AlarmFired
             }
             Action::Wait { ms } => {
@@ -380,6 +406,32 @@ impl Sim {
         }
         let effects = self.room.apply(event.clone());
         self.check(&before, &event, &effects)?;
+        let after = &self.room.state;
+        self.host_joined |= after
+            .joined()
+            .any(|(id, ..)| after.participants[&id].role == Role::Host);
+        match (&before.lifecycle, &after.lifecycle) {
+            (Lifecycle::Scheduled { .. }, Lifecycle::Live { .. }) => {
+                self.released += before
+                    .participants
+                    .values()
+                    .filter(|p| p.connection == Connection::WaitingForHost)
+                    .count();
+            }
+            (Lifecycle::Scheduled { .. }, Lifecycle::Ended { .. }) => self.expired = true,
+            _ => {}
+        }
+        self.promoted += after
+            .participants
+            .iter()
+            .filter(|&(who, p)| {
+                p.role == Role::Host
+                    && before
+                        .participants
+                        .get(who)
+                        .is_some_and(|w| w.role == Role::Guest && w.connection.presence().is_some())
+            })
+            .count();
         let publish_failed = |e: &Effect| {
             matches!(
                 e,
@@ -493,7 +545,7 @@ impl Sim {
         // Only joined hosts lock, admit, kick, mute, record and end; anyone else changes nothing
         // and, unless they left, gets an error.
         if let Event::Client { from, msg, .. } = event
-            && before.ended.is_none()
+            && before.ended().is_none()
             && matches!(
                 msg,
                 ClientMsg::Lock { .. }
@@ -526,9 +578,11 @@ impl Sim {
 
         // Every id in an effect is a participant (or the sender being rejected); SFU and recorder
         // effects only concern participants still in the room, on their own sessions.
-        let sender = match event {
-            Event::Client { from, .. } => Some(*from),
-            _ => None,
+        let (sender, owner_join) = match event {
+            Event::Client {
+                from, msg, owner, ..
+            } => (Some(*from), *owner && matches!(msg, ClientMsg::Join { .. })),
+            _ => (None, false),
         };
         let known =
             |who: &ParticipantId| after.participants.contains_key(who) || Some(*who) == sender;
@@ -561,12 +615,17 @@ impl Sim {
                     socket,
                     participant,
                 } => {
-                    // A resume moves a participant to the sender's socket and changes nothing else.
+                    // A resume moves a participant to the sender's socket and changes nothing else,
+                    // except that the owner's socket turns a guest into a host.
                     prop_assert!(
                         Some(*socket) == sender && present(participant),
                         "{effect:?}"
                     );
-                    prop_assert_eq!(before, after);
+                    if owner_join {
+                        prop_assert_eq!(after.participants[participant].role, Role::Host);
+                    } else {
+                        prop_assert_eq!(before, after);
+                    }
                 }
                 Effect::SfuNewSession { who, .. } => prop_assert!(present(who), "{effect:?}"),
                 Effect::SfuPublish { who, session, .. } => {
@@ -637,7 +696,7 @@ impl Sim {
 
         // A track that stops being published under its name (unpublished, replaced, closed by
         // the SFU, or its owner left or was kicked) stops reaching every subscriber.
-        if after.ended.is_none() {
+        if after.ended().is_none() {
             let still_joined = |who: ParticipantId| after.joined().any(|(id, ..)| id == who);
             for (subscriber, _, subscribe) in before.joined() {
                 if still_joined(subscriber) {
@@ -666,8 +725,17 @@ impl Sim {
         }
 
         let recording = after.recording.current().is_some();
+        let scheduled = matches!(after.lifecycle, Lifecycle::Scheduled { .. });
         for (&who, p) in &after.participants {
             let was = before.participants.get(&who);
+            // Only the owner's socket turns a guest into a host, and nothing turns a host into a
+            // guest. (A join after leaving is a new participant.)
+            if let Some(was) = was
+                && was.connection.presence().is_some()
+                && was.role != p.role
+            {
+                prop_assert!(owner_join && p.role == Role::Host, "{who:?} changed role");
+            }
             match &p.connection {
                 // Nobody joins before the SFU created both sessions.
                 Connection::Joined { publish, subscribe } => {
@@ -693,8 +761,12 @@ impl Sim {
                         }
                     }
                 }
-                // Only a locked room has guests knocking.
-                Connection::Knocking => prop_assert!(after.locked && p.role == Role::Guest),
+                // Only a scheduled room has guests waiting for the host.
+                Connection::WaitingForHost => prop_assert!(scheduled && p.role == Role::Guest),
+                // Only a locked live room has guests knocking.
+                Connection::Knocking => {
+                    prop_assert!(!scheduled && after.locked && p.role == Role::Guest)
+                }
                 // Only a recording room keeps a guest waiting for consent.
                 Connection::AwaitingConsent => {
                     prop_assert!(recording && p.role == Role::Guest && !p.consent_recording)
@@ -739,13 +811,93 @@ impl Sim {
             }
         }
 
-        // The empty timer runs exactly while nobody is admitted.
-        if after.ended.is_none() {
-            let admitted = after
-                .participants
-                .values()
-                .any(|p| p.connection.is_admitted());
-            prop_assert_eq!(after.empty_since.is_none(), admitted);
+        self.check_phases(before, event, effects)
+    }
+
+    /// A room is scheduled until its first host joins, then live, and never goes back. Its
+    /// timers and its waiting guests follow the phase.
+    fn check_phases(
+        &self,
+        before: &RoomState,
+        event: &Event,
+        effects: &[Effect],
+    ) -> Result<(), TestCaseError> {
+        let after = &self.room.state;
+        let host_joined = after
+            .joined()
+            .any(|(id, ..)| after.participants[&id].role == Role::Host);
+        match after.lifecycle {
+            // Nobody is joined in a scheduled room, and its only timer is the expiry.
+            Lifecycle::Scheduled { since } => {
+                prop_assert!(after.joined().next().is_none());
+                prop_assert!(
+                    after
+                        .alarms()
+                        .all(|(_, reason)| reason != AlarmReason::EmptyRoom)
+                );
+                prop_assert_eq!(after.next_alarm(), Some(since.after(SCHEDULED_TTL_MS)));
+            }
+            // No room is live without a host having joined. The empty timer runs exactly while
+            // nobody is admitted.
+            Lifecycle::Live { empty_since } => {
+                prop_assert!(self.host_joined || host_joined);
+                let admitted = after
+                    .participants
+                    .values()
+                    .any(|p| p.connection.is_admitted());
+                prop_assert_eq!(empty_since.is_none(), admitted);
+            }
+            Lifecycle::Ended { .. } => {}
+        }
+        let waiting = before
+            .participants
+            .iter()
+            .filter(|(_, p)| p.connection == Connection::WaitingForHost);
+        match (&before.lifecycle, &after.lifecycle) {
+            (Lifecycle::Scheduled { .. }, Lifecycle::Live { .. }) => {
+                // The first host joined in this step and let in every guest waiting for it,
+                // except those who lack consent to the recording that starts with it: they are
+                // asked for it.
+                prop_assert!(host_joined);
+                for (who, _) in waiting {
+                    let now = &after.participants[who];
+                    if after.lacks_consent(*who) {
+                        prop_assert_eq!(&now.connection, &Connection::AwaitingConsent);
+                        let asked = Effect::Send {
+                            to: *who,
+                            msg: ServerMsg::ConsentRequired,
+                        };
+                        prop_assert!(effects.contains(&asked), "{who:?} not asked: {effects:?}");
+                    } else {
+                        prop_assert!(now.connection.is_admitted(), "{who:?} not let in");
+                    }
+                }
+            }
+            (Lifecycle::Scheduled { .. }, after_lifecycle) => {
+                // Otherwise waiting guests keep waiting until they leave, the room expires, or
+                // the owner's socket makes them a host.
+                for (who, _) in waiting {
+                    let now = &after.participants[who];
+                    prop_assert!(
+                        matches!(
+                            now.connection,
+                            Connection::WaitingForHost | Connection::Left
+                        ) || now.role == Role::Host,
+                        "{who:?} let in before the host"
+                    );
+                }
+                // A scheduled room ends only at its expiry.
+                if let (Lifecycle::Ended { at }, Lifecycle::Scheduled { since }) =
+                    (after_lifecycle, &before.lifecycle)
+                {
+                    prop_assert_eq!(event, &Event::AlarmFired);
+                    prop_assert!(*at >= since.after(SCHEDULED_TTL_MS));
+                }
+            }
+            (Lifecycle::Live { .. }, Lifecycle::Scheduled { .. }) => {
+                prop_assert!(false, "a live room became scheduled")
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -817,7 +969,7 @@ proptest! {
     #[test]
     fn random_sessions_keep_the_invariants(
         from_start in any::<bool>(),
-        actions in proptest::collection::vec(action(), 1..200),
+        actions in proptest::collection::vec(action(), 1..250),
     ) {
         let mut sim = Sim::new(policy(from_start));
         for action in actions {
@@ -831,7 +983,7 @@ proptest! {
 
 /// The simulator reaches the interesting states; otherwise the properties above prove little.
 #[test]
-fn random_sessions_reach_joined_publishing_and_recording_rooms() {
+fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
 
@@ -839,8 +991,9 @@ fn random_sessions_reach_joined_publishing_and_recording_rooms() {
     let (mut receiving, mut recording, mut ended) = (0, 0, 0);
     let (mut awaiting, mut resumed, mut retried) = (0, 0, 0);
     let (mut unpublished, mut publish_timeouts) = (0, 0);
+    let (mut released, mut expired, mut promoted) = (0, 0, 0);
     for case in 0..400 {
-        let actions = proptest::collection::vec(action(), 1..200)
+        let actions = proptest::collection::vec(action(), 1..250)
             .new_tree(&mut runner)
             .expect("tree")
             .current();
@@ -868,6 +1021,9 @@ fn random_sessions_reach_joined_publishing_and_recording_rooms() {
         ended += usize::from(sim.ended);
         unpublished += usize::from(sim.unpublished > 0);
         publish_timeouts += usize::from(sim.publish_timeouts > 0);
+        released += usize::from(sim.released > 0);
+        expired += usize::from(sim.expired);
+        promoted += usize::from(sim.promoted > 0);
     }
     assert!(
         [
@@ -878,12 +1034,17 @@ fn random_sessions_reach_joined_publishing_and_recording_rooms() {
             resumed,
             retried,
             unpublished,
-            publish_timeouts
+            publish_timeouts,
+            released,
+            expired,
+            promoted,
         ]
         .iter()
         .all(|&n| n >= 20),
         "receiving {receiving}, recording {recording}, ended {ended}, \
          awaiting consent {awaiting}, resumed {resumed}, retry pending {retried}, \
-         unpublished {unpublished}, publish timed out {publish_timeouts}"
+         unpublished {unpublished}, publish timed out {publish_timeouts}, \
+         waiting guests let in by the first host {released}, expired unused {expired}, \
+         promoted by the owner {promoted}"
     );
 }

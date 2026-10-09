@@ -14,6 +14,10 @@ pub enum Event {
         from: ParticipantId,
         /// The parsed message.
         msg: ClientMsg,
+        /// Whether the socket belongs to the authenticated owner, which the shell decides (the
+        /// Worker from the owner's session cookie). A [`ClientMsg::Join`] from such a socket
+        /// makes a host, or turns the guest whose place it takes into one.
+        owner: bool,
         /// A new token from the shell's random bytes. The room keeps it as the sender's resume
         /// token if `msg` is a [`ClientMsg::Join`] that adds a participant, and ignores it
         /// otherwise.
@@ -215,8 +219,9 @@ pub enum Effect {
         rid: Rid,
     },
     /// Fire [`Event::AlarmFired`] at this time, replacing any earlier alarm. The room has one
-    /// alarm, at the earliest time it must act: when an empty room ends, when a publish offer or
-    /// a subscribe negotiation times out, or when a failed subscription is retried. It emits this whenever
+    /// alarm, at the earliest time it must act: when an unused scheduled room expires, when an
+    /// empty live room ends, when a publish offer or a subscribe negotiation times out, or when a
+    /// failed subscription is retried. It emits this whenever
     /// that time changes and after every alarm; it never clears an alarm, because a spurious
     /// one is harmless.
     SetAlarm {

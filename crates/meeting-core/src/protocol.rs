@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
 use crate::ids::{
-    DisplayName, HostToken, MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, TrackName,
-    TranscriptRef,
+    DisplayName, MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, TrackName, TranscriptRef,
 };
 
 /// A participant's authority in the room.
@@ -14,7 +13,8 @@ use crate::ids::{
 #[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub enum Role {
-    /// Joined with the host token; may lock, admit, kick, mute, record and end.
+    /// Joined from a socket of the authenticated owner; may lock, admit, kick, mute, record and
+    /// end.
     Host,
     /// Everyone else.
     Guest,
@@ -108,11 +108,29 @@ pub enum RecordingPolicy {
     HostDecides,
 }
 
+/// Where the meeting stands in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
+#[serde(rename_all = "camelCase")]
+pub enum Phase {
+    /// Created ahead of time; no host has joined yet. Guests wait for the first host, and the
+    /// room expires if no host joins within [`crate::SCHEDULED_TTL_MS`].
+    Scheduled,
+    /// A host has joined at least once. The room ends when a host ends it or after
+    /// [`crate::EMPTY_ROOM_TIMEOUT_MS`] without admitted participants.
+    Live,
+    /// Over; the room accepts nobody.
+    Ended,
+}
+
 /// Where a participant stands in the room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub enum Presence {
+    /// A guest in a scheduled room, waiting for the first host; let in automatically when the
+    /// first host joins.
+    WaitingForHost,
     /// Waiting for a host to admit them into the locked room.
     Knocking,
     /// Let in by a host or an unlocked room, but the room records and they have not consented;
@@ -137,7 +155,7 @@ pub struct ParticipantView {
     pub role: Role,
     /// Whether they agreed to be recorded; only consenting participants are recorded.
     pub consent_recording: bool,
-    /// Knocking, awaiting consent, connecting or joined.
+    /// Waiting for the host, knocking, awaiting consent, connecting or joined.
     pub presence: Presence,
     /// Kinds of the tracks they publish, sorted.
     pub tracks: Vec<TrackKind>,
@@ -150,6 +168,8 @@ pub struct ParticipantView {
 pub struct RoomView {
     /// The meeting's link words.
     pub meeting: MeetingId,
+    /// Scheduled, live or ended.
+    pub phase: Phase,
     /// Whether guests must knock.
     pub locked: bool,
     /// Whether the meeting records from the start; the pre-join screen shows it.
@@ -168,20 +188,18 @@ pub struct RoomView {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientMsg {
     /// Enter the room. Must be the socket's first message; repeating it changes nothing and
-    /// gets the same reply again.
+    /// gets the same reply again. The participant becomes a host if the shell reports the socket
+    /// as the authenticated owner's ([`crate::Event::Client`]), and a guest otherwise.
     #[serde(rename_all = "camelCase")]
     Join {
         /// Display name.
         name: DisplayName,
         /// Whether the participant accepts recording and transcription.
         consent: bool,
-        /// The host token, if this participant created the meeting.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "wasm", tsify(optional))]
-        host_token: Option<HostToken>,
         /// The token from an earlier [`ServerMsg::Welcome`], after the socket dropped. If its
         /// participant is still in the room, this socket takes their place with their role and
-        /// tracks, and the other fields are ignored; otherwise this is a fresh join.
+        /// tracks, and the other fields are ignored; otherwise this is a fresh join. A guest's
+        /// place taken from the owner's socket becomes a host's.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "wasm", tsify(optional))]
         resume: Option<ResumeToken>,
@@ -268,7 +286,8 @@ pub enum ServerMsg {
         /// The room as it is now.
         state: RoomView,
     },
-    /// The room is locked; wait until a host admits you.
+    /// Wait outside: the room is locked and a host must admit you, or the meeting is scheduled
+    /// and you enter when the first host joins.
     Waiting,
     /// The SFU's answer to your publish offer.
     PublishAnswer {
@@ -318,8 +337,6 @@ pub enum ErrorCode {
     MalformedMessage,
     /// The message needs a joined participant.
     NotJoined,
-    /// The host token is wrong.
-    InvalidHostToken,
     /// Only hosts may do this.
     NotHost,
     /// The target participant does not exist or is in the wrong state.

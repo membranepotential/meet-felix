@@ -1,16 +1,12 @@
 //! Helpers that drive a room through events.
 
 use crate::{
-    ClientMsg, DisplayName, Effect, Event, HostToken, LocalTrack, MeetingId, Mid, Millis,
-    ParticipantId, RecordingPolicy, ResumeToken, RoomState, Sdp, SessionId, SessionKind, SfuReply,
-    TrackKind, TrackName, TranscriptRef, step,
+    ClientMsg, DisplayName, Effect, Event, LocalTrack, MeetingId, Mid, Millis, ParticipantId,
+    RecordingPolicy, ResumeToken, RoomState, Sdp, SessionId, SessionKind, SfuReply, TrackKind,
+    TrackName, TranscriptRef, step,
 };
 
 pub(super) const T0: Millis = Millis(1_700_000_000_000);
-
-pub(super) fn host_token() -> HostToken {
-    HostToken::new("host-secret")
-}
 
 pub(super) fn transcript() -> TranscriptRef {
     TranscriptRef::new("t-123")
@@ -55,13 +51,13 @@ pub(super) struct Room {
 }
 
 impl Room {
-    /// A room where the host decides when to record.
+    /// A scheduled room where the host decides when to record.
     pub(super) fn new() -> (Self, Vec<Effect>) {
         Self::with_policy(RecordingPolicy::HostDecides)
     }
 
     pub(super) fn with_policy(policy: RecordingPolicy) -> (Self, Vec<Effect>) {
-        let (state, effects) = RoomState::new(meeting(), host_token(), transcript(), policy, T0);
+        let (state, effects) = RoomState::new(meeting(), transcript(), policy, T0);
         let room = Self {
             state,
             now: T0,
@@ -70,7 +66,7 @@ impl Room {
         (room, effects)
     }
 
-    /// The token the next client message carries; [`Room::client`] uses it up.
+    /// The token the next client message carries; [`Room::client_from`] uses it up.
     pub(super) fn next_token(&self) -> ResumeToken {
         token(self.tokens)
     }
@@ -81,12 +77,24 @@ impl Room {
         effects
     }
 
+    /// A message from a socket that is not the owner's.
     pub(super) fn client(&mut self, from: ParticipantId, msg: ClientMsg) -> Vec<Effect> {
+        self.client_from(from, msg, false)
+    }
+
+    /// A message from a socket the shell reports as the owner's or not.
+    pub(super) fn client_from(
+        &mut self,
+        from: ParticipantId,
+        msg: ClientMsg,
+        owner: bool,
+    ) -> Vec<Effect> {
         let fresh_token = self.next_token();
         self.tokens += 1;
         self.apply(Event::Client {
             from,
             msg,
+            owner,
             fresh_token,
         })
     }
@@ -95,16 +103,16 @@ impl Room {
         self.apply(Event::Sfu(reply))
     }
 
+    /// Joins from the owner's socket (as a host) or another socket (as a guest).
     pub(super) fn join(&mut self, who: ParticipantId, host: bool, consent: bool) -> Vec<Effect> {
-        let host_token = host.then(host_token);
-        self.client(
+        self.client_from(
             who,
             ClientMsg::Join {
                 name: name(&format!("P{}", who.0)),
                 consent,
-                host_token,
                 resume: None,
             },
+            host,
         )
     }
 

@@ -1,30 +1,36 @@
 //! Cloudflare Worker for meet-felix: the HTTP router plus the per-meeting `RoomObject`.
 //!
-//! Routes:
-//! - `POST /api/new` (`Authorization: Bearer <CREATE_SECRET>`, optional body
-//!   `{"recording": "fromStart" | "hostDecides"}`) creates a meeting and returns
-//!   `{"meeting", "hostToken"}` with status 201.
-//! - `GET /api/meetings` (`Authorization: Bearer <CREATE_SECRET>`) returns the owner's last
-//!   meetings, newest first: `{"meetings": [{"meeting", "createdAt", "ended", "transcript"?}]}`.
-//! - `GET /api/meeting/:words` returns `{"recordingPolicy", "ended"}`, or 404.
+//! Routes ("owner only" means the owner's session cookie or
+//! `Authorization: Bearer <CREATE_SECRET>`, else 401):
+//! - `POST /api/login` with `{"password"}` sets the owner's session cookie (204), or 401.
+//! - `POST /api/logout` clears it (204).
+//! - `GET /api/me` answers 204 with a valid session cookie, 401 without.
+//! - `POST /api/new` (owner only, optional body `{"recording": "fromStart" | "hostDecides"}`)
+//!   creates a scheduled meeting and returns `{"meeting"}` with status 201.
+//! - `GET /api/meetings` (owner only) returns the owner's last meetings, newest first:
+//!   `{"meetings": [{"meeting", "createdAt", "ended", "transcript"?}]}`.
+//! - `GET /api/meeting/:words` returns `{"recordingPolicy", "phase", "ended"}`, or 404.
 //! - `GET /api/ice` returns the ICE servers for `RTCPeerConnection`.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
+//!   A socket opened with the owner's session cookie joins as host (D32 in `docs/architecture`).
 
 mod internal;
 mod meetings;
+mod owner;
 mod random;
 mod record;
 mod room;
 mod sfu;
 
-use meeting_core::{HostToken, MeetingId, Millis, RecordingPolicy};
+use meeting_core::{MeetingId, Millis, RecordingPolicy, SCHEDULED_TTL_MS};
 use serde::{Deserialize, Serialize};
 use worker::{
     Context, Date, Env, KvStore, Method, Request, RequestInit, Response, Result, RouteContext,
     Router, console_error, event,
 };
 
-use crate::internal::{INFO, INIT, InitRoom, ORIGIN};
+use crate::internal::{INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES};
+use crate::owner::{CreateSecret, OwnerSession};
 
 /// KV namespace mapping meeting words to the Room Durable Object id (hex); also holds the
 /// owner's meeting index under [`meetings::KEY`].
@@ -33,10 +39,14 @@ const MEETINGS: &str = "MEETINGS";
 const ROOMS: &str = "ROOMS";
 /// Var naming the jurisdiction new rooms are pinned to; see [`Jurisdiction`].
 const ROOM_JURISDICTION: &str = "ROOM_JURISDICTION";
-/// Secret that `POST /api/new` and `GET /api/meetings` require as a bearer token (D7 in `docs/links`).
+/// The owner's password, which `POST /api/login` checks and owner-only routes also accept as a
+/// bearer token (D7 in `docs/links`).
 const CREATE_SECRET: &str = "CREATE_SECRET";
-/// Upper bound for a meeting link's life; the room usually releases it much earlier.
-const MEETING_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+/// Upper bound for a meeting link's life (90 days); the room releases it when it ends. Longer
+/// than the core's `SCHEDULED_TTL_MS` (60 days), so a scheduled link works until the room
+/// expires (D6 in `docs/links`).
+const MEETING_TTL_SECS: u64 = 90 * 24 * 60 * 60;
+const _: () = assert!(MEETING_TTL_SECS * 1000 > SCHEDULED_TTL_MS);
 /// Draws of fresh words before giving up when all drawn combinations are taken.
 const WORD_DRAWS: usize = 8;
 /// Cloudflare's free STUN server. TURN credentials follow in phase 2.
@@ -92,10 +102,14 @@ fn record_from_start() -> RecordingPolicy {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct NewMeeting {
     meeting: MeetingId,
-    host_token: HostToken,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginRequest {
+    password: String,
 }
 
 #[derive(Serialize)]
@@ -120,6 +134,20 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }
     };
     Router::with_data(Config { jurisdiction })
+        .post_async("/api/login", login)
+        .post("/api/logout", |_, _| {
+            with_cookie(Response::empty()?.with_status(204), &OwnerSession::clear())
+        })
+        .get("/api/me", |req, ctx| {
+            let Some(secret) = create_secret(&ctx) else {
+                return not_configured();
+            };
+            if is_owner_session(&req, &secret)? {
+                Ok(Response::empty()?.with_status(204))
+            } else {
+                Response::error("unauthorized", 401)
+            }
+        })
         .post_async("/api/new", new_meeting)
         .get_async("/api/meetings", past_meetings)
         .get_async("/api/meeting/:words", meeting_info)
@@ -133,6 +161,24 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/ws/:words", join_meeting)
         .run(req, env)
         .await
+}
+
+/// `POST /api/login`: sets the owner's session cookie if the password is `CREATE_SECRET`.
+async fn login(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+    let Some(secret) = create_secret(&ctx) else {
+        return not_configured();
+    };
+    let request: LoginRequest = match serde_json::from_str(&req.text().await?) {
+        Ok(request) => request,
+        Err(e) => return Response::error(format!("bad request: {e}"), 400),
+    };
+    if !secret.matches(&request.password) {
+        return Response::error("wrong password", 401);
+    }
+    with_cookie(
+        Response::empty()?.with_status(204),
+        &OwnerSession::new(&secret).issue(now()),
+    )
 }
 
 async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
@@ -157,11 +203,9 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
         None => rooms.unique_id()?,
         Some(jurisdiction) => rooms.unique_id_with_jurisdiction(jurisdiction.as_str())?,
     };
-    let host_token = random::host_token()?;
     let transcript = random::transcript_ref()?;
     let init = InitRoom {
         meeting: meeting.clone(),
-        host_token: host_token.clone(),
         transcript: transcript.clone(),
         recording_policy: request.recording,
     };
@@ -197,11 +241,7 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
     if let Err(e) = meetings::update(&kv, |index| Some(meetings::added(index, entry))).await {
         console_error!("adding {meeting:?} to the meeting index failed: {e}");
     }
-    Ok(Response::from_json(&NewMeeting {
-        meeting,
-        host_token,
-    })?
-    .with_status(201))
+    Ok(Response::from_json(&NewMeeting { meeting })?.with_status(201))
 }
 
 /// `GET /api/meetings`: the owner's last [`meetings::MAX_ENTRIES`] meetings, newest first, from
@@ -216,21 +256,45 @@ async fn past_meetings(req: Request, ctx: RouteContext<Config>) -> Result<Respon
     Response::from_json(&meetings::listing(index))
 }
 
-/// The error response for a request without the owner's creation secret, or `None` for the
-/// owner (D7 in `docs/links`).
+/// The error response for a request that is not the owner's, or `None` for the owner: a valid
+/// session cookie or the creation secret as bearer token (D7 in `docs/links`).
 fn refuse_non_owner(req: &Request, ctx: &RouteContext<Config>) -> Result<Option<Response>> {
-    let Ok(secret) = ctx.secret(CREATE_SECRET) else {
-        console_error!("{CREATE_SECRET} is not set; nobody can create or list meetings");
-        return Response::error("meeting creation is not configured", 500).map(Some);
+    let Some(secret) = create_secret(ctx) else {
+        return not_configured().map(Some);
     };
-    if is_bearer(
-        req.headers().get("Authorization")?.as_deref(),
-        &secret.to_string(),
-    ) {
+    let bearer = is_bearer(req.headers().get("Authorization")?.as_deref(), &secret);
+    if bearer || is_owner_session(req, &secret)? {
         Ok(None)
     } else {
         Response::error("unauthorized", 401).map(Some)
     }
+}
+
+/// [`CREATE_SECRET`], or `None` (logged) if it is unset or empty.
+fn create_secret(ctx: &RouteContext<Config>) -> Option<CreateSecret> {
+    let secret = ctx
+        .secret(CREATE_SECRET)
+        .ok()
+        .and_then(|secret| CreateSecret::new(secret.to_string()));
+    if secret.is_none() {
+        console_error!("{CREATE_SECRET} is not set; nobody can log in, create or list meetings");
+    }
+    secret
+}
+
+fn not_configured() -> Result<Response> {
+    Response::error("the owner's password is not configured", 500)
+}
+
+/// Whether `req` carries the owner's valid session cookie.
+fn is_owner_session(req: &Request, secret: &CreateSecret) -> Result<bool> {
+    let cookies = req.headers().get("Cookie")?;
+    Ok(OwnerSession::new(secret).verify(cookies.as_deref(), now()))
+}
+
+fn with_cookie(response: Response, set_cookie: &str) -> Result<Response> {
+    response.headers().set("Set-Cookie", set_cookie)?;
+    Ok(response)
 }
 
 async fn meeting_info(_req: Request, ctx: RouteContext<Config>) -> Result<Response> {
@@ -240,6 +304,8 @@ async fn meeting_info(_req: Request, ctx: RouteContext<Config>) -> Result<Respon
     room.fetch_with_str(&format!("{ORIGIN}{INFO}")).await
 }
 
+/// Forwards the upgrade to the room, telling it in [`OWNER_HEADER`] whether the socket is the
+/// owner's. A missing `CREATE_SECRET` makes every socket a guest's.
 async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     if !is_websocket_upgrade(&req)? {
         return Response::error("expected a WebSocket upgrade", 426);
@@ -247,7 +313,16 @@ async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Respons
     let Some(room) = room_stub(&ctx).await? else {
         return Response::error("unknown meeting", 404);
     };
-    room.fetch_with_request(req).await
+    let owner = match create_secret(&ctx) {
+        Some(secret) => is_owner_session(&req, &secret)?,
+        None => false,
+    };
+    let forwarded = req.clone_mut()?;
+    forwarded.headers().delete(OWNER_HEADER)?;
+    if owner {
+        forwarded.headers().set(OWNER_HEADER, OWNER_YES)?;
+    }
+    room.fetch_with_request(forwarded).await
 }
 
 /// Draws words until a combination is not mapped in KV.
@@ -292,19 +367,11 @@ fn is_websocket_upgrade(req: &Request) -> Result<bool> {
         .is_some_and(|value| value.eq_ignore_ascii_case("websocket")))
 }
 
-/// Whether `header` is `Bearer <secret>`. Compares in time independent of where the token
-/// differs, so response times do not reveal the secret.
-fn is_bearer(header: Option<&str>, secret: &str) -> bool {
-    let Some(token) = header.and_then(|h| h.strip_prefix("Bearer ")) else {
-        return false;
-    };
-    !secret.is_empty()
-        && token.len() == secret.len()
-        && token
-            .bytes()
-            .zip(secret.bytes())
-            .fold(0, |diff, (a, b)| diff | (a ^ b))
-            == 0
+/// Whether `header` is `Bearer <secret>`.
+fn is_bearer(header: Option<&str>, secret: &CreateSecret) -> bool {
+    header
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .is_some_and(|token| secret.matches(token))
 }
 
 #[cfg(test)]
@@ -325,19 +392,17 @@ mod tests {
 
     #[test]
     fn bearer_must_match_the_secret_exactly() {
-        assert!(is_bearer(Some("Bearer s3cret"), "s3cret"));
+        let secret = CreateSecret::new("s3cret".into()).unwrap();
+        assert!(is_bearer(Some("Bearer s3cret"), &secret));
         for header in [
             None,
             Some("s3cret"),
+            Some("Bearer "),
             Some("Bearer s3cre"),
             Some("Bearer s3cret "),
         ] {
-            assert!(!is_bearer(header, "s3cret"), "{header:?}");
+            assert!(!is_bearer(header, &secret), "{header:?}");
         }
-        assert!(
-            !is_bearer(Some("Bearer "), ""),
-            "an empty secret opens nothing"
-        );
     }
 
     #[test]
@@ -352,12 +417,20 @@ mod tests {
     }
 
     #[test]
-    fn new_meeting_response_is_camel_case() {
+    fn new_meeting_response_holds_only_the_meeting() {
+        let meeting = MeetingId::from_random([0, 0, 0]);
         let json = serde_json::to_value(NewMeeting {
-            meeting: MeetingId::from_random([0, 0, 0]),
-            host_token: HostToken::new("t"),
+            meeting: meeting.clone(),
         })
         .unwrap();
-        assert!(json.get("hostToken").is_some());
+        assert_eq!(json, serde_json::json!({ "meeting": meeting }));
+    }
+
+    #[test]
+    fn login_body_is_just_the_password() {
+        let parse = |json| serde_json::from_str::<LoginRequest>(json).map(|r| r.password);
+        assert_eq!(parse(r#"{"password":"pw"}"#).ok().as_deref(), Some("pw"));
+        assert!(parse("{}").is_err());
+        assert!(parse(r#"{"password":"pw","user":"x"}"#).is_err());
     }
 }

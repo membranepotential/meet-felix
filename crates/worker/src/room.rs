@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, MeetingId, Millis, ParticipantId, RoomState, ServerMsg,
-    SfuReply,
+    ClientMsg, Effect, ErrorCode, Event, MeetingId, Millis, ParticipantId, Phase, RoomState,
+    ServerMsg, SfuReply,
 };
 use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
@@ -24,8 +24,8 @@ use worker::{
     console_log, console_warn, durable_object,
 };
 
-use crate::internal::{INFO, INIT, InitRoom, RoomInfo};
-use crate::record::{Attachment, Record, alarm_time, is_stale};
+use crate::internal::{INFO, INIT, InitRoom, OWNER_HEADER, OWNER_YES, RoomInfo};
+use crate::record::{Attachment, OpenSocket, Record, alarm_time, is_stale};
 use crate::{MEETINGS, is_websocket_upgrade, meetings, now, random, sfu};
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
@@ -57,12 +57,16 @@ impl DurableObject for RoomObject {
         Self { state, env }
     }
 
-    /// The router's [`INIT`] and [`INFO`] requests, and forwarded WebSocket upgrades.
+    /// The router's [`INIT`] and [`INFO`] requests, and forwarded WebSocket upgrades. Only the
+    /// router reaches the object, so [`OWNER_HEADER`] is the router's verdict.
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         match (req.method(), req.path().as_str()) {
             (Method::Post, INIT) => self.init(req.json().await?).await,
             (Method::Get, INFO) => self.info().await,
-            _ if is_websocket_upgrade(&req)? => self.accept().await,
+            _ if is_websocket_upgrade(&req)? => {
+                let owner = req.headers().get(OWNER_HEADER)?.as_deref() == Some(OWNER_YES);
+                self.accept(owner).await
+            }
             _ => Response::error("not found", 404),
         }
     }
@@ -72,7 +76,7 @@ impl DurableObject for RoomObject {
         ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
-        let Some(Attachment::Open { participant, .. }) = attachment(&ws)? else {
+        let Some(Attachment::Open(socket)) = attachment(&ws)? else {
             return Ok(());
         };
         let msg = match message {
@@ -88,8 +92,9 @@ impl DurableObject for RoomObject {
             );
         };
         self.handle([Event::Client {
-            from: participant,
+            from: socket.participant,
             msg,
+            owner: socket.owner,
             fresh_token: random::resume_token()?,
         }])
         .await
@@ -127,9 +132,11 @@ impl DurableObject for RoomObject {
         let now = now();
         let stale = self
             .open_sockets()
-            .filter(|(ws, _, since)| is_stale(now, *since, last_ping(&self.state, ws)))
-            .map(|(ws, who, _)| Input {
-                event: Event::SocketClosed { who },
+            .filter(|(ws, socket)| is_stale(now, socket.since, last_ping(&self.state, ws)))
+            .map(|(ws, socket)| Input {
+                event: Event::SocketClosed {
+                    who: socket.participant,
+                },
                 close_stale: Some(ws),
             });
         let inputs: VecDeque<Input> = std::iter::once(Input::from(Event::AlarmFired))
@@ -148,13 +155,8 @@ impl RoomObject {
         if self.load().await?.is_some() {
             return Response::error("room exists", 409);
         }
-        let (room, effects) = RoomState::new(
-            init.meeting,
-            init.host_token,
-            init.transcript,
-            init.recording_policy,
-            now(),
-        );
+        let (room, effects) =
+            RoomState::new(init.meeting, init.transcript, init.recording_policy, now());
         self.store(&Record::created(room, &effects)).await?;
         let replies = self.execute_step(effects, &mut 0).await?;
         self.handle(replies.into_iter().map(Event::Sfu)).await?;
@@ -164,20 +166,20 @@ impl RoomObject {
     async fn info(&self) -> Result<Response> {
         let info = match self.load().await? {
             None => return Response::error("unknown meeting", 404),
-            Some(Record::Open(open)) => RoomInfo {
-                recording_policy: open.room.view().recording_policy,
-                ended: false,
-            },
-            Some(Record::Ended { recording_policy }) => RoomInfo {
-                recording_policy,
-                ended: true,
-            },
+            Some(Record::Open(open)) => {
+                let view = open.room.view();
+                RoomInfo::new(view.recording_policy, view.phase)
+            }
+            Some(Record::Ended { recording_policy }) => {
+                RoomInfo::new(recording_policy, Phase::Ended)
+            }
         };
         Response::from_json(&info)
     }
 
-    /// Accepts a socket for a running meeting and gives it the next participant id.
-    async fn accept(&self) -> Result<Response> {
+    /// Accepts a socket for a scheduled or running meeting and gives it the next participant
+    /// id; `owner` says whether the router verified the owner's session on it.
+    async fn accept(&self, owner: bool) -> Result<Response> {
         let open = match self.load().await? {
             None => return Response::error("unknown meeting", 404),
             Some(Record::Ended { .. }) => return Response::error("meeting ended", 410),
@@ -188,10 +190,11 @@ impl RoomObject {
         self.store(&record).await?;
         let WebSocketPair { client, server } = WebSocketPair::new()?;
         self.state.accept_web_socket(&server);
-        server.serialize_attachment(Attachment::Open {
+        server.serialize_attachment(Attachment::Open(OpenSocket {
             participant,
             since: now(),
-        })?;
+            owner,
+        }))?;
         self.arm(alarm).await?;
         Response::from_websocket(client)
     }
@@ -201,11 +204,13 @@ impl RoomObject {
     /// to be reported again. The runtime may report both an error and a close for the same
     /// socket; a second report in between is harmless, because the participant already left.
     async fn socket_gone(&self, ws: &WebSocket) -> Result<()> {
-        let Some(Attachment::Open { participant, .. }) = attachment(ws)? else {
+        let Some(Attachment::Open(socket)) = attachment(ws)? else {
             return Ok(());
         };
-        self.handle([Event::SocketClosed { who: participant }])
-            .await?;
+        self.handle([Event::SocketClosed {
+            who: socket.participant,
+        }])
+        .await?;
         ws.serialize_attachment(Attachment::Closed)
     }
 
@@ -268,7 +273,7 @@ impl RoomObject {
             Effect::Send { to, msg } => self.send_to(&[to], &msg)?,
             Effect::Broadcast { to, msg } => self.send_to(&to, &msg)?,
             Effect::CloseSocket { who } => {
-                for (ws, ..) in self.open_sockets().filter(|(_, p, _)| *p == who) {
+                for (ws, _) in self.open_sockets().filter(|(_, s)| s.participant == who) {
                     close(&ws, CLOSE_NORMAL, "closed by the room");
                 }
             }
@@ -276,8 +281,12 @@ impl RoomObject {
                 socket,
                 participant,
             } => {
-                for (ws, _, since) in self.open_sockets().filter(|(_, p, _)| *p == socket) {
-                    ws.serialize_attachment(Attachment::Open { participant, since })?;
+                // The socket keeps its owner flag: the owner's socket stays the owner's.
+                for (ws, open) in self.open_sockets().filter(|(_, s)| s.participant == socket) {
+                    ws.serialize_attachment(Attachment::Open(OpenSocket {
+                        participant,
+                        ..open
+                    }))?;
                 }
             }
             Effect::SetAlarm { at } => self.arm(Some(at)).await?,
@@ -296,7 +305,7 @@ impl RoomObject {
                 }
             }
             Effect::EndMeeting => {
-                for (ws, ..) in self.open_sockets() {
+                for (ws, _) in self.open_sockets() {
                     close(&ws, CLOSE_NORMAL, "meeting ended");
                 }
                 self.state.storage().delete_alarm().await?;
@@ -377,7 +386,10 @@ impl RoomObject {
     /// does not stop delivery to the others.
     fn send_to(&self, to: &[ParticipantId], msg: &ServerMsg) -> Result<()> {
         let text = serde_json::to_string(msg)?;
-        for (ws, ..) in self.open_sockets().filter(|(_, p, _)| to.contains(p)) {
+        for (ws, _) in self
+            .open_sockets()
+            .filter(|(_, s)| to.contains(&s.participant))
+        {
             if let Err(e) = ws.send_with_str(&text) {
                 console_warn!("send failed: {e}");
             }
@@ -385,13 +397,13 @@ impl RoomObject {
         Ok(())
     }
 
-    /// The sockets the room has not closed, with their participant and connect time.
-    fn open_sockets(&self) -> impl Iterator<Item = (WebSocket, ParticipantId, Millis)> {
+    /// The sockets the room has not closed, with their attachment.
+    fn open_sockets(&self) -> impl Iterator<Item = (WebSocket, OpenSocket)> {
         self.state
             .get_websockets()
             .into_iter()
             .filter_map(|ws| match attachment(&ws) {
-                Ok(Some(Attachment::Open { participant, since })) => Some((ws, participant, since)),
+                Ok(Some(Attachment::Open(socket))) => Some((ws, socket)),
                 _ => None,
             })
     }

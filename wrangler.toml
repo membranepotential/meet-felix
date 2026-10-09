@@ -26,7 +26,7 @@ ROOM_JURISDICTION = "eu"
 # Optional SFU_API_URL replaces https://rtc.live.cloudflare.com/v1, for the spike's mock SFU only.
 
 # Secrets (`pnpm exec wrangler secret put NAME`; locally in the git-ignored `.dev.vars`):
-# - CREATE_SECRET: bearer token that `POST /api/new` requires.
+# - CREATE_SECRET: the owner password. `POST /api/login` checks it and issues the session cookie; owner routes also accept it as a bearer token.
 # - CALLS_APP_ID, CALLS_APP_SECRET: the Realtime SFU app. Without them every join fails with
 #   `SfuUnavailable`.
 

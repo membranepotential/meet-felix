@@ -1,5 +1,8 @@
 //! What a `RoomObject` keeps across hibernation: one storage record and one attachment per
 //! socket. Pure, so the rules are tested natively.
+//!
+//! Both are JSON without a version. Records and attachments stored before the core's phases and
+//! the owner session (2026-10-09) do not deserialize; nothing with real users was deployed then.
 
 use meeting_core::{Effect, Event, Millis, ParticipantId, RecordingPolicy, RoomState, step};
 use serde::{Deserialize, Serialize};
@@ -109,15 +112,24 @@ impl OpenRoom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "socket", rename_all = "camelCase")]
 pub enum Attachment {
-    /// Messages and the close of this socket are `participant`'s. `since` is when the socket
-    /// connected, or `participant` resumed on it.
-    Open {
-        participant: ParticipantId,
-        since: Millis,
-    },
+    /// The socket delivers events.
+    Open(OpenSocket),
     /// The room closed this socket (`Effect::CloseSocket`, the keepalive check, the meeting's
     /// end) or saw it fail; it delivers no more events.
     Closed,
+}
+
+/// A socket the room has not closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSocket {
+    /// Messages and the close of this socket are this participant's.
+    pub participant: ParticipantId,
+    /// When the socket connected, or `participant` resumed on it.
+    pub since: Millis,
+    /// Whether the router verified the owner's session cookie on the upgrade; the room passes
+    /// it to the core with every message (`Event::Client.owner`).
+    pub owner: bool,
 }
 
 /// When the object's alarm must fire: the earlier of the core's alarm and, while sockets are
@@ -140,8 +152,8 @@ pub fn is_stale(now: Millis, since: Millis, last_ping: Option<Millis>) -> bool {
 #[cfg(test)]
 mod tests {
     use meeting_core::{
-        ClientMsg, DisplayName, EMPTY_ROOM_TIMEOUT_MS, HostToken, MeetingId, ResumeToken,
-        SessionId, SessionKind, SfuReply, TranscriptRef,
+        ClientMsg, DisplayName, MeetingId, Phase, ResumeToken, SCHEDULED_TTL_MS, SessionId,
+        SessionKind, SfuReply, TranscriptRef,
     };
 
     use super::*;
@@ -151,7 +163,6 @@ mod tests {
     fn open_room() -> OpenRoom {
         let (room, effects) = RoomState::new(
             MeetingId::from_random([1, 2, 3]),
-            HostToken::new("host"),
             TranscriptRef::new("transcript"),
             RecordingPolicy::HostDecides,
             T0,
@@ -164,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_new_room_remembers_the_cores_alarm() {
-        assert_eq!(open_room().alarm, Some(T0.after(EMPTY_ROOM_TIMEOUT_MS)));
+        assert_eq!(open_room().alarm, Some(T0.after(SCHEDULED_TTL_MS)));
     }
 
     #[test]
@@ -179,7 +190,7 @@ mod tests {
 
     const HOST: ParticipantId = ParticipantId(0);
 
-    /// A room whose host joined and got both SFU sessions.
+    /// A live room: its host joined from the owner's socket and got both SFU sessions.
     fn room_with_host() -> OpenRoom {
         let host = HOST;
         let join = Event::Client {
@@ -187,9 +198,9 @@ mod tests {
             msg: ClientMsg::Join {
                 name: DisplayName::parse("Ada").unwrap(),
                 consent: true,
-                host_token: Some(HostToken::new("host")),
                 resume: None,
             },
+            owner: true,
             fresh_token: ResumeToken::from_random([7; 16]),
         };
         let mut open = open_room();
@@ -210,14 +221,15 @@ mod tests {
             };
             open = next;
         }
+        assert_eq!(open.room.view().phase, Phase::Live);
         open
     }
 
     #[test]
     fn a_fired_alarm_is_forgotten_unless_the_core_sets_it_again() {
-        let fired_at = T0.after(EMPTY_ROOM_TIMEOUT_MS);
+        let fired_at = T0.after(SCHEDULED_TTL_MS);
         let room = room_with_host();
-        // The host's join cancelled the empty-room alarm, but the core never clears an alarm.
+        // Going live cancelled the scheduled room's expiry, but the core never clears an alarm.
         assert_eq!(room.alarm, Some(fired_at));
         let (Record::Open(open), effects) = room.step(fired_at, Event::AlarmFired) else {
             panic!("an alarm in an occupied room keeps it open")
@@ -238,6 +250,7 @@ mod tests {
         let end = Event::Client {
             from: HOST,
             msg: ClientMsg::End,
+            owner: true,
             fresh_token: ResumeToken::from_random([8; 16]),
         };
         let (record, effects) = room_with_host().step(T0, end);
@@ -255,6 +268,21 @@ mod tests {
         let record = Record::Open(room_with_host());
         let json = serde_json::to_string(&record).unwrap();
         assert_eq!(serde_json::from_str::<Record>(&json).unwrap(), record);
+    }
+
+    #[test]
+    fn attachment_survives_json_with_the_owner_flag() {
+        let open = Attachment::Open(OpenSocket {
+            participant: ParticipantId(3),
+            since: T0,
+            owner: true,
+        });
+        let json = serde_json::to_value(open).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "socket": "open", "participant": 3, "since": T0.0, "owner": true })
+        );
+        assert_eq!(serde_json::from_value::<Attachment>(json).unwrap(), open);
     }
 
     #[test]

@@ -2,9 +2,10 @@
 
 use super::support::{Room, T0, name, session, track_name, transcript};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, HostToken, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Presence, RecordingPolicy, RemoteTrack,
-    Role, RoomState, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionKind, SfuCall, SfuReply, TrackKind,
+    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, Mid, Millis,
+    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Phase, Presence, RecordingPolicy,
+    RemoteTrack, Role, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg,
+    SessionKind, SfuCall, SfuReply, TrackKind,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -35,31 +36,180 @@ fn meeting_room() -> Room {
     room
 }
 
-#[test]
-fn host_token_decides_the_role() {
-    let (mut room, _) = Room::new();
-    room.enter(HOST, true);
-    room.enter(GUEST, false);
-    let roles: Vec<Role> = room
-        .state
+fn role(room: &Room, who: ParticipantId) -> Option<Role> {
+    room.state
         .view()
         .participants
         .iter()
+        .find(|p| p.id == who)
         .map(|p| p.role)
-        .collect();
-    assert_eq!(roles, [Role::Host, Role::Guest]);
+}
 
-    let wrong = ClientMsg::Join {
-        name: name("Eve"),
-        consent: true,
-        host_token: Some(HostToken::new("guess")),
-        resume: None,
-    };
+#[test]
+fn a_join_from_the_owners_socket_makes_a_host_and_any_other_a_guest() {
+    let (mut room, _) = Room::new();
+    room.enter(HOST, true);
+    room.enter(GUEST, false);
+    assert_eq!(role(&room, HOST), Some(Role::Host));
+    assert_eq!(role(&room, GUEST), Some(Role::Guest));
+}
+
+#[test]
+fn a_scheduled_room_has_no_empty_timer_and_ends_unused_after_sixty_days() {
+    let (mut room, effects) = Room::new();
+    let expiry = T0.after(SCHEDULED_TTL_MS);
+    assert_eq!(effects, [Effect::SetAlarm { at: expiry }]);
+
+    // Guests come and go; that neither ends the room nor moves its expiry.
     assert_eq!(
-        room.client(OTHER, wrong),
-        error(OTHER, ErrorCode::InvalidHostToken)
+        room.join(GUEST, false, true),
+        [Effect::Send {
+            to: GUEST,
+            msg: ServerMsg::Waiting
+        }]
     );
-    assert_eq!(presence(&room, OTHER), None);
+    room.join(OTHER, false, true);
+    assert_eq!(
+        room.client(OTHER, ClientMsg::Leave),
+        [Effect::CloseSocket { who: OTHER }]
+    );
+    room.now = T0.after(EMPTY_ROOM_TIMEOUT_MS);
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        [Effect::SetAlarm { at: expiry }]
+    );
+    assert_eq!(room.state.view().phase, Phase::Scheduled);
+
+    room.now = expiry;
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        [
+            Effect::Broadcast {
+                to: vec![GUEST],
+                msg: ServerMsg::Ended { transcript: None }
+            },
+            Effect::CloseSocket { who: GUEST },
+            Effect::ReleaseMeetingId {
+                meeting: room.state.meeting().clone()
+            },
+            Effect::EndMeeting,
+        ]
+    );
+    assert_eq!(room.state.view().phase, Phase::Ended);
+    assert_eq!(room.state.ended(), Some(expiry));
+}
+
+#[test]
+fn guests_wait_for_the_first_host_and_enter_with_it_if_they_consent_to_its_recording() {
+    let (mut room, _) = Room::with_policy(RecordingPolicy::FromStart);
+    room.join(GUEST, false, true);
+    room.join(OTHER, false, false);
+    assert_eq!(presence(&room, GUEST), Some(Presence::WaitingForHost));
+    assert_eq!(presence(&room, OTHER), Some(Presence::WaitingForHost));
+    // Nobody can lock a scheduled room, as only a joined host may; the first host's arrival is
+    // never held back by a lock.
+    assert_eq!(
+        room.client(GUEST, ClientMsg::Lock { on: true }),
+        error(GUEST, ErrorCode::NotJoined)
+    );
+
+    // A host who is still connecting does not let anyone in yet.
+    room.join(HOST, true, true);
+    assert_eq!(presence(&room, GUEST), Some(Presence::WaitingForHost));
+    assert_eq!(room.state.view().phase, Phase::Scheduled);
+
+    let effects = room.connect(HOST);
+    let [
+        Effect::Send {
+            to: HOST,
+            msg: ServerMsg::Welcome { state, .. },
+        },
+        rest @ ..,
+    ] = effects.as_slice()
+    else {
+        panic!("unexpected effects {effects:#?}");
+    };
+    assert_eq!(state.phase, Phase::Live);
+    assert_eq!(state.recording.map(|r| r.by), Some(HOST));
+    assert_eq!(
+        rest,
+        [
+            Effect::StartRecording { since: room.now },
+            Effect::Send {
+                to: OTHER,
+                msg: ServerMsg::ConsentRequired
+            },
+            Effect::SfuNewSession {
+                who: GUEST,
+                kind: SessionKind::Publish
+            },
+            Effect::SfuNewSession {
+                who: GUEST,
+                kind: SessionKind::Subscribe
+            },
+        ]
+    );
+    assert_eq!(presence(&room, GUEST), Some(Presence::Connecting));
+    assert_eq!(presence(&room, OTHER), Some(Presence::AwaitingConsent));
+}
+
+#[test]
+fn without_recording_every_waiting_guest_enters_with_the_first_host() {
+    let (mut room, _) = Room::new();
+    room.join(GUEST, false, false);
+    room.enter(HOST, true);
+    assert_eq!(presence(&room, GUEST), Some(Presence::Connecting));
+    assert_eq!(room.state.view().recording, None);
+}
+
+#[test]
+fn the_owners_socket_turns_the_guest_whose_place_it_takes_into_a_host() {
+    const NEW_SOCKET: ParticipantId = ParticipantId(9);
+    let mut room = meeting_room();
+    let token = room.state.participants[&GUEST].resume.clone();
+    let effects = room.client_from(
+        NEW_SOCKET,
+        ClientMsg::Join {
+            name: name("Owner"),
+            consent: true,
+            resume: Some(token),
+        },
+        true,
+    );
+    let view = room.state.view();
+    assert_eq!(role(&room, GUEST), Some(Role::Host));
+    assert_eq!(
+        effects,
+        [
+            Effect::Broadcast {
+                to: vec![HOST],
+                msg: ServerMsg::State {
+                    state: view.clone()
+                }
+            },
+            Effect::CloseSocket { who: GUEST },
+            Effect::Rebind {
+                socket: NEW_SOCKET,
+                participant: GUEST
+            },
+            Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::Welcome {
+                    you: GUEST,
+                    state: view,
+                    resume: room.state.participants[&GUEST].resume.clone()
+                }
+            },
+        ]
+    );
+
+    // A knocking guest joining again from the owner's socket is a host, and hosts never knock.
+    room.client(HOST, ClientMsg::Lock { on: true });
+    room.join(OTHER, false, true);
+    assert_eq!(presence(&room, OTHER), Some(Presence::Knocking));
+    room.join(OTHER, true, true);
+    assert_eq!(role(&room, OTHER), Some(Role::Host));
+    assert_eq!(presence(&room, OTHER), Some(Presence::Connecting));
 }
 
 #[test]
@@ -317,34 +467,6 @@ fn consent_given_later_records_and_withdrawn_consent_stops_recording_and_mutes()
 }
 
 #[test]
-fn a_from_start_meeting_records_once_the_first_host_joins() {
-    let (mut room, _) = Room::with_policy(RecordingPolicy::FromStart);
-    assert_eq!(
-        room.state.view().recording_policy,
-        RecordingPolicy::FromStart
-    );
-    room.enter(GUEST, false);
-    assert_eq!(room.state.view().recording, None);
-
-    room.join(HOST, true, true);
-    let effects = room.connect(HOST);
-    let [
-        Effect::Send {
-            to: HOST,
-            msg: ServerMsg::Welcome { state, .. },
-        },
-        Effect::Broadcast { to, .. },
-        Effect::StartRecording { since },
-    ] = effects.as_slice()
-    else {
-        panic!("unexpected effects {effects:#?}");
-    };
-    assert_eq!(to, &[GUEST]);
-    assert_eq!(*since, room.now);
-    assert_eq!(state.recording.map(|r| r.by), Some(HOST));
-}
-
-#[test]
 fn knocking_guests_neither_keep_the_room_alive_nor_move_its_end() {
     let (mut room, _) = Room::new();
     room.enter(HOST, true);
@@ -486,7 +608,6 @@ fn a_client_takes_its_place_again_on_a_new_socket() {
         ClientMsg::Join {
             name: name("Someone else"),
             consent: false,
-            host_token: None,
             resume: Some(token.clone()),
         },
     );
@@ -522,7 +643,6 @@ fn the_resume_token_of_someone_who_left_starts_a_fresh_join() {
         ClientMsg::Join {
             name: name("Guest"),
             consent: true,
-            host_token: None,
             resume: Some(token),
         },
     );

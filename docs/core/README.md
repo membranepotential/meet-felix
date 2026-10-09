@@ -34,16 +34,20 @@ The plan wrote it as `step(RoomState, Event) -> (RoomState, Vec<Effect>)`; the
 time is an extra argument because the core reads no clock.
 
 - **`RoomState`**: one serializable value holding everything about a room:
-  the meeting id and host token, the recording policy, the participants
+  the meeting id, the recording policy, the participants
   (name, role, recording consent, resume token, and connection state:
-  knocking, awaiting consent, connecting, joined with their SFU sessions and
-  tracks, or left), the lock, the recording status, since when the room is
-  empty, the transcript token, and when the room ended. The public part every
-  client sees is the `RoomView`; it includes the `recordingPolicy`, so the
-  pre-join screen can show the recording notice.
+  waiting for the host, knocking, awaiting consent, connecting, joined with
+  their SFU sessions and tracks, or left), the lock, the recording status,
+  the transcript token, and the phase with its timer (see
+  [Phases](#phases)): scheduled since its creation, live with since when the
+  room is empty, or ended at a time. The public part every client sees is the
+  `RoomView`; it includes the `phase` and the `recordingPolicy`, so the
+  pre-join screen can show whether the host is there yet and the recording
+  notice.
 - **`Event`**: something that happened. A client message
-  (`Event::Client`, which also carries a fresh `ResumeToken` made by the
-  shell from random bytes, see [Reconnecting](#reconnecting)), an SFU reply
+  (`Event::Client`, which also carries `owner`, whether the socket belongs to
+  the authenticated owner, and a fresh `ResumeToken` made by the shell from
+  random bytes, see [Reconnecting](#reconnecting)), an SFU reply
   to an earlier effect (`Event::Sfu`), a socket that closed without a `Leave`
   (`Event::SocketClosed`), or the alarm the core asked for
   (`Event::AlarmFired`).
@@ -57,13 +61,15 @@ time is an extra argument because the core reads no clock.
   meeting (`EndMeeting`, always the last effect a room produces).
 - **Protocol**: `ClientMsg` and `ServerMsg`, serialized with serde and
   exported to TypeScript with `tsify`. Client messages: `Join` (name,
-  consent, an optional host token and an optional resume token),
+  consent and an optional resume token; no host token since 2026-10-09, see
+  [Phases](#phases)),
   `SetConsent`, `PublishOffer`, `Unpublish` (a track kind), `SubscribeAnswer`,
   `SetLayer`, `Lock`,
   `Admit`, `Kick`, `Mute`, `SetRecording`, `End` and `Leave`. Server
   messages: `Welcome` (with the resume token), `State`, `Waiting`,
   `PublishAnswer`, `SubscribeOffer`, `Knock`, `ConsentRequired`, `Muted`,
-  `Kicked`, `Ended` and `Error`. The plan's sketch also had an `Ice` client
+  `Kicked`, `Ended` and `Error`. `Waiting` means "wait outside": the room is
+  locked, or no host has arrived yet. The plan's sketch also had an `Ice` client
   message; the code has none so far.
 
 The names above are those in the code on 2026-10-09; the code is the source
@@ -105,12 +111,51 @@ On 2026-10-09 the `RoomObject` from spike 1 does not yet call the core;
 wiring it in is the next step of the worker workstream (see
 [STATUS.md](../../STATUS.md)).
 
+## Phases
+
+Changed on 2026-10-09 (decided by the user): the owner creates a meeting
+ahead of time and the link stays valid until it is used, because the user
+wants to create a link today and meet next Tuesday. A room therefore has a
+`Phase`, part of `RoomView`:
+
+1. **`Scheduled`**: created, and no host has joined yet. Guests who join wait
+   (`Presence::WaitingForHost`, message `Waiting`); they may leave. The room
+   has no empty timer: it ends only if no host joins within
+   `SCHEDULED_TTL_MS` (60 days) of its creation, like a normal end (`Ended`
+   to the waiting guests, `ReleaseMeetingId`, `EndMeeting`) and without a
+   transcript, because nothing was recorded. Nobody can lock a scheduled
+   room, since only a joined host locks; so a lock never holds back the
+   guests waiting for the first host.
+2. **`Live`**: a host has joined at least once, meaning the host's SFU
+   sessions exist, not just its `Join`. In that step the room starts
+   recording if the policy is `FromStart`, then lets in every guest waiting
+   for the host. A waiting guest without consent to that recording is asked
+   for it (`ConsentRequired`) and waits in `AwaitingConsent` instead
+   ([D15](../recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
+   From then on the room follows the live rules: lock, knock and admit, and
+   the end after two empty minutes. The room never goes back to `Scheduled`,
+   even if every host leaves.
+3. **`Ended`**: over; the core ignores every further event.
+
+**Host = authenticated owner.** The browser no longer holds a host token.
+The shell tells the core in `Event::Client { owner }` whether the socket
+belongs to the authenticated owner (the Worker decides it from the owner's
+session cookie). A `Join` from such a socket makes a host, any other `Join` a
+guest. If the owner's socket takes a guest's place, by a resume token or a
+repeated `Join`, that guest becomes a host; a host who was waiting outside is
+let in, as hosts never wait. This is the "join as host" fallback: the owner
+logs in and reconnects. `HostToken` and `ErrorCode::InvalidHostToken` are
+gone.
+
 ## Rules the core enforces
 
 From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
 
-- A joiner with the host token becomes a host. Guests who join a locked room
-  knock until a host admits them.
+- A room is scheduled until the first host joins, then live, then ended
+  ([Phases](#phases)). A joiner from the owner's socket becomes a host,
+  everyone else a guest. Guests who join a scheduled room wait for the first
+  host and are let in with it; guests who join a locked live room knock
+  until a host admits them.
 - While the room records, no guest is admitted without consent. Such a guest
   waits in the `AwaitingConsent` state until they send `SetConsent` or
   recording stops ([D15](../recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
@@ -140,10 +185,11 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   If the SFU does not answer within `NEGOTIATION_TIMEOUT_MS`, the room drops
   the offer and sends `Error { PublishFailed }`, so the client may offer again
   (2026-10-09).
-- The room ends when a host ends it, or after `EMPTY_ROOM_TIMEOUT_MS` (two
+- A live room ends when a host ends it, or after `EMPTY_ROOM_TIMEOUT_MS` (two
   minutes) without admitted (connecting or joined) participants. Knocking
   guests and guests awaiting consent do not count, so their coming and going
-  does not move the end
+  does not move the end. A scheduled room has no empty timer; it ends only
+  after `SCHEDULED_TTL_MS` (60 days) without a host
   ([D8](../links/README.md#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09)).
 
 ## The alarm
@@ -152,7 +198,10 @@ A Durable Object has one alarm, so the core asks for one time: the earliest
 time it must act. `RoomState` derives it from its own state, with a reason
 for each candidate time:
 
-- `EmptyRoom`: the room has been empty for two minutes.
+- `Expire`: the room is still scheduled 60 days after its creation
+  (`SCHEDULED_TTL_MS`). Only a scheduled room has this reason.
+- `EmptyRoom`: the live room has been empty for two minutes. Only a live
+  room has this reason.
 - `Publish(participant)`: that participant's publish offer times out.
 - `Subscribe(participant)`: that participant's subscribe negotiation times
   out, or, while no negotiation runs, their earliest wanted track is due for
@@ -174,19 +223,26 @@ When a client's socket drops, it opens a new socket, which the shell gives a
 new participant id, and sends `Join { resume: Some(token) }`. If the token's
 participant has not left, the core emits `CloseSocket` for the old socket and
 `Rebind { socket: new id, participant: old id }`, and answers the participant
-as it would answer a repeated `Join` (`Welcome` when joined). Role, consent
-and tracks stay as they were. Otherwise, for example after the shell reported
+as it would answer a repeated `Join` (`Welcome` when joined). Consent and
+tracks stay as they were, and so does the role, except that a guest whose
+place the owner's socket takes becomes a host (2026-10-09, see
+[Phases](#phases)). Otherwise, for example after the shell reported
 `SocketClosed` for the old socket, the `Join` is a fresh join.
 
 A `Join` from a participant still in the room changes nothing and gets the
-same answer again (`Welcome`, `Waiting`, or `ConsentRequired`). A `Join` from
-a participant id that already left is a fresh join.
+same answer again (`Welcome`, `Waiting`, or `ConsentRequired`), unless it
+comes from the owner's socket and the participant is a guest: then they
+become a host. A `Join` from a participant id that already left is a fresh
+join.
 
 ## Invariants to test
 
-Property tests (`proptest`) generate random sequences of join, resume, leave,
+Property tests (`proptest`) generate random sequences of join (from the
+owner's socket or not, into a scheduled or live room), resume (also from the
+owner's socket), leave,
 kick, lock, knock, consent, publish, unpublish, renegotiation, SFU failure,
-lost SFU replies, alarms (at random times and at negotiation deadlines) and
+lost SFU replies, alarms (at random times, at negotiation deadlines and at
+the scheduled expiry) and
 recording events under both recording policies, run them through `step`, and check
 after every step that:
 
@@ -211,10 +267,19 @@ after every step that:
   is gone;
 - guests never succeed with `Lock`, `Admit`, `Kick`, `Mute`, `SetRecording`
   or `End`: the state stays the same and they get an `Error`;
-- a host is never locked out of their own room (only guests knock or await
-  consent);
-- the empty timer runs exactly while nobody is admitted, and the shell's
-  alarm is always set to the room's next due time.
+- a host is never locked out of their own room (only guests wait for the
+  host, knock or await consent); only the owner's socket turns a guest into a
+  host, and nothing turns a host into a guest;
+- no room is live without a host having joined; a scheduled room has nobody
+  joined, never comes back after going live, and ends only at its expiry;
+- a scheduled room has no empty-room alarm: its only alarm is the expiry;
+  only a scheduled room has guests waiting for the host;
+- guests waiting for the host are let in exactly in the step the first host
+  joins, except that a guest without consent while the room records is asked
+  for it and awaits it; before that they keep waiting until they leave, the
+  room expires, or the owner's socket makes them a host;
+- in a live room, the empty timer runs exactly while nobody is admitted, and
+  the shell's alarm is always set to the room's next due time.
 
 CI runs these tests from phase 1 on ([TESTING.md](../TESTING.md)).
 

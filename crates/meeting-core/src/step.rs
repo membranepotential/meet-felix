@@ -3,16 +3,16 @@
 use std::collections::BTreeSet;
 use std::mem;
 
-use crate::ids::{HostToken, Millis, ParticipantId, ResumeToken, Sdp, SessionId};
+use crate::ids::{Millis, ParticipantId, ResumeToken, Sdp, SessionId};
 use crate::protocol::{
     ClientMsg, ErrorCode, IncomingTrack, LocalTrack, Recording, RecordingPolicy, Rid, Role,
     RoomView, ServerMsg, TrackKind, TrackRef,
 };
 use crate::shell::{Effect, Event, OfferedTrack, RemoteTrack, SessionKind, SfuCall, SfuReply};
 use crate::state::{
-    AlarmReason, Connection, NEGOTIATION_TIMEOUT_MS, Offered, Participant, PublishNegotiation,
-    PublishSession, PublishedTrack, Receiving, RecordingStatus, RoomState, SUBSCRIBE_RETRY_MS,
-    SubscribeNegotiation, SubscribeSession,
+    AlarmReason, Connection, Lifecycle, NEGOTIATION_TIMEOUT_MS, Offered, Participant,
+    PublishNegotiation, PublishSession, PublishedTrack, Receiving, RecordingStatus, RoomState,
+    SUBSCRIBE_RETRY_MS, SubscribeNegotiation, SubscribeSession,
 };
 
 /// Applies one event and returns the new state and what the shell must do, in order.
@@ -23,7 +23,7 @@ use crate::state::{
 /// with an [`Effect::SetAlarm`] whenever the room's next alarm time changed, and after every
 /// alarm. After the meeting ended, every event is ignored.
 pub fn step(mut state: RoomState, now: Millis, event: Event) -> (RoomState, Vec<Effect>) {
-    if state.ended.is_some() {
+    if state.ended().is_some() {
         return (state, Vec::new());
     }
     let before = Before {
@@ -36,9 +36,10 @@ pub fn step(mut state: RoomState, now: Millis, event: Event) -> (RoomState, Vec<
         Event::Client {
             from,
             msg,
+            owner,
             fresh_token,
         } => {
-            if let Err(code) = state.on_client(now, from, msg, fresh_token, &mut fx) {
+            if let Err(code) = state.on_client(now, from, msg, owner, fresh_token, &mut fx) {
                 fx.send(from, ServerMsg::Error { code });
             }
         }
@@ -79,11 +80,17 @@ impl Effects {
         }
     }
 
-    /// Prepends the welcomes and, if the view changed, the state broadcast; appends the alarm.
+    /// Prepends the welcomes and, if the view changed, the state broadcast to everyone not
+    /// welcomed in this step; appends the alarm.
     fn finish(self, state: &RoomState, before: Before) -> Vec<Effect> {
-        if state.ended.is_some() {
+        if state.ended().is_some() {
             return self.list;
         }
+        let greeted = |id: &ParticipantId| {
+            self.list.iter().any(
+                |e| matches!(e, Effect::Send { to, msg: ServerMsg::Welcome { .. } } if to == id),
+            )
+        };
         let view = state.view();
         let mut effects: Vec<Effect> = self
             .welcomed
@@ -97,7 +104,7 @@ impl Effects {
             let to: Vec<_> = state
                 .joined()
                 .map(|(id, ..)| id)
-                .filter(|id| !self.welcomed.contains(id))
+                .filter(|id| !self.welcomed.contains(id) && !greeted(id))
                 .collect();
             if !to.is_empty() {
                 effects.push(Effect::Broadcast {
@@ -131,6 +138,7 @@ impl RoomState {
         now: Millis,
         from: ParticipantId,
         msg: ClientMsg,
+        owner: bool,
         fresh_token: ResumeToken,
         fx: &mut Effects,
     ) -> Result<(), ErrorCode> {
@@ -144,14 +152,13 @@ impl RoomState {
                 ClientMsg::Join {
                     name,
                     consent,
-                    host_token,
                     resume,
                 } => {
                     if let Some(old) = resume.and_then(|token| self.holder_of(&token)) {
-                        self.resume(from, old, fx);
+                        self.resume(from, old, owner, fx);
                         return Ok(());
                     }
-                    let role = self.role_for(host_token)?;
+                    let role = if owner { Role::Host } else { Role::Guest };
                     self.participants.insert(
                         from,
                         Participant {
@@ -182,6 +189,9 @@ impl RoomState {
         };
         match msg {
             ClientMsg::Join { .. } => {
+                if owner {
+                    self.promote(from, fx);
+                }
                 self.greet(from, fx);
                 Ok(())
             }
@@ -261,14 +271,6 @@ impl RoomState {
         }
     }
 
-    fn role_for(&self, host_token: Option<HostToken>) -> Result<Role, ErrorCode> {
-        match host_token {
-            None => Ok(Role::Guest),
-            Some(token) if token == self.host_token => Ok(Role::Host),
-            Some(_) => Err(ErrorCode::InvalidHostToken),
-        }
-    }
-
     /// The participant who holds `token` and has not left.
     fn holder_of(&self, token: &ResumeToken) -> Option<ParticipantId> {
         self.participants
@@ -277,14 +279,36 @@ impl RoomState {
             .map(|(&id, _)| id)
     }
 
-    /// Moves participant `old` to the new socket `socket`, keeping role, consent and tracks.
-    fn resume(&self, socket: ParticipantId, old: ParticipantId, fx: &mut Effects) {
+    /// Moves participant `old` to the new socket `socket`, keeping consent and tracks, and the
+    /// role unless the owner's socket takes a guest's place.
+    fn resume(&mut self, socket: ParticipantId, old: ParticipantId, owner: bool, fx: &mut Effects) {
         fx.push(Effect::CloseSocket { who: old });
         fx.push(Effect::Rebind {
             socket,
             participant: old,
         });
+        if owner {
+            self.promote(old, fx);
+        }
         self.greet(old, fx);
+    }
+
+    /// The owner's socket took `who`'s place: a guest becomes a host and, if they wait outside,
+    /// is let in, as hosts never wait.
+    fn promote(&mut self, who: ParticipantId, fx: &mut Effects) {
+        let Some(p) = self.participants.get_mut(&who) else {
+            return;
+        };
+        if p.role == Role::Host {
+            return;
+        }
+        p.role = Role::Host;
+        if matches!(
+            p.connection,
+            Connection::WaitingForHost | Connection::Knocking | Connection::AwaitingConsent
+        ) {
+            self.approve(who, fx);
+        }
     }
 
     /// The welcome for a joined participant. It carries the current view, so send it only when
@@ -301,6 +325,7 @@ impl RoomState {
     fn greet(&self, who: ParticipantId, fx: &mut Effects) {
         match self.participants.get(&who).map(|p| &p.connection) {
             Some(Connection::Joined { .. }) => fx.send(who, self.welcome(who)),
+            Some(Connection::WaitingForHost) => fx.send(who, ServerMsg::Waiting),
             Some(Connection::Knocking) => {
                 fx.send(who, ServerMsg::Waiting);
                 if self.lacks_consent(who) {
@@ -313,9 +338,17 @@ impl RoomState {
         }
     }
 
-    /// A new participant arrives: a guest knocks on a locked room; anyone else is let in.
+    /// A new participant arrives: a guest waits for the first host of a scheduled room or knocks
+    /// on a locked one; anyone else is let in.
     fn enter(&mut self, who: ParticipantId, fx: &mut Effects) {
-        if self.participants[&who].role == Role::Guest && self.locked {
+        let guest = self.participants[&who].role == Role::Guest;
+        let scheduled = matches!(self.lifecycle, Lifecycle::Scheduled { .. });
+        if guest && scheduled {
+            self.participants.get_mut(&who).expect("arrived").connection =
+                Connection::WaitingForHost;
+            self.greet(who, fx);
+        } else if guest && self.locked {
+            self.participants.get_mut(&who).expect("arrived").connection = Connection::Knocking;
             self.greet(who, fx);
             let hosts = self
                 .joined()
@@ -328,7 +361,7 @@ impl RoomState {
         }
     }
 
-    /// Lets in a participant who is knocking or just arrived. While the room records, a guest
+    /// Lets in a participant who waits outside or just arrived. While the room records, a guest
     /// without consent waits for it instead; a host enters anyway but is muted and not recorded.
     fn approve(&mut self, who: ParticipantId, fx: &mut Effects) {
         let Some(p) = self.participants.get(&who) else {
@@ -356,7 +389,9 @@ impl RoomState {
                 publish: None,
                 subscribe: None,
             };
-            self.empty_since = None;
+            if let Lifecycle::Live { empty_since } = &mut self.lifecycle {
+                *empty_since = None;
+            }
             fx.push(Effect::SfuNewSession {
                 who,
                 kind: SessionKind::Publish,
@@ -646,13 +681,36 @@ impl RoomState {
             },
         };
         fx.welcomed.push(who);
-        if self.recording_policy == RecordingPolicy::FromStart
-            && self.recording == RecordingStatus::NeverStarted
-            && role == Role::Host
-        {
-            self.start_recording(now, who, fx);
+        if role == Role::Host && matches!(self.lifecycle, Lifecycle::Scheduled { .. }) {
+            self.go_live(now, who, fx);
         }
         self.request_wanted(now, who, fx);
+    }
+
+    /// The first host joined: the room goes live, starts recording if the meeting records from
+    /// the start, and lets in the guests waiting for the host. A guest without consent to that
+    /// recording waits for it instead; [`RoomState::start_recording`] already asked them.
+    fn go_live(&mut self, now: Millis, host: ParticipantId, fx: &mut Effects) {
+        self.lifecycle = Lifecycle::Live { empty_since: None };
+        if self.recording_policy == RecordingPolicy::FromStart {
+            self.start_recording(now, host, fx);
+        }
+        let waiting: Vec<_> = self
+            .participants
+            .iter()
+            .filter(|(_, p)| p.connection == Connection::WaitingForHost)
+            .map(|(&id, _)| id)
+            .collect();
+        for guest in waiting {
+            if self.lacks_consent(guest) {
+                self.participants
+                    .get_mut(&guest)
+                    .expect("waiting")
+                    .connection = Connection::AwaitingConsent;
+            } else {
+                self.admit(guest, fx);
+            }
+        }
     }
 
     fn published(&mut self, now: Millis, who: ParticipantId, sdp_answer: Sdp, fx: &mut Effects) {
@@ -988,9 +1046,10 @@ impl RoomState {
         };
         let published = match &p.connection {
             Connection::Left => return,
-            Connection::Knocking | Connection::AwaitingConsent | Connection::Connecting { .. } => {
-                Vec::new()
-            }
+            Connection::WaitingForHost
+            | Connection::Knocking
+            | Connection::AwaitingConsent
+            | Connection::Connecting { .. } => Vec::new(),
             Connection::Joined { publish, .. } => publish.kinds(),
         };
         self.withdraw(who, &published, fx);
@@ -1002,8 +1061,11 @@ impl RoomState {
             .participants
             .values()
             .any(|p| p.connection.is_admitted());
-        if self.empty_since.is_none() && !anyone_admitted {
-            self.empty_since = Some(now);
+        if let Lifecycle::Live { empty_since } = &mut self.lifecycle
+            && empty_since.is_none()
+            && !anyone_admitted
+        {
+            *empty_since = Some(now);
         }
     }
 
@@ -1015,7 +1077,7 @@ impl RoomState {
             .collect();
         for reason in due {
             match reason {
-                AlarmReason::EmptyRoom => return self.end(now, fx),
+                AlarmReason::Expire | AlarmReason::EmptyRoom => return self.end(now, fx),
                 // Due only once the pending offer timed out.
                 AlarmReason::Publish(who) => self.publish_failed(who, fx),
                 AlarmReason::Subscribe(who) => {
@@ -1046,7 +1108,7 @@ impl RoomState {
             self.recording = RecordingStatus::Stopped;
             fx.push(Effect::StopRecording);
         }
-        self.ended = Some(now);
+        self.lifecycle = Lifecycle::Ended { at: now };
         fx.push(Effect::ReleaseMeetingId {
             meeting: self.meeting.clone(),
         });
