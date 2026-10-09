@@ -1,0 +1,10 @@
+/target
+/build
+/node_modules
+/web/node_modules
+/web/.svelte-kit
+/web/build
+/web/src/lib/wasm
+.wrangler
+.dev.vars
+*.log
