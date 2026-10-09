@@ -3,11 +3,18 @@
 	import { listMeetings, type ApiError, type PastMeeting } from '#lib/api.ts';
 	import LoginForm from '#lib/components/LoginForm.svelte';
 	import { OwnerSession } from '#lib/owner-session.svelte.ts';
+	import type { Phase } from '#lib/protocol.ts';
 
 	type ListState =
 		| { kind: 'loading' }
 		| { kind: 'loaded'; meetings: PastMeeting[] }
 		| { kind: 'failed'; error: ApiError };
+
+	const PHASE_LABEL: Record<Phase, string> = {
+		scheduled: 'Scheduled',
+		live: 'Live',
+		ended: 'Ended'
+	};
 
 	const owner = new OwnerSession();
 	let listState = $state.raw<ListState>({ kind: 'loading' });
@@ -86,10 +93,10 @@
 						<time class="hint" datetime={new Date(past.createdAt).toISOString()}>
 							{when.format(past.createdAt)}
 						</time>
-						<span class={['state', !past.ended && 'live']}>{past.ended ? 'Ended' : 'Live'}</span>
+						<span class="state {past.phase}">{PHASE_LABEL[past.phase]}</span>
 						{#if past.transcript}
 							<a class="transcript" href="/t/{encodeURIComponent(past.transcript)}">Transcript</a>
-						{:else if past.ended}
+						{:else if past.phase === 'ended'}
 							<span class="hint transcript">No transcript</span>
 						{/if}
 					</li>
@@ -167,9 +174,33 @@
 		font-size: var(--step--1);
 	}
 
+	/* A dot marks a meeting that is not over: filled while it runs, hollow before it starts. */
+	.state.live,
+	.state.scheduled {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4em;
+	}
+
+	.state.live::before,
+	.state.scheduled::before {
+		content: '';
+		width: 0.5em;
+		height: 0.5em;
+		border-radius: 50%;
+	}
+
 	.state.live {
 		color: var(--fog);
 		font-weight: 650;
+	}
+
+	.state.live::before {
+		background: var(--lamp);
+	}
+
+	.state.scheduled::before {
+		box-shadow: inset 0 0 0 1.5px var(--lichen);
 	}
 
 	.transcript {

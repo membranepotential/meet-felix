@@ -4,7 +4,7 @@
 //! Both are JSON without a version. Records and attachments stored before the core's phases and
 //! the owner session (2026-10-09) do not deserialize; nothing with real users was deployed then.
 
-use meeting_core::{Effect, Event, Millis, ParticipantId, RecordingPolicy, RoomState, step};
+use meeting_core::{Effect, Event, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, step};
 use serde::{Deserialize, Serialize};
 
 /// How long a socket may go without an auto-response ping before the room closes it, and how
@@ -39,6 +39,14 @@ impl Record {
             next_participant: 0,
         }
         .settle(effects)
+    }
+
+    /// Where the meeting stands.
+    pub fn phase(&self) -> Phase {
+        match self {
+            Self::Open(open) => open.room.view().phase,
+            Self::Ended { .. } => Phase::Ended,
+        }
     }
 }
 
@@ -152,8 +160,8 @@ pub fn is_stale(now: Millis, since: Millis, last_ping: Option<Millis>) -> bool {
 #[cfg(test)]
 mod tests {
     use meeting_core::{
-        ClientMsg, DisplayName, MeetingId, Phase, ResumeToken, SCHEDULED_TTL_MS, SessionId,
-        SessionKind, SfuReply, TranscriptRef,
+        ClientMsg, DisplayName, MeetingId, ResumeToken, SCHEDULED_TTL_MS, SessionId, SessionKind,
+        SfuReply, TranscriptRef,
     };
 
     use super::*;
@@ -175,7 +183,9 @@ mod tests {
 
     #[test]
     fn a_new_room_remembers_the_cores_alarm() {
-        assert_eq!(open_room().alarm, Some(T0.after(SCHEDULED_TTL_MS)));
+        let open = open_room();
+        assert_eq!(Record::Open(open.clone()).phase(), Phase::Scheduled);
+        assert_eq!(open.alarm, Some(T0.after(SCHEDULED_TTL_MS)));
     }
 
     #[test]
@@ -221,7 +231,7 @@ mod tests {
             };
             open = next;
         }
-        assert_eq!(open.room.view().phase, Phase::Live);
+        assert_eq!(Record::Open(open.clone()).phase(), Phase::Live);
         open
     }
 
@@ -255,6 +265,7 @@ mod tests {
         };
         let (record, effects) = room_with_host().step(T0, end);
         assert_eq!(effects.last(), Some(&Effect::EndMeeting));
+        assert_eq!(record.phase(), Phase::Ended);
         assert_eq!(
             record,
             Record::Ended {

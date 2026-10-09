@@ -90,6 +90,12 @@ describe('reduce', () => {
 		]);
 		const unpublish = reduce(welcomed(), { type: 'error', code: 'notPublished' })[1];
 		expect(unpublish.map((c) => c.kind)).toEqual(['warn']);
+		expect(reduce(welcomed(), { type: 'error', code: 'subscribeFailed' })[1]).toEqual([
+			{
+				kind: 'subscribe-retrying',
+				notice: 'Some video or audio did not arrive. The meeting retries on its own.'
+			}
+		]);
 	});
 
 	it('passes SDP through to the media layer', () => {

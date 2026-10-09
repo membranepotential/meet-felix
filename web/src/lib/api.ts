@@ -16,7 +16,7 @@ export interface PastMeeting {
 	meeting: MeetingId;
 	/** When the meeting was created, in milliseconds since the Unix epoch. */
 	createdAt: Millis;
-	ended: boolean;
+	phase: Phase;
 	/** The transcript link token; `null` if the meeting was not recorded. */
 	transcript: TranscriptRef | null;
 }
@@ -95,6 +95,8 @@ const isRecordingPolicy = (value: unknown): value is RecordingPolicy =>
 const isOpenPhase = (value: unknown): value is OpenPhase =>
 	value === 'scheduled' || value === 'live';
 
+const isPhase = (value: unknown): value is Phase => value === 'ended' || isOpenPhase(value);
+
 const postJson = (body: unknown): RequestInit => ({
 	method: 'POST',
 	headers: { 'Content-Type': 'application/json' },
@@ -135,15 +137,24 @@ export function createMeeting(recording: RecordingPolicy): Promise<ApiResult<Mee
 	);
 }
 
+/** A Worker from before the phases sends only `ended`; its unended meetings were all live. */
+function pastPhase(phase: unknown, ended: unknown): Phase | null {
+	if (phase !== undefined) return isPhase(phase) ? phase : null;
+	return typeof ended === 'boolean' ? (ended ? 'ended' : 'live') : null;
+}
+
 function parsePastMeeting(value: unknown): PastMeeting | null {
 	if (!isObject(value)) return null;
-	const { meeting, createdAt, ended, transcript } = value;
+	const { meeting, createdAt, phase, ended, transcript } = value;
 	const id = typeof meeting === 'string' ? parseMeetingId(meeting) : null;
-	if (id === null || typeof createdAt !== 'number' || typeof ended !== 'boolean') return null;
+	if (id === null || typeof createdAt !== 'number') return null;
 	if (transcript !== undefined && (typeof transcript !== 'string' || transcript === '')) {
 		return null;
 	}
-	return { meeting: id, createdAt, ended, transcript: transcript ?? null };
+	const known = pastPhase(phase, ended);
+	return known === null
+		? null
+		: { meeting: id, createdAt, phase: known, transcript: transcript ?? null };
 }
 
 /** Lists the owner's meetings, newest first. Needs the owner's session. */

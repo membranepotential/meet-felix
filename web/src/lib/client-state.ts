@@ -56,6 +56,12 @@ export type Command =
 	| { kind: 'publish-answer'; sdp: Sdp }
 	| { kind: 'publish-rejected' }
 	| { kind: 'subscribe-offer'; sdp: Sdp; tracks: IncomingTrack[] }
+	/**
+	 * A subscribe failed and the room retries it. Often the first pull only raced the
+	 * publisher's connection, so the session shows `notice` only if no `subscribe-offer`
+	 * follows within a grace period.
+	 */
+	| { kind: 'subscribe-retrying'; notice: string }
 	/** The room refused a `SetLayer` for a track it does not deliver yet: ask again later. */
 	| { kind: 'layer-refused' }
 	| { kind: 'mute-mic' }
@@ -154,7 +160,13 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			if (msg.code === 'notPublished') {
 				commands.push({ kind: 'warn', text: 'the room had no track to unpublish' });
 			}
-			if (text !== null) commands.push({ kind: 'toast', text, tone: 'alert' });
+			if (text !== null) {
+				commands.push(
+					msg.code === 'subscribeFailed'
+						? { kind: 'subscribe-retrying', notice: text }
+						: { kind: 'toast', text, tone: 'alert' }
+				);
+			}
 			return [state, commands];
 		}
 	}

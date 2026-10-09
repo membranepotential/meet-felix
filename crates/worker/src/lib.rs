@@ -236,6 +236,7 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
         room: room.to_string(),
         created_at: now(),
         transcript,
+        live_at: None,
         ended_at: None,
     };
     if let Err(e) = meetings::update(&kv, |index| Some(meetings::added(index, entry))).await {

@@ -11,6 +11,7 @@ import {
 	type Command,
 	type SessionEnd
 } from './client-state.ts';
+import { GraceNotice } from './grace.ts';
 import { LayerControl } from './layers.ts';
 import type { LocalMedia } from './local-media.svelte.ts';
 import { holdWakeLock } from './media/wakelock.ts';
@@ -42,6 +43,9 @@ export interface JoinRequest {
 
 /** Used when `/api/ice` fails: direct and STUN-only paths still work on most networks. */
 const FALLBACK_ICE: RTCIceServer[] = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+
+/** How long a failed subscribe may take to recover before the user hears about it. */
+const SUBSCRIBE_GRACE_MS = 10_000;
 
 const KIND_LABEL: Record<TrackKind, string> = {
 	audio: 'microphone',
@@ -84,6 +88,10 @@ export class Session {
 	readonly #ice: Promise<RTCIceServer[]>;
 	#join: JoinRequest;
 	#link: Promise<MediaLink> | null = null;
+	/** The first pull often races the publisher's connection and succeeds on the room's retry. */
+	readonly #subscribeNotice = new GraceNotice(SUBSCRIBE_GRACE_MS, (text) =>
+		this.toasts.show(text, 'alert')
+	);
 	#releaseWakeLock: () => void = () => {};
 	#stopSync: () => void = () => {};
 	#disposed = false;
@@ -167,6 +175,7 @@ export class Session {
 		this.#stopSync();
 		this.#signaling.close();
 		this.#closeLink();
+		this.#subscribeNotice.cancel();
 		this.layers.dispose();
 		this.#releaseWakeLock();
 	}
@@ -190,7 +199,11 @@ export class Session {
 				void this.#link?.then(({ publisher }) => publisher.rejected());
 				return;
 			case 'subscribe-offer':
+				this.#subscribeNotice.cancel();
 				void this.#link?.then(({ subscriber }) => subscriber.offer(command.sdp, command.tracks));
+				return;
+			case 'subscribe-retrying':
+				this.#subscribeNotice.start(command.notice);
 				return;
 			case 'layer-refused':
 				this.layers.notSubscribed();

@@ -231,12 +231,22 @@ impl RoomObject {
                 // Ended, or never initialised: nothing listens any more.
                 return Ok(());
             };
-            let (record, effects) = open.step(now(), event);
+            let was_scheduled = open.room.view().phase == Phase::Scheduled;
+            let now = now();
+            let (record, effects) = open.step(now, event);
             self.store(&record).await?;
             if let Some(ws) = close_stale {
                 close(&ws, CLOSE_STALE, "no ping");
             }
             let replies = self.execute_step(effects, &mut sfu_calls).await?;
+            // After the step's effects, like every other await that lets events in. Logged, not
+            // returned: the index is the owner's overview, not the room's state.
+            if was_scheduled
+                && record.phase() == Phase::Live
+                && let Err(e) = self.mark_live(now).await
+            {
+                console_error!("marking the meeting live in the index failed: {e}");
+            }
             queue.extend(
                 replies
                     .into_iter()
@@ -353,6 +363,19 @@ impl RoomObject {
         let this = self.state.id().to_string();
         if kv.get(meeting.as_str()).text().await?.as_deref() == Some(this.as_str()) {
             kv.delete(meeting.as_str()).await?;
+        }
+        Ok(())
+    }
+
+    /// Marks this room's entry in the owner's meeting index live since `at`.
+    async fn mark_live(&self, at: Millis) -> Result<()> {
+        let this = self.state.id().to_string();
+        let stored = meetings::update(&self.env.kv(MEETINGS)?, |index| {
+            meetings::went_live(index, &this, at)
+        })
+        .await?;
+        if !stored {
+            console_warn!("the meeting index has no scheduled entry for room {this}");
         }
         Ok(())
     }

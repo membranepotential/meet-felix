@@ -85,8 +85,15 @@ describe('listMeetings', () => {
 	it('lists newest first', async () => {
 		const fetch = serve(200, {
 			meetings: [
-				{ meeting: 'abide-acid-acorn', createdAt: 1, ended: true, transcript: 't1' },
-				{ meeting: 'abide-acid-acorn', createdAt: 2, ended: false }
+				{
+					meeting: 'abide-acid-acorn',
+					createdAt: 1,
+					phase: 'ended',
+					ended: true,
+					transcript: 't1'
+				},
+				{ meeting: 'abide-acid-acorn', createdAt: 3, phase: 'scheduled', ended: false },
+				{ meeting: 'abide-acid-acorn', createdAt: 2, phase: 'live', ended: false }
 			]
 		});
 		const result = await listMeetings();
@@ -94,10 +101,22 @@ describe('listMeetings', () => {
 		expect(result).toEqual({
 			ok: true,
 			value: [
-				{ meeting: 'abide-acid-acorn', createdAt: 2, ended: false, transcript: null },
-				{ meeting: 'abide-acid-acorn', createdAt: 1, ended: true, transcript: 't1' }
+				{ meeting: 'abide-acid-acorn', createdAt: 3, phase: 'scheduled', transcript: null },
+				{ meeting: 'abide-acid-acorn', createdAt: 2, phase: 'live', transcript: null },
+				{ meeting: 'abide-acid-acorn', createdAt: 1, phase: 'ended', transcript: 't1' }
 			]
 		});
+	});
+
+	it('falls back to `ended` from a Worker without phases', async () => {
+		serve(200, {
+			meetings: [
+				{ meeting: 'abide-acid-acorn', createdAt: 2, ended: false },
+				{ meeting: 'abide-acid-acorn', createdAt: 1, ended: true }
+			]
+		});
+		const result = await listMeetings();
+		expect(result.ok && result.value.map((m) => m.phase)).toEqual(['live', 'ended']);
 	});
 
 	it('reports a missing session and a server without the endpoint', async () => {
@@ -112,6 +131,8 @@ describe('listMeetings', () => {
 
 	it('rejects a list with an entry that is not a meeting', async () => {
 		serve(200, { meetings: [{ meeting: 'not a meeting', createdAt: 1, ended: true }] });
+		expect(await listMeetings()).toEqual({ ok: false, error: { kind: 'malformed' } });
+		serve(200, { meetings: [{ meeting: 'abide-acid-acorn', createdAt: 1, phase: 'paused' }] });
 		expect(await listMeetings()).toEqual({ ok: false, error: { kind: 'malformed' } });
 	});
 });

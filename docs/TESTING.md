@@ -98,8 +98,8 @@ credentials, `SFU_API_URL` pointing at the mock). It checks:
   recorded), the sockets close, the next socket and the meeting lookup get
   404;
 - `GET /api/meetings`: 401 without or with a wrong secret; 200 with the
-  owner's cookie; with the secret, the list is newest first and shows the ended meeting with `ended: true` and the
-  transcript token from `Ended`;
+  owner's cookie; with the secret, the list is newest first and shows the ended meeting with `phase: "ended"`,
+  `ended: true` and the transcript token from `Ended`, and a never-joined meeting with `phase: "scheduled"`;
 - with the mock SFU down, joining yields `Error{SfuUnavailable}` and the
   socket closes;
 - with `SPIKE_KEEPALIVE=1` (two more minutes): a socket that never pings is

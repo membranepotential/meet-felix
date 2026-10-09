@@ -474,8 +474,14 @@ async function main() {
   const past = await listedMeeting(meeting, (m) => m.ended);
   check(
     "GET /api/meetings lists the meeting as ended with its transcript token",
-    past?.ended === true && past.transcript === transcript && typeof past.createdAt === "number",
+    past?.ended === true && past.phase === "ended" && past.transcript === transcript && typeof past.createdAt === "number",
     JSON.stringify(past),
+  );
+  const neverJoined = meetings.find((m) => m.meeting === second.meeting);
+  check(
+    "GET /api/meetings lists a never-joined meeting as scheduled",
+    neverJoined?.phase === "scheduled" && neverJoined.ended === false && neverJoined.transcript === undefined,
+    JSON.stringify(neverJoined),
   );
 
   // SFU down: joining fails with SfuUnavailable and the socket closes
