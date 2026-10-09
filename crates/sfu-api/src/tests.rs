@@ -232,7 +232,7 @@ fn new_session_effect_creates_a_session() {
 }
 
 #[test]
-fn publish_effect_returns_the_answer_and_fails_on_a_rejected_track() {
+fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
     let effect = Effect::SfuPublish {
         who: ALICE,
         session: SessionId::new(PUBLISHER),
@@ -261,6 +261,42 @@ fn publish_effect_returns_the_answer_and_fails_on_a_rejected_track() {
     assert_eq!(
         answered.sent.borrow()[0].1,
         format!("https://rtc.live.cloudflare.com/v1/apps/app/sessions/{PUBLISHER}/tracks/new")
+    );
+
+    let two_tracks = Effect::SfuPublish {
+        who: ALICE,
+        session: SessionId::new(PUBLISHER),
+        sdp_offer: Sdp::new("offer"),
+        tracks: vec![
+            LocalTrack {
+                mid: Mid::new("0"),
+                kind: TrackKind::Audio,
+                name: TrackName::new("mic"),
+            },
+            LocalTrack {
+                mid: Mid::new("1"),
+                kind: TrackKind::Video,
+                name: TrackName::new("camera"),
+            },
+        ],
+    };
+    let partly = Canned::new([(
+        200,
+        json!({
+          "requiresImmediateRenegotiation": false,
+          "tracks": [
+            { "trackName": "mic", "mid": "0" },
+            { "trackName": "camera", "errorCode": "invalid_params", "errorDescription": "bad mid" }
+          ],
+          "sessionDescription": { "sdp": "answer", "type": "answer" }
+        }),
+    )]);
+    assert_eq!(
+        ready(client(&partly).perform(&two_tracks)),
+        Ok(Some(SfuReply::Published {
+            who: ALICE,
+            sdp_answer: Sdp::new("answer"),
+        }))
     );
 
     let rejected = Canned::new([(
@@ -322,6 +358,61 @@ fn subscribe_effect_maps_mids_and_drops_rejected_tracks() {
                 track: camera,
             }],
         }))
+    );
+}
+
+/// The shape the live SFU returned on 2026-10-09 when the publisher was not connected yet
+/// (`docs/spikes/02-first-call.md`): every track missing, and still an offer to answer.
+#[test]
+fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
+    let sfu = Canned::new([(
+        200,
+        json!({
+          "requiresImmediateRenegotiation": true,
+          "tracks": [{
+            "sessionId": PUBLISHER, "trackName": "camera",
+            "errorCode": "not_found_track_error",
+            "errorDescription": "Track not found on remote peer. Make sure the publisher peer is connected and sending packets for this track"
+          }],
+          "sessionDescription": { "sdp": "offer", "type": "offer" }
+        }),
+    )]);
+    let effect = Effect::SfuSubscribe {
+        who: ALICE,
+        session: SessionId::new(SUBSCRIBER),
+        tracks: vec![RemoteTrack {
+            session: SessionId::new(PUBLISHER),
+            name: TrackName::new("camera"),
+        }],
+    };
+    assert_eq!(
+        ready(client(&sfu).perform(&effect)),
+        Ok(Some(SfuReply::SubscribeOffer {
+            who: ALICE,
+            sdp_offer: Sdp::new("offer"),
+            tracks: Vec::new(),
+        }))
+    );
+
+    let no_offer = Canned::new([(
+        200,
+        json!({
+          "tracks": [{ "sessionId": PUBLISHER, "trackName": "camera",
+                       "errorCode": "not_found_track_error", "errorDescription": "gone" }]
+        }),
+    )]);
+    assert_eq!(
+        ready(client(&no_offer).perform(&effect)),
+        Err(Failure {
+            error: SfuError::Track {
+                code: "not_found_track_error".to_owned(),
+                description: "gone".to_owned(),
+            },
+            reply: Some(SfuReply::Failed {
+                who: ALICE,
+                call: SfuCall::Subscribe,
+            }),
+        })
     );
 }
 

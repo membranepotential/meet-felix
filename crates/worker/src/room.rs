@@ -4,8 +4,10 @@
 //!
 //! Every handler loads the record, steps the core, stores the record, then carries out the
 //! effects. Loading and storing are storage calls, so the runtime's input gate delivers no other
-//! event in between and each step is atomic. Events can interleave while an SFU call is in
-//! flight; the core is built for that (replies about participants who left are ignored).
+//! event in between and each step is atomic. Events can interleave while an SFU call (or a KV
+//! call) is in flight; the core is built for that (replies about participants who left are
+//! ignored), and [`RoomObject::execute_step`] carries out the socket effects of a step before its
+//! SFU calls, so no socket the step closes or rebinds can slip an event into that gap.
 
 use std::collections::VecDeque;
 
@@ -115,20 +117,25 @@ impl DurableObject for RoomObject {
         self.socket_gone(&ws).await
     }
 
-    /// Fires for the core's alarm and for the keepalive check, whichever is earlier. Closes
-    /// sockets whose client stopped pinging, lets the core handle whatever is due (a spurious
-    /// `AlarmFired` is harmless), and arms the next alarm.
+    /// Fires for the core's alarm and for the keepalive check, whichever is earlier. Lets the
+    /// core handle whatever is due (a spurious `AlarmFired` is harmless), reports and closes
+    /// sockets whose client stopped pinging, and arms the next alarm.
+    ///
+    /// A stale socket is closed only once the step that reports it is stored: if storing fails,
+    /// the runtime retries the alarm, which must still find the socket open and stale.
     async fn alarm(&self) -> Result<Response> {
         let now = now();
         let stale = self
             .open_sockets()
             .filter(|(ws, _, since)| is_stale(now, *since, last_ping(&self.state, ws)))
-            .map(|(ws, who, _)| {
-                close(&ws, CLOSE_STALE, "no ping");
-                Event::SocketClosed { who }
+            .map(|(ws, who, _)| Input {
+                event: Event::SocketClosed { who },
+                close_stale: Some(ws),
             });
-        let events: Vec<Event> = std::iter::once(Event::AlarmFired).chain(stale).collect();
-        self.handle(events).await?;
+        let inputs: VecDeque<Input> = std::iter::once(Input::from(Event::AlarmFired))
+            .chain(stale)
+            .collect();
+        self.run(inputs).await?;
         if let Some(Record::Open(open)) = self.load().await? {
             self.arm(open.alarm).await?;
         }
@@ -149,7 +156,8 @@ impl RoomObject {
             now(),
         );
         self.store(&Record::created(room, &effects)).await?;
-        self.execute_all(effects).await?;
+        let replies = self.execute_step(effects, &mut 0).await?;
+        self.handle(replies.into_iter().map(Event::Sfu)).await?;
         Response::empty()
     }
 
@@ -189,46 +197,69 @@ impl RoomObject {
     }
 
     /// Reports a socket that closed or failed to the core, unless the room closed it itself.
+    /// The socket is marked closed only once the report is stored, so a failed store leaves it
+    /// to be reported again. The runtime may report both an error and a close for the same
+    /// socket; a second report in between is harmless, because the participant already left.
     async fn socket_gone(&self, ws: &WebSocket) -> Result<()> {
         let Some(Attachment::Open { participant, .. }) = attachment(ws)? else {
             return Ok(());
         };
-        // The runtime may report both an error and a close for the same socket.
-        ws.serialize_attachment(Attachment::Closed)?;
         self.handle([Event::SocketClosed { who: participant }])
+            .await?;
+        ws.serialize_attachment(Attachment::Closed)
+    }
+
+    /// Steps the core through `events` and every SFU reply that follows from them.
+    async fn handle(&self, events: impl IntoIterator<Item = Event>) -> Result<()> {
+        self.run(events.into_iter().map(Input::from).collect())
             .await
     }
 
-    /// Steps the core through `events` and every SFU reply that follows from them, storing the
-    /// record after each step and carrying out the effects in order.
-    async fn handle(&self, events: impl IntoIterator<Item = Event>) -> Result<()> {
-        let mut queue: VecDeque<Event> = events.into_iter().collect();
+    /// Steps the core through `inputs` and every SFU reply that follows from them. After each
+    /// step it stores the record, closes the input's stale socket, if any, and carries out the
+    /// effects.
+    async fn run(&self, inputs: VecDeque<Input>) -> Result<()> {
+        let mut queue = inputs;
         let mut sfu_calls = 0;
-        while let Some(event) = queue.pop_front() {
+        while let Some(Input { event, close_stale }) = queue.pop_front() {
             let Some(Record::Open(open)) = self.load().await? else {
                 // Ended, or never initialised: nothing listens any more.
                 return Ok(());
             };
             let (record, effects) = open.step(now(), event);
             self.store(&record).await?;
-            for effect in effects {
-                if let Some(reply) = self.execute(effect, &mut sfu_calls).await? {
-                    queue.push_back(Event::Sfu(reply));
-                }
+            if let Some(ws) = close_stale {
+                close(&ws, CLOSE_STALE, "no ping");
             }
+            let replies = self.execute_step(effects, &mut sfu_calls).await?;
+            queue.extend(
+                replies
+                    .into_iter()
+                    .map(|reply| Input::from(Event::Sfu(reply))),
+            );
         }
         Ok(())
     }
 
-    /// Carries out effects that need no SFU reply loop (those of `RoomState::new`).
-    async fn execute_all(&self, effects: Vec<Effect>) -> Result<()> {
-        let mut sfu_calls = 0;
-        for effect in effects {
-            if let Some(reply) = self.execute(effect, &mut sfu_calls).await? {
-                self.handle([Event::Sfu(reply)]).await?;
-            }
+    /// Carries out one step's effects and returns the SFU replies to feed back.
+    ///
+    /// The socket, alarm, recording and lifecycle effects run first, in order, then the SFU
+    /// calls, in order. Each SFU call awaits a fetch with the input gate open, so other events
+    /// arrive meanwhile: a `CloseSocket` or `Rebind` behind an SFU call would let a kicked or
+    /// replaced socket send a `Join` first and come back as a participant whose close is never
+    /// reported. The core gets SFU replies back as events, so nothing it emits depends on how
+    /// the two groups interleave.
+    async fn execute_step(
+        &self,
+        effects: Vec<Effect>,
+        sfu_calls: &mut usize,
+    ) -> Result<Vec<SfuReply>> {
+        let (sfu, local): (Vec<Effect>, Vec<Effect>) = effects.into_iter().partition(is_sfu_call);
+        let mut replies = Vec::new();
+        for effect in local.into_iter().chain(sfu) {
+            replies.extend(self.execute(effect, sfu_calls).await?);
         }
-        Ok(())
+        Ok(replies)
     }
 
     /// Carries out one effect; returns the SFU reply to feed back, if any.
@@ -257,7 +288,13 @@ impl RoomObject {
                 // The RecorderObject comes in phase 3.
                 console_log!("recording not implemented yet: {effect:?}");
             }
-            Effect::ReleaseMeetingId { meeting } => self.release(&meeting).await?,
+            Effect::ReleaseMeetingId { meeting } => {
+                // Logged, not returned: `EndMeeting` must still close the sockets. The KV entry
+                // expires with its TTL, and the room answers "ended" until then.
+                if let Err(e) = self.release(&meeting).await {
+                    console_error!("releasing {meeting:?} failed: {e}");
+                }
+            }
             Effect::EndMeeting => {
                 for (ws, ..) in self.open_sockets() {
                     close(&ws, CLOSE_NORMAL, "meeting ended");
@@ -274,12 +311,13 @@ impl RoomObject {
         Ok(None)
     }
 
+    /// Makes the SFU call for `effect`; returns the reply to feed back, if the core expects one.
     async fn call_sfu(&self, effect: &Effect, sfu_calls: &mut usize) -> Option<SfuReply> {
         if *sfu_calls >= MAX_SFU_CALLS {
-            console_error!(
-                "more than {MAX_SFU_CALLS} SFU calls in one handler; dropped {effect:?}"
-            );
-            return None;
+            // Fed back as a failure, so the participant is not left waiting for a reply; the
+            // core retries through its alarm, not at once.
+            console_error!("more than {MAX_SFU_CALLS} SFU calls in one handler; failed {effect:?}");
+            return failure_reply(effect);
         }
         *sfu_calls += 1;
         let Some(client) = sfu::client(&self.env) else {
@@ -351,6 +389,46 @@ impl RoomObject {
             .storage()
             .put(Record::KEY, serde_json::to_string(record)?)
             .await
+    }
+}
+
+/// One event for the core and, for a socket the keepalive check found stale, that socket, which
+/// the room closes once the step reporting it is stored.
+struct Input {
+    event: Event,
+    close_stale: Option<WebSocket>,
+}
+
+impl From<Event> for Input {
+    fn from(event: Event) -> Self {
+        Self {
+            event,
+            close_stale: None,
+        }
+    }
+}
+
+/// Whether `effect` is an SFU call, carried out after the step's other effects
+/// ([`RoomObject::execute_step`]).
+fn is_sfu_call(effect: &Effect) -> bool {
+    match effect {
+        Effect::SfuNewSession { .. }
+        | Effect::SfuPublish { .. }
+        | Effect::SfuSubscribe { .. }
+        | Effect::SfuRenegotiate { .. }
+        | Effect::SfuCloseTracks { .. }
+        | Effect::SfuUpdateLayer { .. } => true,
+        Effect::Send { .. }
+        | Effect::Broadcast { .. }
+        | Effect::CloseSocket { .. }
+        | Effect::Rebind { .. }
+        | Effect::SetAlarm { .. }
+        | Effect::StartRecording { .. }
+        | Effect::RecordTrack { .. }
+        | Effect::StopRecordingTrack { .. }
+        | Effect::StopRecording
+        | Effect::ReleaseMeetingId { .. }
+        | Effect::EndMeeting => false,
     }
 }
 

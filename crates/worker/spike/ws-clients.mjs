@@ -2,10 +2,11 @@
 // Starts a mock Realtime SFU on SPIKE_SFU_PORT (default 8788), so the run needs no network.
 //
 // Start the Worker first (from the repo root):
-//   pnpm exec wrangler dev --var ROOM_JURISDICTION: --var CREATE_SECRET:spike-secret \
+//   pnpm exec wrangler dev --port 8797 --var ROOM_JURISDICTION: --var CREATE_SECRET:spike-secret \
 //     --var CALLS_APP_ID:spike --var CALLS_APP_SECRET:spike-sfu \
 //     --var SFU_API_URL:http://localhost:8788/v1
-// Then: node crates/worker/spike/ws-clients.mjs [base-url]   (default http://localhost:8787)
+// Then: node crates/worker/spike/ws-clients.mjs [base-url]   (default http://localhost:8787,
+// so pass http://localhost:8797 for the command above)
 // SPIKE_IDLE_MS sets the idle phase (default 15000). SPIKE_KEEPALIVE=1 adds the keepalive check,
 // which waits about two minutes. Needs Node >= 22 for the global WebSocket.
 
@@ -33,15 +34,31 @@ const withTimeout = (promise, what, ms = TIMEOUT_MS) =>
     new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout: ${what}`)), ms)),
   ]);
 
-// Mock SFU: just enough of the HTTPS API for the room's calls, plus a switch to fail them all.
-const sfu = { down: false, calls: [], nextMid: 0 };
+// Mock SFU: just enough of the HTTPS API for the room's calls, a switch to fail them all, and a
+// delay for `tracks/close` that holds the room inside an SFU call. Like the live SFU when the
+// publisher is not connected yet (docs/spikes/02-first-call.md), the first pull of each track
+// fails with `not_found_track_error` and still returns an offer; later pulls succeed.
+const sfu = { down: false, closeDelayMs: 0, calls: [], nextMid: 0, pulled: new Set() };
+const pull = ({ sessionId, trackName }) => {
+  const key = `${sessionId}/${trackName}`;
+  if (sfu.pulled.has(key)) return { sessionId, trackName, mid: String(sfu.nextMid++) };
+  sfu.pulled.add(key);
+  return {
+    sessionId,
+    trackName,
+    errorCode: "not_found_track_error",
+    errorDescription:
+      "Track not found on remote peer. Make sure the publisher peer is connected and sending packets for this track",
+  };
+};
 const sfuServer = createServer(async (req, res) => {
   let body = "";
   for await (const chunk of req) body += chunk;
   const json = body ? JSON.parse(body) : null;
   const path = new URL(req.url, "http://sfu").pathname;
-  const op = path.replace(/^\/v1\/apps\/spike\/sessions\/(new|[0-9a-f]+\/)/, (_, m) => (m === "new" ? "new" : ""));
-  sfu.calls.push({ method: req.method, op, json });
+  const [, session, rest] = path.match(/^\/v1\/apps\/spike\/sessions\/(?:new|([0-9a-f]+)\/(.+))$/) ?? [];
+  const op = session ? rest : "new";
+  sfu.calls.push({ method: req.method, op, session, json });
   const reply = (status, value) => {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(value));
@@ -64,12 +81,14 @@ const sfuServer = createServer(async (req, res) => {
           })
         : reply(200, {
             requiresImmediateRenegotiation: true,
-            tracks: json.tracks.map(({ sessionId, trackName }) => ({ sessionId, trackName, mid: String(sfu.nextMid++) })),
+            tracks: json.tracks.map(pull),
             sessionDescription: { type: "offer", sdp: "mock-offer" },
           });
     case "PUT renegotiate":
       return reply(200, {});
     case "PUT tracks/close":
+      await sleep(sfu.closeDelayMs);
+      return reply(200, { requiresImmediateRenegotiation: false, tracks: json.tracks });
     case "PUT tracks/update":
       return reply(200, { requiresImmediateRenegotiation: false, tracks: json.tracks });
     default:
@@ -107,7 +126,7 @@ class Client {
   }
 
   /** Resolves with (and removes) the first message of `type` that satisfies `predicate`. */
-  take(type, predicate = () => true) {
+  take(type, predicate = () => true, ms = TIMEOUT_MS) {
     return withTimeout(
       new Promise((resolve) => {
         const attempt = () => {
@@ -119,12 +138,13 @@ class Client {
         if (!attempt()) this.waiters.push(attempt);
       }),
       `${type} message`,
+      ms,
     );
   }
 
-  /** Whether a message of `type` arrives, as a boolean. */
-  gets(type, predicate) {
-    return this.take(type, predicate).then(
+  /** Whether a message of `type` arrives within `ms`, as a boolean. */
+  gets(type, predicate, ms) {
+    return this.take(type, predicate, ms).then(
       () => true,
       () => false,
     );
@@ -165,6 +185,37 @@ const upgradeStatus = (meeting) =>
   );
 
 const join = (client, fields) => client.send({ type: "join", consent: true, ...fields });
+const present = (state, id) => state.participants.some((p) => p.id === id);
+/** Resolves with the first mock SFU call matching `predicate`, or null after TIMEOUT_MS. */
+const sfuCall = async (predicate) => {
+  for (const deadline = Date.now() + TIMEOUT_MS; Date.now() < deadline; await sleep(50)) {
+    const call = sfu.calls.find(predicate);
+    if (call) return call;
+  }
+  return null;
+};
+let answers = 0;
+/**
+ * Answers every SubscribeOffer `client` gets until one carries a track of `owner`, and waits
+ * until the SFU has that answer. Resolves with that offer, the offers without that track
+ * before it, and the client's subscribe session; `offer` is null if none came in time.
+ */
+const receive = async (client, owner, ms = 15000) => {
+  const deadline = Date.now() + ms;
+  const before = [];
+  for (;;) {
+    const offer = await client.take("subscribeOffer", undefined, Math.max(deadline - Date.now(), 1)).catch(() => null);
+    if (offer === null) return { offer, before, session: undefined };
+    const sdp = `client-answer-${answers++}`;
+    client.send({ type: "subscribeAnswer", sdp });
+    const call = await sfuCall((c) => c.op === "renegotiate" && c.json.sessionDescription.sdp === sdp);
+    await sleep(200); // the SFU's reply reaches the room after the mock logged the call
+    if (offer.tracks.some((t) => t.track.owner === owner)) return { offer, before, session: call?.session };
+    before.push(offer);
+  }
+};
+const closesMid = (session, mid) => (c) =>
+  c.op === "tracks/close" && c.session === session && c.json.tracks.some((t) => t.mid === mid);
 const names = (state) => state.participants.map((p) => p.name).join(",");
 
 async function main() {
@@ -225,19 +276,46 @@ async function main() {
   // Publish through the mock SFU; the guest is offered the host's track and answers
   host.send({ type: "publishOffer", sdp: "client-offer", tracks: [{ mid: "0", kind: "audio", name: "mic" }] });
   check("host gets the SFU's PublishAnswer", await host.gets("publishAnswer", (m) => m.sdp === "mock-answer"));
-  const offer = await guest.take("subscribeOffer").catch(() => null);
+  // The mock fails the first pull with not_found plus an offer; the room passes that offer on
+  // without tracks, and the retry after SUBSCRIBE_RETRY_MS delivers the track.
+  const { offer, before: emptyOffers, session: guestSubscribe } = await receive(guest, hostId);
   check(
-    "guest gets a SubscribeOffer for the host's audio",
+    "a pull whose track is not found still reaches the guest as an empty SubscribeOffer",
+    emptyOffers.length === 1 && emptyOffers[0].tracks.length === 0 && emptyOffers[0].sdp === "mock-offer",
+    JSON.stringify(emptyOffers.map((o) => o.tracks)),
+  );
+  check(
+    "after the retry the guest gets a SubscribeOffer for the host's audio",
     offer?.tracks?.[0]?.track?.owner === hostId && offer.tracks[0].track.kind === "audio",
     JSON.stringify(offer?.tracks),
   );
-  guest.send({ type: "subscribeAnswer", sdp: "client-answer" });
-  await sleep(500);
-  check("the guest's answer reaches the SFU's renegotiate", sfu.calls.some((c) => c.op === "renegotiate"));
+  check("the guest's answers reach the SFU's renegotiate", guestSubscribe !== undefined);
+
+  // Unpublish: the room closes the track on the host's publish session and on the guest's
+  // subscribe session
+  const hostPublish = sfu.calls.find((c) => c.op === "tracks/new" && c.json.tracks[0].location === "local")?.session;
+  host.send({ type: "unpublish", kind: "audio" });
+  check("Unpublish closes the track on the publish session", (await sfuCall(closesMid(hostPublish, "0"))) !== null);
+  check(
+    "…and on the subscriber's session",
+    (await sfuCall(closesMid(guestSubscribe, offer?.tracks?.[0]?.mid))) !== null,
+  );
 
   // Idle: the room may be evicted; state comes back from storage and attachments
   console.log(`      idle ${IDLE_MS} ms ...`);
   await sleep(IDLE_MS);
+
+  // Leave: a client that closes its socket is gone for the others
+  const leaver = await Client.open(meeting);
+  join(leaver, { name: "Leaver" });
+  const leaverId = (await leaver.take("welcome").catch(() => null))?.you;
+  check(
+    "host sees the leaver join",
+    await host.gets("state", (m) => present(m.state, leaverId)),
+    `id=${leaverId}`,
+  );
+  leaver.ws.close(1000, "bye");
+  check("a client-initiated close reaches the others as State", await host.gets("state", (m) => !present(m.state, leaverId)));
 
   // Lock: a third client knocks and waits; the host admits, then kicks them
   host.send({ type: "lock", on: true });
@@ -250,10 +328,32 @@ async function main() {
   host.send({ type: "admit", who: knock?.who });
   const thirdWelcome = await third.take("welcome").catch(() => null);
   check("admitted client gets Welcome", thirdWelcome?.you === knock?.who);
+
+  // The third client publishes and the others subscribe, so the kick closes tracks on the SFU;
+  // the mock holds that call while the kicked client tries to join again on the same socket.
+  third.send({ type: "publishOffer", sdp: "third-offer", tracks: [{ mid: "0", kind: "audio", name: "third-mic" }] });
+  check("the third client publishes", await third.gets("publishAnswer"));
+  const answered = await Promise.all([host, guest].map(async (client) => (await receive(client, knock?.who)).offer !== null));
+  check("host and guest receive the third client's track", answered.every(Boolean), answered.join(","));
+  sfu.closeDelayMs = 1000;
+  third.ws.addEventListener("message", (event) => {
+    if (JSON.parse(event.data).type === "kicked") join(third, { name: "Third" });
+  });
+  const closesBefore = sfu.calls.filter((c) => c.op === "tracks/close").length;
   host.send({ type: "kick", who: knock?.who });
   check("kicked client gets Kicked", await third.gets("kicked"));
   const kickClose = await withTimeout(third.closed, "kick close").catch(() => null);
   check("kicked client's socket closes", kickClose !== null, `code ${kickClose?.code}`);
+  const rejoined = await Promise.all([
+    host.gets("knock", (m) => m.who === knock?.who, 2000),
+    third.gets("waiting", undefined, 2000),
+  ]);
+  sfu.closeDelayMs = 0;
+  check(
+    "the kick closed tracks on the SFU",
+    sfu.calls.filter((c) => c.op === "tracks/close").length > closesBefore,
+  );
+  check("a Join right after the kick does not bring the kicked client back", !rejoined.some(Boolean), rejoined.join(","));
   guest.send({ type: "kick", who: hostId });
   check("a guest cannot kick", await guest.gets("error", (m) => m.code === "notHost"));
 

@@ -149,7 +149,14 @@ impl<T: SfuTransport> SfuClient<T> {
     }
 
     /// `POST sessions/{id}/tracks/new` with the client's offer and local tracks; returns the
-    /// SFU's answer. Fails unless every track is published.
+    /// SFU's answer. Fails only if the SFU rejected every track: the API docs say to keep the
+    /// successful tracks of a partly successful request, and the answer covers the whole offer,
+    /// so the client must apply it either way.
+    ///
+    /// The SFU answers an endpoint's offer with an answer and
+    /// `requiresImmediateRenegotiation: false` (OpenAPI example `local_tracks`); a response
+    /// that instead carries an SFU offer fails with [`SfuError::MissingSdp`], as the core has
+    /// no reply that would send that offer to the client.
     pub async fn publish(
         &self,
         session: &SessionId,
@@ -176,15 +183,25 @@ impl<T: SfuTransport> SfuClient<T> {
                 Some(&request),
             )
             .await?;
-        if let Some(error) = response.tracks.iter().find_map(track_error) {
-            return Err(error);
+        let published = response
+            .tracks
+            .iter()
+            .any(|result| result.error_code.is_none());
+        match response.tracks.iter().find_map(track_error) {
+            Some(error) if !published => Err(error),
+            _ => sdp_of(response.session_description, SdpType::Answer),
         }
-        sdp_of(response.session_description, SdpType::Answer)
     }
 
     /// `POST sessions/{id}/tracks/new` with remote tracks; returns the SFU's offer and the tracks
-    /// it carries. Tracks the SFU rejected are left out, so the core requests them again; fails
-    /// if it rejected all of them.
+    /// it carries. Tracks the SFU rejected are left out, so the core requests them again.
+    ///
+    /// Whenever the response carries an offer, the client must answer it, or the session stays
+    /// "expecting a remote answer" and the SFU refuses every later call on it (406, then 410).
+    /// So an offer is returned even if every track failed and the list is empty: a publisher
+    /// whose `PeerConnection` is not connected yet gets `not_found_track_error` together with an
+    /// offer (seen against the live SFU, see `docs/spikes/02-first-call.md`), and the core retries
+    /// such tracks after `SUBSCRIBE_RETRY_MS`. Fails only if there is no offer.
     pub async fn subscribe(
         &self,
         session: &SessionId,
@@ -198,8 +215,10 @@ impl<T: SfuTransport> SfuClient<T> {
                     session_id: track.session.clone(),
                     track_name: track.name.clone(),
                     mid: None,
-                    // The SFU's default layer applies until `SetLayer`: `RemoteTrack` does not
-                    // say whether a track is video, and audio has no layers.
+                    // No layer preference until `SetLayer`: `RemoteTrack` does not say whether a
+                    // track is video, and audio has no layers. Neither the simulcast docs nor
+                    // the OpenAPI schema (both checked 2026-10-09) say which layer the SFU sends
+                    // without a `simulcast` object; the core assumes `f` (`Rid::High`).
                     simulcast: None,
                 })
                 .collect(),
@@ -212,15 +231,11 @@ impl<T: SfuTransport> SfuClient<T> {
             )
             .await?;
         let first_error = response.tracks.iter().find_map(track_error);
-        let offered: Vec<OfferedTrack> = response.tracks.into_iter().filter_map(offered).collect();
-        if offered.is_empty() {
-            return Err(first_error.unwrap_or(SfuError::Decode(
-                "no track in the subscribe response".to_owned(),
-            )));
-        }
+        let sdp = sdp_of(response.session_description, SdpType::Offer)
+            .map_err(|missing| first_error.unwrap_or(missing))?;
         Ok(SubscribeOffer {
-            sdp: sdp_of(response.session_description, SdpType::Offer)?,
-            tracks: offered,
+            sdp,
+            tracks: response.tracks.into_iter().filter_map(offered).collect(),
         })
     }
 
@@ -286,8 +301,8 @@ impl<T: SfuTransport> SfuClient<T> {
                 simulcast: Some(Simulcast {
                     preferred_rid: rid,
                     // Keep the chosen layer under bandwidth pressure, but never show nothing
-                    // when the publisher drops it. The a–z order of the rids (high, low, mid)
-                    // falls back from `high` to `low`, skipping `mid`.
+                    // when the publisher drops it. In a–z order (f, h, q) a missing layer
+                    // falls back to the next smaller one.
                     priority_ordering: LayerFallback::None,
                     rid_not_available: LayerFallback::Asciibetical,
                 }),

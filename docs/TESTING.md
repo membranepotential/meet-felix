@@ -11,8 +11,8 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Core unit tests | Single rules of `step`, whole meetings, ids, the word list | `cargo test -p meeting-core` | Exist; growing with the core |
 | Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 200 actions) |
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
-| SFU client tests | Request and response JSON against samples from Cloudflare's docs; core SFU effects to replies | `cargo test -p sfu-api` | Exist |
-| Worker unit tests | Storage record, alarm and keepalive rules, `/api/new` input checks | `cargo test -p meet-worker` | Exist |
+| SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer); core SFU effects to replies | `cargo test -p sfu-api` | Exist |
+| Worker unit tests | Storage record, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules, `/api/new` input checks | `cargo test -p meet-worker` | Exist |
 | Worker spike scripts | The real `RoomObject` running the core under `wrangler dev`, with a mock SFU | `node crates/worker/spike/ws-clients.mjs` | Exists; covers the protocol end to end |
 | Web checks | Types and build of the Svelte shell | `pnpm --filter web check`, `pnpm --filter web build` | Exist |
 | Device checklist | Real phones, tablets and desktop browsers | manual, phase 4 | Planned |
@@ -68,10 +68,19 @@ credentials, `SFU_API_URL` pointing at the mock). It checks:
 - the host joins with the token (recording starts), a guest joins with
   consent, `Welcome` and `State` broadcasts, the auto-response ping, a
   malformed frame;
-- publish (`PublishAnswer` from the SFU) and subscribe (`SubscribeOffer` to
-  the guest, whose answer reaches `renegotiate`);
-- after an idle phase (`SPIKE_IDLE_MS`, default 15 s): lock, a third client
-  gets `Waiting`, knock, admit, kick, a guest's kick refused;
+- publish (`PublishAnswer` from the SFU) and subscribe: like the live SFU
+  before the publisher is connected, the mock answers the first pull of each
+  track with `not_found_track_error` and an offer, which reaches the guest as
+  a `SubscribeOffer` without tracks; the retry after `SUBSCRIBE_RETRY_MS`
+  offers the track, and the guest's answers reach `renegotiate`;
+- `Unpublish`: the track is closed on the publish session and on the
+  subscriber's session;
+- after an idle phase (`SPIKE_IDLE_MS`, default 15 s): a client that closes
+  its socket reaches the others as `State`; lock, a third client gets
+  `Waiting`, knock, admit; the third client publishes and the others receive
+  the track; kick, with the mock holding the kick's `tracks/close` while the
+  kicked client sends `Join` on the same socket, which must not bring it
+  back; a guest's kick refused;
 - resume: a new socket with the resume token keeps the participant id, the
   old socket is closed, and messages reach the new one;
 - `End`: everyone gets `Ended`, the sockets close, the next socket and the

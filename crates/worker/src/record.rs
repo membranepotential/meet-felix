@@ -55,8 +55,23 @@ impl OpenRoom {
     /// Runs one event through the core; returns the record to store and the effects to carry
     /// out.
     pub fn step(self, now: Millis, event: Event) -> (Record, Vec<Effect>) {
+        // A fired alarm is used up. The core sets it again after every `AlarmFired` if anything
+        // is still due; keeping the old time would re-arm a time in the past, and the alarm
+        // would fire again at once, forever.
+        let alarm = match event {
+            Event::AlarmFired => None,
+            _ => self.alarm,
+        };
         let (room, effects) = step(self.room, now, event);
-        (Self { room, ..self }.settle(&effects), effects)
+        (
+            Self {
+                room,
+                alarm,
+                ..self
+            }
+            .settle(&effects),
+            effects,
+        )
     }
 
     /// Hands out the next participant id.
@@ -70,7 +85,8 @@ impl OpenRoom {
     }
 
     /// The record after the core produced `effects`: ended after [`Effect::EndMeeting`],
-    /// otherwise open with the latest alarm time.
+    /// otherwise open with the time of the last [`Effect::SetAlarm`], or the remembered one if
+    /// there is none.
     fn settle(self, effects: &[Effect]) -> Record {
         if effects.contains(&Effect::EndMeeting) {
             return Record::Ended {
@@ -195,6 +211,26 @@ mod tests {
             open = next;
         }
         open
+    }
+
+    #[test]
+    fn a_fired_alarm_is_forgotten_unless_the_core_sets_it_again() {
+        let fired_at = T0.after(EMPTY_ROOM_TIMEOUT_MS);
+        let room = room_with_host();
+        // The host's join cancelled the empty-room alarm, but the core never clears an alarm.
+        assert_eq!(room.alarm, Some(fired_at));
+        let (Record::Open(open), effects) = room.step(fired_at, Event::AlarmFired) else {
+            panic!("an alarm in an occupied room keeps it open")
+        };
+        let set = effects.iter().find_map(|effect| match effect {
+            Effect::SetAlarm { at } => Some(*at),
+            _ => None,
+        });
+        assert_eq!(open.alarm, set);
+        assert_eq!(
+            open.alarm, None,
+            "nothing is due in a room with a joined host"
+        );
     }
 
     #[test]
