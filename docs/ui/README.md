@@ -37,7 +37,9 @@ Code: [`web/src/routes/+page.svelte`](../../web/src/routes/+page.svelte)
 [`web/src/lib/toasts.svelte.ts`](../../web/src/lib/toasts.svelte.ts),
 [`web/src/lib/storage.ts`](../../web/src/lib/storage.ts) (what the browser
 keeps), [`web/src/routes/t/[token]/+page.svelte`](../../web/src/routes/t/[token]/+page.svelte)
-(transcript page). The past-meetings page does not exist yet.
+(transcript page), [`web/src/routes/meetings/+page.svelte`](../../web/src/routes/meetings/+page.svelte)
+(past meetings), [`web/src/lib/owner-state.ts`](../../web/src/lib/owner-state.ts)
+(the owner session reducer).
 Research: [05 — frontend and browser](../research/05-frontend-and-browser.md).
 
 ## D22: Phones and tablets are fully supported, and the start and pre-join pages are laid out for phones first (2026-10-09)
@@ -93,9 +95,9 @@ is handled by changing the password, which invalidates every session.
 
 ## D25: The start page has one recording switch, shows the words on one line, and ends in Join now (2026-10-09)
 
-Before creating a meeting, the start page shows the password field
-([D24](#d24-the-owners-password-is-never-stored-on-the-device-the-password-manager-fills-it-every-time-2026-10-09)),
-one switch, the "New meeting" button, and a link to the past-meetings page
+Before creating a meeting, the index page asks for the password once per
+device ([D24](#d24-the-owners-password-is-never-stored-on-the-device-the-password-manager-fills-it-every-time-2026-10-09),
+changed to a login the same day). Signed in, the start page shows one switch, the "New meeting" button, and a link to the past-meetings page
 ([D26](#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09)):
 
 - The switch **"Record and transcribe"** is on by default (mockup question
@@ -133,8 +135,10 @@ with a separate page. Why a separate page and not a list on the start page: the 
 the switch and the button, and a list kept in one browser's storage would
 show nothing on another device.
 
-Not designed yet: which store holds the list on the server, and the page's
-path.
+Built on 2026-10-09: the page is `/meetings`, the list comes from
+`GET /api/meetings` (an index in the `MEETINGS` KV namespace, newest first,
+at most 200 entries), and the page shows the login form inline when the
+session is missing.
 
 ## D27: The guest pre-join remembers the name and does not show who is in the room (2026-10-09)
 
@@ -216,10 +220,9 @@ work; this decision covers only how it looks.
 
 ## Open questions
 
-- **Does the password field go away?** D7 says `/new` moves behind
-  Cloudflare Access once a domain is attached, and the creation secret goes.
-  If that happens, it is open whether the start page and the past-meetings
-  page drop their password field
+- **Does the login go away?** D7 leaves the door open for Cloudflare Access
+  on the owner routes. If that ever happens, it is open whether the login
+  form and the "Join as host" fallback stay
   ([D24](#d24-the-owners-password-is-never-stored-on-the-device-the-password-manager-fills-it-every-time-2026-10-09),
   [D26](#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09)).
 - **Why does the phone grid leave the bottom third empty?** In the 390 px
