@@ -4,11 +4,14 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- domain-research — meet.example.com with DNS staying at an external provider, no home server; options incl. smallest Hetzner relay — researcher running — next: decision brief
-- ui-mockup — .lavish/meet-felix-ui.html (current screens + proposals, decision inputs) — agent running — next: collect feedback via lavish poll
-- deployed-check — user tests https://meet-felix.example.workers.dev from phone + laptop (two networks, 10 min) — waiting — next: read dashboard (hibernation, egress), docs/spikes/03-deployed.md
+- core-lifecycle — meeting-core: Scheduled/Live/Ended phases, 60-day unused expiry, guests wait for the host, owner flag replaces host tokens — implementer running — next: worker login cookie + host injection, web login page + join as host
+- web-ui-decisions — web/: D22–D31 (start page, past meetings page, phone chips, active speaker ring, toasts, transcript page) — implementer running — next: rebase onto the login-first index page
+- worker-meetings — crates/worker: GET /api/meetings + index in KV, endedAt on end — implementer running — next: commit
+- deployed-check — user tests from phone + laptop (two networks, 10 min) — waiting
 
 ## Done
+- 2026-10-09 https://meet.example.com live: Pages front door `meet-felix-edge` (edge/dist/_worker.js, service binding) + external CNAME; HTTPS, API and a real WebSocket join verified (Welcome in 626 ms). Research in docs/research/10.
+- 2026-10-09 UI decisions D22–D31 recorded (docs/ui). User added: login-first index page with a session cookie, scheduled meetings (link valid until used), join-as-host fallback.
 - 2026-10-09 First deploy: https://meet-felix.example.workers.dev (version b9384325), secrets CREATE_SECRET/CALLS_APP_ID/CALLS_APP_SECRET set, HTTP smoke test green (200/404/401/201/426). Script renamed to `pnpm run release`.
 - 2026-10-09 Phase 1 accepted locally: run 4 of the real-SFU call test 43/44 (docs/spikes/02-first-call.md), host receives media, 3-party call held 3 min. Commit 15abbe6.
 - 2026-10-09 First real call through the SFU (docs/spikes/02-first-call.md): 24/31 checks; host-side subscribe race diagnosed and fixed in sfu-api (commit 94f1e7a). Worker review fixes (alarm loop, effect order, stale sockets). Core follow-ups (Unpublish, publish timeout, wasm parse/encode, rids q/h/f). Web adapted (54 tests).
