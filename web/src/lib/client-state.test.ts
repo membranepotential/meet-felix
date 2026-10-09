@@ -87,6 +87,8 @@ describe('reduce', () => {
 		const host = reduce(INITIAL, { type: 'error', code: 'invalidHostToken' })[1];
 		expect(host.map((c) => c.kind)).toEqual(['rejoin-as-guest', 'toast']);
 		expect(reduce(welcomed(), { type: 'error', code: 'notSubscribed' })[1]).toEqual([]);
+		const unpublish = reduce(welcomed(), { type: 'error', code: 'notPublished' })[1];
+		expect(unpublish.map((c) => c.kind)).toEqual(['warn']);
 	});
 
 	it('passes SDP through to the media layer', () => {

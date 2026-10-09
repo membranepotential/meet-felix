@@ -5,17 +5,20 @@
  */
 import { trackKey, type Rid, type TrackRef } from './protocol.ts';
 
-/** Tiles narrower than this (CSS pixels) get the low layer. */
-export const LOW_BELOW_PX = 240;
-/** Tiles narrower than this (CSS pixels) get the mid layer; wider ones get high. */
-export const MID_BELOW_PX = 640;
+/** Tiles narrower than this (CSS pixels) get the quarter-resolution layer. */
+export const QUARTER_BELOW_PX = 240;
+/** Tiles narrower than this (CSS pixels) get the half-resolution layer; wider ones get full. */
+export const HALF_BELOW_PX = 640;
 export const LAYER_DEBOUNCE_MS = 400;
+
+/** The layer a new subscription starts at (D11). */
+export const DEFAULT_LAYER: Rid = 'f';
 
 /** Pure: the layer for a tile `width` CSS pixels wide. */
 export const layerFor = (width: number): Rid =>
-	width < LOW_BELOW_PX ? 'low' : width < MID_BELOW_PX ? 'mid' : 'high';
+	width < QUARTER_BELOW_PX ? 'q' : width < HALF_BELOW_PX ? 'h' : DEFAULT_LAYER;
 
-/** What the room was last asked for, per track key; absent means the SFU default (high). */
+/** What the room was last asked for, per track key; absent means `DEFAULT_LAYER`. */
 export type SentLayers = ReadonlyMap<string, Rid>;
 
 /**
@@ -31,7 +34,7 @@ export function layerChanges(
 	return [...widths]
 		.filter(([key]) => received.has(key))
 		.map(([key, { track, width }]) => ({ key, track, rid: layerFor(width) }))
-		.filter(({ key, rid }) => (sent.get(key) ?? 'high') !== rid)
+		.filter(({ key, rid }) => (sent.get(key) ?? DEFAULT_LAYER) !== rid)
 		.map(({ track, rid }) => ({ track, rid }));
 }
 

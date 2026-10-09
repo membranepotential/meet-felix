@@ -49,6 +49,8 @@ export const INITIAL: ClientState = {
 /** A side effect for the session to run, in order. */
 export type Command =
 	| { kind: 'toast'; text: string; tone: ToastTone }
+	/** Harmless for the user, but worth a line in the console. */
+	| { kind: 'warn'; text: string }
 	/** We are in. `fresh` means a new participant: open new SFU peer connections. */
 	| { kind: 'welcomed'; fresh: boolean }
 	| { kind: 'publish-answer'; sdp: Sdp }
@@ -88,6 +90,7 @@ export function describeError(code: ErrorCode): string | null {
 			return 'The media server is not reachable right now. Leave and join again in a minute.';
 		case 'subscribeFailed':
 			return 'Some video or audio did not arrive. The meeting retries on its own.';
+		case 'notPublished':
 		case 'unexpectedAnswer':
 		case 'notSubscribed':
 			return null;
@@ -149,6 +152,10 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			const commands: Command[] = [];
 			if (PUBLISH_ERRORS.has(msg.code)) commands.push({ kind: 'publish-rejected' });
 			if (msg.code === 'invalidHostToken') commands.push({ kind: 'rejoin-as-guest' });
+			// An `Unpublish` that crossed a reconnect: the room no longer had the track.
+			if (msg.code === 'notPublished') {
+				commands.push({ kind: 'warn', text: 'the room had no track to unpublish' });
+			}
 			if (text !== null) commands.push({ kind: 'toast', text, tone: 'alert' });
 			return [state, commands];
 		}

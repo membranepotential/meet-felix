@@ -1,8 +1,7 @@
 /**
- * Reactive views of remote tracks. A received track stays in place when its publisher
- * turns the camera off or stops sharing (the protocol has no unpublish); it only stops
- * delivering frames, which the browser reports as `mute`. Tiles show video only while the
- * track is live.
+ * Reactive views of remote tracks. When its publisher turns the camera off or stops sharing,
+ * a received track stops delivering frames (the browser reports `mute`) or ends, until the
+ * room renegotiates the subscription. Tiles show video only while the track is live.
  */
 import { createSubscriber } from 'svelte/reactivity';
 

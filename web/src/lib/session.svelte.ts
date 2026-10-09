@@ -169,6 +169,9 @@ export class Session {
 			case 'toast':
 				this.toasts.show(command.text, command.tone);
 				return;
+			case 'warn':
+				console.warn(command.text);
+				return;
 			case 'welcomed':
 				if (command.fresh || this.#link === null) this.#openLink();
 				else void this.#link.then(({ publisher }) => publisher.retryFailed());
@@ -202,7 +205,7 @@ export class Session {
 		const link: Promise<MediaLink> = this.#ice.then((iceServers) => {
 			const publisher = new Publisher(
 				peerConnection(iceServers),
-				(sdp, tracks) => this.#signaling.send({ type: 'publishOffer', sdp, tracks }),
+				(msg) => this.#signaling.send(msg),
 				(kinds, reason) => this.#onPublishFailed(kinds, reason)
 			);
 			const subscriber = new Subscriber(

@@ -12,6 +12,7 @@
  */
 import {
 	trackKey,
+	type ClientMsg,
 	type IncomingTrack,
 	type LocalTrack,
 	type ParticipantId,
@@ -30,9 +31,9 @@ export const peerConnection = (iceServers: RTCIceServer[]): RTCPeerConnection =>
  * subscriber picks a layer per track (`ClientMsg::SetLayer`) to match its tile size.
  */
 export const CAMERA_SIMULCAST: readonly (RTCRtpEncodingParameters & { rid: Rid })[] = [
-	{ rid: 'low', scaleResolutionDownBy: 4 },
-	{ rid: 'mid', scaleResolutionDownBy: 2 },
-	{ rid: 'high', scaleResolutionDownBy: 1 }
+	{ rid: 'q', scaleResolutionDownBy: 4 },
+	{ rid: 'h', scaleResolutionDownBy: 2 },
+	{ rid: 'f', scaleResolutionDownBy: 1 }
 ];
 
 /** The local track to publish per kind; `null` publishes nothing of that kind. */
@@ -44,15 +45,14 @@ const NAME_BASE: Record<TrackKind, string> = { audio: 'mic', video: 'cam', scree
 
 /**
  * Pure: the SFU track name for the `generation`-th track published in this session. The
- * room rejects a name already in use, and a kind turned off stays published until it is
- * replaced (the protocol has no unpublish), so every publish needs a new name.
+ * room rejects a name already in use, so every publish takes a new one.
  */
 export const trackName = (kind: TrackKind, generation: number): TrackName =>
 	`${NAME_BASE[kind]}-${generation}`;
 
 export interface PublishPlan {
-	/** Published kinds no longer wanted: stop their transceivers. */
-	stop: TrackKind[];
+	/** Published kinds no longer wanted: send `Unpublish` and stop their transceivers. */
+	unpublish: TrackKind[];
 	/** Published kinds with a new track: swap it onto the sender, no negotiation needed. */
 	replace: TrackKind[];
 	/** Wanted kinds not yet published: add transceivers and send a publish offer. */
@@ -69,12 +69,12 @@ export function planPublish<T>(
 	desired: Readonly<Record<TrackKind, T | null>>,
 	failed: ReadonlyMap<TrackKind, T>
 ): PublishPlan {
-	const plan: PublishPlan = { stop: [], replace: [], add: [] };
+	const plan: PublishPlan = { unpublish: [], replace: [], add: [] };
 	for (const kind of TRACK_KINDS) {
 		const want = desired[kind];
 		const have = published.get(kind);
 		if (want === null) {
-			if (have !== undefined) plan.stop.push(kind);
+			if (have !== undefined) plan.unpublish.push(kind);
 		} else if (have !== undefined) {
 			if (have !== want) plan.replace.push(kind);
 		} else if (failed.get(kind) !== want) {
@@ -104,16 +104,18 @@ interface Published {
 /**
  * The publish session. `sync` states which local tracks should be published; the publisher
  * runs one negotiation at a time (the room rejects a second one) until the published set
- * matches. Turning a kind off stops its transceiver; turning it on publishes a new track,
- * because the SFU garbage-collects a track that sends nothing for 30 seconds.
+ * matches. Turning a kind off sends `Unpublish` and stops its transceiver, so the track
+ * leaves every subscriber at once; turning it on publishes a new track.
  */
 export class Publisher {
 	readonly #pc: RTCPeerConnection;
-	/** Sends the offer; returns `false` if the socket is down. */
-	readonly #sendOffer: (sdp: Sdp, tracks: LocalTrack[]) => boolean;
+	/** Sends a message to the room; returns `false` if the socket is down. */
+	readonly #send: (msg: ClientMsg) => boolean;
 	readonly #onFailed: (kinds: TrackKind[], reason: PublishFailure) => void;
 	readonly #published = new Map<TrackKind, Published>();
 	readonly #failed = new Map<TrackKind, MediaStreamTrack>();
+	/** Kinds whose `Unpublish` could not go out; sent again by `retryFailed`. */
+	readonly #unsentUnpublish = new Set<TrackKind>();
 	#desired: Outgoing = NO_OUTGOING;
 	#generation = 0;
 	#running = false;
@@ -122,11 +124,11 @@ export class Publisher {
 
 	constructor(
 		pc: RTCPeerConnection,
-		sendOffer: (sdp: Sdp, tracks: LocalTrack[]) => boolean,
+		send: (msg: ClientMsg) => boolean,
 		onFailed: (kinds: TrackKind[], reason: PublishFailure) => void
 	) {
 		this.#pc = pc;
-		this.#sendOffer = sendOffer;
+		this.#send = send;
 		this.#onFailed = onFailed;
 	}
 
@@ -135,9 +137,13 @@ export class Publisher {
 		void this.#run();
 	}
 
-	/** Tries the kinds that failed before again, e.g. after the socket reconnected. */
+	/**
+	 * Tries the kinds that failed before again, e.g. after the socket reconnected, and sends
+	 * the `Unpublish` messages that could not go out while it was down.
+	 */
 	retryFailed(): void {
 		this.#failed.clear();
+		for (const kind of this.#unsentUnpublish) this.#sendUnpublish(kind);
 		void this.#run();
 	}
 
@@ -167,8 +173,8 @@ export class Publisher {
 			while (!this.#closed) {
 				const published = new Map([...this.#published].map(([kind, p]) => [kind, p.track]));
 				const plan = planPublish(published, this.#desired, this.#failed);
-				if (plan.stop.length + plan.replace.length + plan.add.length === 0) break;
-				for (const kind of plan.stop) this.#stop(kind);
+				if (plan.unpublish.length + plan.replace.length + plan.add.length === 0) break;
+				for (const kind of plan.unpublish) this.#unpublish(kind);
 				for (const kind of plan.replace) await this.#replace(kind);
 				if (plan.add.length > 0) await this.#publish(plan.add);
 			}
@@ -177,14 +183,21 @@ export class Publisher {
 		}
 	}
 
-	#stop(kind: TrackKind): void {
+	/** Takes `kind` off the room and the SFU; its next track is published anew. */
+	#unpublish(kind: TrackKind): void {
 		const published = this.#published.get(kind);
 		this.#published.delete(kind);
+		this.#sendUnpublish(kind);
 		try {
 			published?.transceiver.stop();
 		} catch {
 			// Already stopped, or the connection is closed.
 		}
+	}
+
+	#sendUnpublish(kind: TrackKind): void {
+		if (this.#send({ type: 'unpublish', kind })) this.#unsentUnpublish.delete(kind);
+		else this.#unsentUnpublish.add(kind);
 	}
 
 	async #replace(kind: TrackKind): Promise<void> {
@@ -196,7 +209,7 @@ export class Publisher {
 			published.track = track;
 		} catch {
 			// The browser refused the swap: publish the track anew on the next round.
-			this.#stop(kind);
+			this.#unpublish(kind);
 		}
 	}
 
@@ -225,6 +238,8 @@ export class Publisher {
 			for (const { kind, track, transceiver } of added) {
 				this.#published.set(kind, { transceiver, track });
 				this.#failed.delete(kind);
+				// The new track replaced the old one in the room; its `Unpublish` is moot.
+				this.#unsentUnpublish.delete(kind);
 			}
 		} catch (e) {
 			if (this.#closed) return;
@@ -249,7 +264,7 @@ export class Publisher {
 	/** Sends the offer and waits for the room's answer, its rejection, or the timeout. */
 	#exchange(sdp: Sdp, tracks: LocalTrack[]): Promise<Sdp> {
 		return new Promise<Sdp>((resolve, reject) => {
-			if (!this.#sendOffer(sdp, tracks)) {
+			if (!this.#send({ type: 'publishOffer', sdp, tracks })) {
 				reject(new PublishError('not-sent'));
 				return;
 			}

@@ -1,11 +1,77 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initSync } from './wasm/meeting_core.js';
-import { parseMeetingId, parseServerMsg, trackKey } from './protocol.ts';
+import {
+	encodeClientMsg,
+	parseMeetingId,
+	parseServerMsg,
+	trackKey,
+	type ClientMsg,
+	type RoomView,
+	type ServerMsg
+} from './protocol.ts';
 
 beforeAll(() => {
 	initSync({ module: readFileSync(new URL('./wasm/meeting_core_bg.wasm', import.meta.url)) });
 });
+
+/** One sample per variant; the mapped type fails the build when the core adds a variant. */
+type Samples<M extends { type: string }> = { [T in M['type']]: Extract<M, { type: T }> };
+
+const room: RoomView = {
+	meeting: 'abide-acid-acorn',
+	locked: false,
+	recordingPolicy: 'hostDecides',
+	recording: { since: 1_700_000_000_000, by: 1 },
+	participants: [
+		{
+			id: 1,
+			name: 'Ada',
+			role: 'host',
+			consentRecording: true,
+			presence: 'joined',
+			tracks: ['audio', 'video']
+		}
+	]
+};
+
+const SERVER_SAMPLES: Samples<ServerMsg> = {
+	welcome: { type: 'welcome', you: 1, state: room, resume: 'r1' },
+	state: { type: 'state', state: room },
+	waiting: { type: 'waiting' },
+	publishAnswer: { type: 'publishAnswer', sdp: 'v=0' },
+	subscribeOffer: {
+		type: 'subscribeOffer',
+		sdp: 'v=0',
+		tracks: [{ mid: '0', track: { owner: 2, kind: 'screen' } }]
+	},
+	knock: { type: 'knock', who: 3 },
+	consentRequired: { type: 'consentRequired' },
+	muted: { type: 'muted' },
+	kicked: { type: 'kicked' },
+	ended: { type: 'ended', transcript: 'abc' },
+	error: { type: 'error', code: 'notPublished' }
+};
+
+const CLIENT_SAMPLES: Samples<ClientMsg> = {
+	join: { type: 'join', name: 'Ada', consent: true, hostToken: 'h', resume: 'r1' },
+	setConsent: { type: 'setConsent', consent: false },
+	publishOffer: {
+		type: 'publishOffer',
+		sdp: 'v=0',
+		tracks: [{ mid: '0', kind: 'video', name: 'cam-1' }]
+	},
+	unpublish: { type: 'unpublish', kind: 'video' },
+	subscribeAnswer: { type: 'subscribeAnswer', sdp: 'v=0' },
+	setLayer: { type: 'setLayer', track: { owner: 2, kind: 'video' }, rid: 'h' },
+	lock: { type: 'lock', on: true },
+	admit: { type: 'admit', who: 3 },
+	kick: { type: 'kick', who: 3 },
+	mute: { type: 'mute', who: 3 },
+	setRecording: { type: 'setRecording', on: true },
+	end: { type: 'end' },
+	leave: { type: 'leave' }
+};
 
 describe('parseMeetingId', () => {
 	it('accepts listed words and lowercases what phones capitalise', () => {
@@ -27,12 +93,32 @@ describe('parseMeetingId', () => {
 });
 
 describe('parseServerMsg', () => {
-	it('accepts known tags and rejects the rest', () => {
-		expect(parseServerMsg('{"type":"waiting"}')).toEqual({ type: 'waiting' });
-		expect(parseServerMsg('{"type":"Welcome"}')).toBeNull();
-		expect(parseServerMsg('{"type":"toString"}')).toBeNull();
-		expect(parseServerMsg('not json')).toBeNull();
-		expect(parseServerMsg('[]')).toBeNull();
+	it.each(Object.values(SERVER_SAMPLES))('accepts $type', (msg) => {
+		expect(parseServerMsg(JSON.stringify(msg))).toEqual(msg);
+	});
+
+	it('rejects unknown tags, missing fields, wrong values and non-JSON', () => {
+		for (const bad of [
+			'{"type":"Welcome"}',
+			'{"type":"toString"}',
+			'{"type":"pong"}',
+			'{"type":"publishAnswer"}',
+			'{"type":"error","code":"teapot"}',
+			'not json',
+			'[]'
+		]) {
+			expect(() => parseServerMsg(bad), bad).toThrow();
+		}
+	});
+});
+
+describe('encodeClientMsg', () => {
+	it.each(Object.values(CLIENT_SAMPLES))('round-trips $type', (msg) => {
+		expect(JSON.parse(encodeClientMsg(msg))).toEqual(msg);
+	});
+
+	it('rejects a message the room would refuse', () => {
+		expect(() => encodeClientMsg({ type: 'join', name: '', consent: true })).toThrow();
 	});
 });
 

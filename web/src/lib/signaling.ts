@@ -8,9 +8,18 @@
  *
  * While open, the client sends `{"type":"ping"}` every 30 s: the room closes a socket with code
  * 1001 after about 60 s without one, and answers `{"type":"pong"}` without waking its Durable
- * Object. The pong is not a `ServerMsg`, so `parseServerMsg` drops it.
+ * Object. Neither frame is part of the protocol: they are matched as exact strings.
+ *
+ * Every other frame goes through the core's codec (`parseServerMsg`, `encodeClientMsg`), so
+ * the room and the client agree on one definition of each message.
  */
-import { parseServerMsg, type ClientMsg, type MeetingId, type ServerMsg } from './protocol.ts';
+import {
+	encodeClientMsg,
+	parseServerMsg,
+	type ClientMsg,
+	type MeetingId,
+	type ServerMsg
+} from './protocol.ts';
 
 export type ConnectionStatus =
 	| { kind: 'connecting'; attempt: number }
@@ -35,7 +44,31 @@ const isTerminalClose = (code: number): boolean => code >= 4000 && code < 4100;
 
 const KEEPALIVE_MS = 30_000;
 /** The exact frame the room's auto-response matches; not part of `ClientMsg`. */
-const PING = JSON.stringify({ type: 'ping' });
+const PING = '{"type":"ping"}';
+/** The room's exact answer to `PING`; not part of `ServerMsg`. */
+const PONG = '{"type":"pong"}';
+
+/** How much of an invalid frame a warning quotes. */
+const LOGGED_FRAME_CHARS = 200;
+
+/**
+ * Decodes one frame from the room. Returns `null` for the keepalive answer and for a frame
+ * the core rejects; the latter is logged and ignored, because one bad message must not end
+ * the meeting.
+ */
+export function decodeFrame(raw: string): ServerMsg | null {
+	if (raw === PONG) return null;
+	try {
+		return parseServerMsg(raw);
+	} catch (error) {
+		console.warn(
+			'ignored an invalid message from the room:',
+			error,
+			raw.slice(0, LOGGED_FRAME_CHARS)
+		);
+		return null;
+	}
+}
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 10_000;
@@ -71,10 +104,20 @@ export class SignalingClient {
 		this.#open();
 	}
 
-	/** Sends if connected. Returns `false` otherwise; callers decide whether that matters. */
+	/**
+	 * Sends if connected. Returns `false` otherwise, or if the core rejects `msg` (a bug in
+	 * the caller, logged); callers decide whether that matters.
+	 */
 	send(msg: ClientMsg): boolean {
 		if (this.#socket?.readyState !== WebSocket.OPEN) return false;
-		this.#socket.send(JSON.stringify(msg));
+		let frame: string;
+		try {
+			frame = encodeClientMsg(msg);
+		} catch (error) {
+			console.error(`did not send an invalid ${msg.type} message:`, error);
+			return false;
+		}
+		this.#socket.send(frame);
 		return true;
 	}
 
@@ -109,7 +152,7 @@ export class SignalingClient {
 		});
 		socket.addEventListener('message', (event) => {
 			if (socket !== this.#socket || typeof event.data !== 'string') return;
-			const msg = parseServerMsg(event.data);
+			const msg = decodeFrame(event.data);
 			if (msg) this.#handlers.onMessage(msg);
 		});
 		socket.addEventListener('close', (event) => {
