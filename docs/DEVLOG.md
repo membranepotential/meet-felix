@@ -3,6 +3,39 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — first real test: logs, truthful meeting list, centred pages
+
+The user's first test from a phone on mobile data and a laptop found three
+things: the host's join showed an error toast, a page answered 500, and the
+meeting list showed a meeting as scheduled although a host had joined it.
+
+- **Cause of the list bug.** The room marked its index entry live and ended
+  through KV read-modify-write; the live mark of a meeting that ended nine
+  seconds after creation was lost. Fix: the index keeps only what the router
+  knows at creation, and `GET /api/meetings` asks each listed room for its
+  phase (`INFO`, fanned out with `join_all`; a room without a record counts
+  as ended, a room that fails is logged and left out). An end is final, so
+  the listing writes it into the entry (`settled`) and never asks that room
+  again; this keeps the fan-out small, well under the 50 subrequests the
+  Free plan allows per request. `mark_live`, `mark_ended`, `went_live` and
+  the phase derivation from marks are gone.
+- **The 500 is unexplained.** `wrangler tail` was not running during the
+  test, and the Worker had no persisted logs. `[observability] enabled = true`
+  is now set, so Workers Logs keep every invocation, console output and
+  exception for 7 days (Workers & Pages → meet-felix → Observability).
+- **The error toast** was most likely `malformedMessage` after a join with an
+  empty name; the pre-join cannot send one, and the owner's name is now
+  prefilled with `OWNER_NAME` (D32).
+- **Layout.** The start, meetings, lobby and message pages are centred on
+  tablets and desktops; the start page no longer stretches to the bottom of
+  a tall screen.
+- **`each_key_duplicate` in the browser.** The pre-join device lists are
+  keyed by device id, and Chromium on Linux listed one device twice with the
+  same id, which makes Svelte 5 throw and the page die. `listDevices` now
+  keeps the first device per id (`uniqueById`, tested).
+
+Next: the user repeats the test; with logs, a 500 becomes diagnosable.
+
 ## 2026-10-09 — one owner, login session, scheduled meetings, meet.example.com
 
 The user set the product frame: a personal meeting app with one owner as the

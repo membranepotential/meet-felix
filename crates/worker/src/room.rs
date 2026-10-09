@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, MeetingId, Millis, ParticipantId, Phase, RoomState,
-    ServerMsg, SfuReply,
+    ClientMsg, Effect, ErrorCode, Event, MeetingId, Millis, ParticipantId, RoomState, ServerMsg,
+    SfuReply,
 };
 use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
@@ -26,7 +26,7 @@ use worker::{
 
 use crate::internal::{INFO, INIT, InitRoom, OWNER_HEADER, OWNER_YES, RoomInfo};
 use crate::record::{Attachment, OpenSocket, Record, alarm_time, is_stale};
-use crate::{MEETINGS, is_websocket_upgrade, meetings, now, random, sfu};
+use crate::{MEETINGS, is_websocket_upgrade, now, random, sfu};
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
 /// (`setWebSocketAutoResponse` matches the raw string). Clients send it at least every
@@ -164,17 +164,10 @@ impl RoomObject {
     }
 
     async fn info(&self) -> Result<Response> {
-        let info = match self.load().await? {
-            None => return Response::error("unknown meeting", 404),
-            Some(Record::Open(open)) => {
-                let view = open.room.view();
-                RoomInfo::new(view.recording_policy, view.phase)
-            }
-            Some(Record::Ended { recording_policy }) => {
-                RoomInfo::new(recording_policy, Phase::Ended)
-            }
+        let Some(record) = self.load().await? else {
+            return Response::error("unknown meeting", 404);
         };
-        Response::from_json(&info)
+        Response::from_json(&RoomInfo::new(record.recording_policy(), record.phase()))
     }
 
     /// Accepts a socket for a scheduled or running meeting and gives it the next participant
@@ -231,7 +224,6 @@ impl RoomObject {
                 // Ended, or never initialised: nothing listens any more.
                 return Ok(());
             };
-            let was_scheduled = open.room.view().phase == Phase::Scheduled;
             let now = now();
             let (record, effects) = open.step(now, event);
             self.store(&record).await?;
@@ -239,14 +231,6 @@ impl RoomObject {
                 close(&ws, CLOSE_STALE, "no ping");
             }
             let replies = self.execute_step(effects, &mut sfu_calls).await?;
-            // After the step's effects, like every other await that lets events in. Logged, not
-            // returned: the index is the owner's overview, not the room's state.
-            if was_scheduled
-                && record.phase() == Phase::Live
-                && let Err(e) = self.mark_live(now).await
-            {
-                console_error!("marking the meeting live in the index failed: {e}");
-            }
             queue.extend(
                 replies
                     .into_iter()
@@ -319,10 +303,6 @@ impl RoomObject {
                     close(&ws, CLOSE_NORMAL, "meeting ended");
                 }
                 self.state.storage().delete_alarm().await?;
-                // Logged, not returned, like `ReleaseMeetingId`: the meeting has ended either way.
-                if let Err(e) = self.mark_ended().await {
-                    console_error!("marking the meeting ended in the index failed: {e}");
-                }
             }
             Effect::SfuNewSession { .. }
             | Effect::SfuPublish { .. }
@@ -363,33 +343,6 @@ impl RoomObject {
         let this = self.state.id().to_string();
         if kv.get(meeting.as_str()).text().await?.as_deref() == Some(this.as_str()) {
             kv.delete(meeting.as_str()).await?;
-        }
-        Ok(())
-    }
-
-    /// Marks this room's entry in the owner's meeting index live since `at`.
-    async fn mark_live(&self, at: Millis) -> Result<()> {
-        let this = self.state.id().to_string();
-        let stored = meetings::update(&self.env.kv(MEETINGS)?, |index| {
-            meetings::went_live(index, &this, at)
-        })
-        .await?;
-        if !stored {
-            console_warn!("the meeting index has no scheduled entry for room {this}");
-        }
-        Ok(())
-    }
-
-    /// Marks this room's entry in the owner's meeting index ended.
-    async fn mark_ended(&self) -> Result<()> {
-        let this = self.state.id().to_string();
-        let now = now();
-        let stored = meetings::update(&self.env.kv(MEETINGS)?, |index| {
-            meetings::ended(index, &this, now)
-        })
-        .await?;
-        if !stored {
-            console_warn!("the meeting index has no running entry for room {this}");
         }
         Ok(())
     }

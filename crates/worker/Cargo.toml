@@ -22,3 +22,4 @@ getrandom = { version = "0.4.3", features = ["wasm_js"] }
 # The owner's session cookie: HMAC-SHA256 in pure Rust, so it needs no SubtleCrypto.
 hmac = "0.13.0"
 sha2 = "0.11.0"
+futures-util = { version = "0.3", default-features = false }

@@ -74,6 +74,12 @@ export type HostOffer =
 	| { kind: 'form' };
 
 /**
+ * The owner's display name, prefilled when the owner's session joins a meeting (D32: there is
+ * exactly one owner, so the app can know their name).
+ */
+export const OWNER_NAME = 'Felix Peppert';
+
+/**
  * Decides the hosting line of the pre-join and the lobby. `formOpen`: the user opened "Join
  * as host". Only that opens the form: guests never see a password field otherwise, not even
  * when the session check failed.

@@ -48,6 +48,13 @@ impl Record {
             Self::Ended { .. } => Phase::Ended,
         }
     }
+
+    pub fn recording_policy(&self) -> RecordingPolicy {
+        match self {
+            Self::Open(open) => open.room.view().recording_policy,
+            Self::Ended { recording_policy } => *recording_policy,
+        }
+    }
 }
 
 /// A running meeting: the core's state plus what the shell must remember about it.

@@ -24,11 +24,28 @@ export async function listDevices(): Promise<DeviceLists> {
 		return EMPTY;
 	}
 	const of = (kind: MediaDeviceKind) =>
-		infos
-			// Hide entries without an id: they appear before permission is granted.
-			.filter((d) => d.kind === kind && d.deviceId !== '')
-			.map((d, i) => ({ id: d.deviceId, label: d.label || fallbackLabel(kind, i) }));
+		uniqueById(
+			infos
+				// Hide entries without an id: they appear before permission is granted.
+				.filter((d) => d.kind === kind && d.deviceId !== '')
+				.map((d, i) => ({ id: d.deviceId, label: d.label || fallbackLabel(kind, i) }))
+		);
 	return { microphones: of('audioinput'), cameras: of('videoinput') };
+}
+
+/**
+ * The first device per id. Chromium on Linux can list one device twice with the same id
+ * (seen 2026-10-09), and the pre-join screen keys its device lists by id.
+ */
+export function uniqueById(devices: readonly Device[]): Device[] {
+	const seen = new Set<string>();
+	const unique: Device[] = [];
+	for (const device of devices) {
+		if (seen.has(device.id)) continue;
+		seen.add(device.id);
+		unique.push(device);
+	}
+	return unique;
 }
 
 function fallbackLabel(kind: MediaDeviceKind, index: number): string {

@@ -4,9 +4,10 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- deployed-check — user tests https://meet.example.com from phone + laptop (two networks, 10 min) — waiting
+- deployed-check — user retries the host join on https://meet.example.com in Firefox; an HTTP 500 after "Join" could not be reproduced (headless Firefox and raw handshakes all pass) — Workers Logs now persist every request, waiting for the retry
 
 ## Done
+- 2026-10-09 First real test fixes, version b5cfcaa4: Workers Logs on; meeting list asks unsettled rooms for their phase and settles ended ones in the index (no more lost marks); owner's name prefilled; device lists deduplicated (Svelte `each_key_duplicate` seen in Firefox); start, meetings, lobby and end pages centred on desktop. Review by code-reviewer-high, findings fixed; worker 24 tests, spike 63/63, web 99 tests.
 - 2026-10-09 Quiet subscribe retries and Scheduled/Live/Ended labels; deployed version 4e79e91a.
 - 2026-10-09 Redeployed (version 7f62b3e0); production probe of the owner flow through meet.example.com green; call test run 5 (owner session, scheduled meeting, join as host) 70/70 locally.
 - 2026-10-09 D32 one owner; owner session cookie (worker 23 tests, spike 62/62); scheduled lifecycle in the core (37 tests); login-first web with join-as-host (93 tests); UI decisions D22–D31 implemented. Commits 626bf6a…b4c8b15.

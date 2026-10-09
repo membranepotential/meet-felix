@@ -114,6 +114,7 @@
 		gap: 1.25rem;
 		min-height: 100dvh;
 		max-width: 36rem;
+		margin: 0 auto;
 		padding: var(--gutter);
 		padding-top: calc(var(--gutter) + env(safe-area-inset-top));
 		padding-bottom: calc(var(--gutter) + env(safe-area-inset-bottom));

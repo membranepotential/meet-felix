@@ -136,13 +136,14 @@
 </main>
 
 <style>
-	/* One column sized for a phone; on a desktop it stays a narrow column on the left. */
+	/* One column sized for a phone, centred on larger screens. */
 	main {
 		display: flex;
 		flex-direction: column;
 		gap: 2rem;
 		min-height: 100dvh;
 		max-width: 30rem;
+		margin: 0 auto;
 		padding: var(--gutter);
 		padding-top: calc(var(--gutter) + env(safe-area-inset-top));
 		padding-bottom: calc(var(--gutter) + env(safe-area-inset-bottom));
@@ -326,5 +327,21 @@
 
 	.past:hover {
 		color: var(--fog);
+	}
+	/* Tablets and desktops: the content sits in the middle instead of stretching to the bottom.
+	   Last in the file, because it overrides `.create`, `.created` and `.spacer` at equal specificity. */
+	@media (min-width: 761px) {
+		main {
+			justify-content: center;
+		}
+
+		.create,
+		.created {
+			flex: 0 1 auto;
+		}
+
+		.spacer {
+			flex: 0 0 1rem;
+		}
 	}
 </style>

@@ -142,6 +142,7 @@
 		gap: 1.25rem;
 		min-height: 100dvh;
 		max-width: 40rem;
+		margin: 0 auto;
 		padding: var(--gutter);
 	}
 

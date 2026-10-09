@@ -9,11 +9,12 @@
 </script>
 
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import type { LocalMedia } from '../local-media.svelte.ts';
 	import type { CaptureError } from '../media/capture.ts';
 	import { showStream } from '../media/video.ts';
 	import type { OwnerSession } from '../owner-session.svelte.ts';
-	import { hostOffer } from '../owner-state.ts';
+	import { OWNER_NAME, hostOffer } from '../owner-state.ts';
 	import type { MeetingId, RecordingPolicy } from '../protocol.ts';
 	import Icon from './Icon.svelte';
 	import LoginForm from './LoginForm.svelte';
@@ -53,8 +54,19 @@
 		if (canJoin) onjoin(recorded);
 	}
 
-	/** The login made this browser the host: continue the join, or wait for a name. */
+	/** The host is always the owner (D32), so an empty name field gets the owner's name. */
+	function prefillOwner() {
+		if (name.trim() === '') name = OWNER_NAME;
+	}
+
+	// Once per login, not on every keystroke: the owner may still type another name.
+	$effect(() => {
+		if (owner.state.kind === 'signed-in') untrack(prefillOwner);
+	});
+
+	/** The login made this browser the host: continue the join with the owner's name. */
 	function loggedIn() {
+		prefillOwner();
 		if (canJoin) onjoin(recorded);
 	}
 

@@ -8,7 +8,7 @@
 //! - `POST /api/new` (owner only, optional body `{"recording": "fromStart" | "hostDecides"}`)
 //!   creates a scheduled meeting and returns `{"meeting"}` with status 201.
 //! - `GET /api/meetings` (owner only) returns the owner's last meetings, newest first:
-//!   `{"meetings": [{"meeting", "createdAt", "ended", "transcript"?}]}`.
+//!   `{"meetings": [{"meeting", "createdAt", "phase", "ended", "transcript"?}]}`.
 //! - `GET /api/meeting/:words` returns `{"recordingPolicy", "phase", "ended"}`, or 404.
 //! - `GET /api/ice` returns the ICE servers for `RTCPeerConnection`.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
@@ -22,14 +22,15 @@ mod record;
 mod room;
 mod sfu;
 
-use meeting_core::{MeetingId, Millis, RecordingPolicy, SCHEDULED_TTL_MS};
+use futures_util::future::join_all;
+use meeting_core::{MeetingId, Millis, Phase, RecordingPolicy, SCHEDULED_TTL_MS};
 use serde::{Deserialize, Serialize};
 use worker::{
-    Context, Date, Env, KvStore, Method, Request, RequestInit, Response, Result, RouteContext,
-    Router, console_error, event,
+    Context, Date, Env, KvStore, Method, ObjectNamespace, Request, RequestInit, Response, Result,
+    RouteContext, Router, console_error, event,
 };
 
-use crate::internal::{INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES};
+use crate::internal::{INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES, RoomInfo};
 use crate::owner::{CreateSecret, OwnerSession};
 
 /// KV namespace mapping meeting words to the Room Durable Object id (hex); also holds the
@@ -236,25 +237,77 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
         room: room.to_string(),
         created_at: now(),
         transcript,
-        live_at: None,
         ended_at: None,
     };
-    if let Err(e) = meetings::update(&kv, |index| Some(meetings::added(index, entry))).await {
+    if let Err(e) = meetings::update(&kv, |index| meetings::added(index, entry)).await {
         console_error!("adding {meeting:?} to the meeting index failed: {e}");
     }
     Ok(Response::from_json(&NewMeeting { meeting })?.with_status(201))
 }
 
 /// `GET /api/meetings`: the owner's last [`meetings::MAX_ENTRIES`] meetings, newest first, from
-/// the index in KV. The index is eventually consistent and changed by read-modify-write (see
-/// [`meetings`]), so a meeting created or ended in the last minute may be missing or not yet
-/// show as ended.
+/// the index in KV. Entries not yet settled as ended get the phase their room reports right now;
+/// rooms that report ended are settled in the index, so the next listing does not ask them again.
+/// A room that fails to answer is logged and left out, so one broken room does not hide the
+/// others. The index is eventually consistent (see [`meetings`]), so a meeting created in the
+/// last minute may be missing.
 async fn past_meetings(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     if let Some(refusal) = refuse_non_owner(&req, &ctx)? {
         return Ok(refusal);
     }
-    let index = meetings::load(&ctx.kv(MEETINGS)?).await?;
-    Response::from_json(&meetings::listing(index))
+    let kv = ctx.kv(MEETINGS)?;
+    let entries = meetings::newest(meetings::load(&kv).await?);
+    let rooms = ctx.durable_object(ROOMS)?;
+    let phases = join_all(entries.iter().map(|entry| async {
+        match entry.ended_at {
+            Some(_) => Ok(Phase::Ended),
+            None => room_phase(&rooms, &entry.room).await,
+        }
+    }))
+    .await;
+    let mut listed = Vec::with_capacity(entries.len());
+    let mut just_ended = Vec::new();
+    for (entry, phase) in entries.into_iter().zip(phases) {
+        match phase {
+            Ok(phase) => {
+                if phase == Phase::Ended && entry.ended_at.is_none() {
+                    just_ended.push(entry.room.clone());
+                }
+                listed.push((entry, phase));
+            }
+            Err(e) => {
+                console_error!(
+                    "room {} of {:?} did not answer: {e}",
+                    entry.room,
+                    entry.meeting
+                )
+            }
+        }
+    }
+    if !just_ended.is_empty()
+        && let Err(e) =
+            meetings::update(&kv, |index| meetings::settled(index, &just_ended, now())).await
+    {
+        // Logged, not returned: the next listing settles them again.
+        console_error!("settling ended meetings in the index failed: {e}");
+    }
+    Response::from_json(&meetings::listing(listed))
+}
+
+/// Asks the room with id `room` where its meeting stands. A room without a record counts as
+/// ended: the index entry is written only after the room was initialised, so no record means
+/// its storage was removed.
+async fn room_phase(rooms: &ObjectNamespace, room: &str) -> Result<Phase> {
+    let mut response = rooms
+        .id_from_string(room)?
+        .get_stub()?
+        .fetch_with_str(&format!("{ORIGIN}{INFO}"))
+        .await?;
+    match response.status_code() {
+        404 => Ok(Phase::Ended),
+        200 => Ok(response.json::<RoomInfo>().await?.phase),
+        status => Err(worker::Error::RustError(format!("info answered {status}"))),
+    }
 }
 
 /// The error response for a request that is not the owner's, or `None` for the owner: a valid

@@ -138,7 +138,17 @@ show nothing on another device.
 Built on 2026-10-09: the page is `/meetings`, the list comes from
 `GET /api/meetings` (an index in the `MEETINGS` KV namespace, newest first,
 at most 200 entries), and the page shows the login form inline when the
-session is missing.
+session is missing. Where each meeting stands (scheduled, live, ended) is
+asked of its `RoomObject` when the list is read; the index holds only what
+the router knows at creation (words, room id, time, transcript token). An
+earlier version had the room write live and ended marks into the index, and
+a mark got lost in the first real test, because KV updates are
+read-modify-write without atomicity.
+
+An empty name field on the pre-join screen is filled with the owner's name
+once the owner's session is present: there is exactly one owner
+([D32](../architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)),
+so the app knows it (`OWNER_NAME` in `web/src/lib/owner-state.ts`).
 
 ## D27: The guest pre-join remembers the name and does not show who is in the room (2026-10-09)
 
