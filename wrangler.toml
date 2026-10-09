@@ -34,3 +34,10 @@ ROOM_JURISDICTION = "eu"
 [[kv_namespaces]]
 binding = "MEETINGS"
 id = "${MEETINGS_KV_ID}"
+
+# The built SvelteKit app (web/build) is served as static assets; unknown paths fall back to
+# index.html for the SPA router. /api/* and /ws/* always reach the Worker first.
+[assets]
+directory = "web/build"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/ws/*"]

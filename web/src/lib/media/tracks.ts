@@ -1,7 +1,7 @@
 /**
  * Local camera and mic tracks as an immutable record, plus replacement helpers.
  * Replacing returns a new record (so Svelte `$state.raw` sees the change) and stops the
- * replaced track, which releases the device. Senders swap tracks without renegotiation.
+ * replaced track, which releases the device.
  */
 
 export type MediaKind = 'audio' | 'video';
@@ -43,21 +43,4 @@ export function stopTracks(tracks: LocalTracks): void {
 export function streamOf(...tracks: (MediaStreamTrack | null)[]): MediaStream | null {
 	const present = tracks.filter((t): t is MediaStreamTrack => t !== null);
 	return present.length > 0 ? new MediaStream(present) : null;
-}
-
-/**
- * Puts `track` on an existing RTP sender. `null` sends nothing while keeping the
- * transceiver, which is how camera-off works without renegotiating with the SFU.
- * Returns `false` if the browser refused (e.g. the transceiver was stopped).
- */
-export async function replaceSenderTrack(
-	sender: RTCRtpSender,
-	track: MediaStreamTrack | null
-): Promise<boolean> {
-	try {
-		await sender.replaceTrack(track);
-		return true;
-	} catch {
-		return false;
-	}
 }

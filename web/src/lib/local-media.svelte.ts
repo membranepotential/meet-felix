@@ -11,6 +11,7 @@ import {
 } from './media/capture.ts';
 import { listDevices, watchDevices, type DeviceLists } from './media/devices.ts';
 import { guardTracks, type TrackGuard } from './media/resilience.ts';
+import type { Outgoing } from './sfu.ts';
 import {
 	NO_TRACKS,
 	stopTracks,
@@ -36,6 +37,12 @@ export class LocalMedia {
 	camOn = $derived(this.tracks.video !== null);
 	cameraStream = $derived(streamOf(this.tracks.video));
 	screenStream = $derived(streamOf(this.screen));
+	/** What to publish: the session hands this to the SFU publisher whenever it changes. */
+	outgoing: Outgoing = $derived({
+		audio: this.tracks.audio,
+		video: this.tracks.video,
+		screen: this.screen
+	});
 
 	#guard: TrackGuard;
 	#unwatchDevices: () => void;
@@ -77,6 +84,12 @@ export class LocalMedia {
 
 	toggleMic(): void {
 		this.micOn = !this.micOn;
+		this.#applyMic();
+	}
+
+	/** A host asked, or the room records without our consent. */
+	mute(): void {
+		this.micOn = false;
 		this.#applyMic();
 	}
 
@@ -145,8 +158,8 @@ export class LocalMedia {
 	}
 
 	/**
-	 * Puts a fresh track in place of the old one of its kind. Phase 2: also swap it onto the
-	 * publish sender with `replaceSenderTrack`.
+	 * Puts a fresh track in place of the old one of its kind. The new `outgoing` record makes
+	 * the publisher swap it onto the RTP sender.
 	 */
 	#install(track: MediaStreamTrack): void {
 		const previous = track.kind === 'audio' ? this.tracks.audio : this.tracks.video;

@@ -12,7 +12,8 @@
 		| 'end'
 		| 'copy'
 		| 'check'
-		| 'host';
+		| 'host'
+		| 'remove';
 </script>
 
 <script lang="ts">
@@ -58,5 +59,8 @@
 		<path d="M5 12l5 5 9-10" />
 	{:else if name === 'host'}
 		<path d="M4 18h16M5 18l-1-10 5 4 3-6 3 6 5-4-1 10" />
+	{:else if name === 'remove'}
+		<circle cx="9" cy="8" r="4" />
+		<path d="M2 20a7 7 0 0 1 14 0M16 11h6" />
 	{/if}
 </svg>

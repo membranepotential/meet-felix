@@ -4,7 +4,8 @@
   "packageManager": "pnpm@12.5.1",
   "scripts": {
     "dev": "wrangler dev --var ROOM_JURISDICTION:",
-    "deploy": "wrangler deploy"
+    "build": "pnpm --filter web build:core && pnpm --filter web build",
+    "deploy": "pnpm build && wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^4.147.0"

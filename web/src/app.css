@@ -128,3 +128,41 @@ button {
 	clip-path: inset(50%);
 	white-space: nowrap;
 }
+
+.button.danger {
+	background: var(--signal);
+	color: var(--signal-ink);
+}
+
+/* Modal dialogs: confirmations and the recording consent. */
+.dialog {
+	max-width: min(28rem, calc(100vw - 32px));
+	padding: 1.5rem;
+	border: 0;
+	border-radius: var(--radius-m);
+	background: var(--water);
+	color: var(--fog);
+	box-shadow: inset 0 0 0 1px var(--reed);
+}
+
+.dialog::backdrop {
+	background: rgb(6 12 15 / 0.7);
+}
+
+.dialog h2 {
+	font-size: var(--step-1);
+	line-height: 1.25;
+}
+
+.dialog p {
+	margin-top: 0.5rem;
+	color: var(--lichen);
+}
+
+.dialog-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 0.5rem;
+	margin-top: 1.25rem;
+}

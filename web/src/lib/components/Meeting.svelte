@@ -1,33 +1,44 @@
 <script lang="ts">
 	import type { LocalMedia } from '../local-media.svelte.ts';
-	import type { MeetingId, Participant } from '../protocol.ts';
+	import { isLive, streamFor } from '../media/remote.ts';
+	import { playAudio } from '../media/video.ts';
+	import {
+		trackKey,
+		type MeetingId,
+		type ParticipantId,
+		type ParticipantView,
+		type TrackKind
+	} from '../protocol.ts';
 	import type { Session } from '../session.svelte.ts';
 	import ControlBar from './ControlBar.svelte';
 	import Stage from './Stage.svelte';
 	import type { TileModel } from './Tile.svelte';
 
-	let {
-		meeting,
-		media,
-		session,
-		name
-	}: { meeting: MeetingId; media: LocalMedia; session: Session; name: string } = $props();
+	let { meeting, media, session }: { meeting: MeetingId; media: LocalMedia; session: Session } =
+		$props();
 
-	let room = $derived(session.room);
+	/** The participant a host is about to remove; the confirmation dialog is open while set. */
+	let removing = $state.raw<ParticipantView | null>(null);
 
-	const isMicOn = (p: Participant) => p.tracks.some((t) => t.source === 'microphone' && !t.muted);
+	const received = (owner: ParticipantId, kind: TrackKind) =>
+		session.remote.get(trackKey({ owner, kind }))?.track ?? null;
+
+	/** A received track turned off by its publisher stays in place but stops delivering. */
+	const liveStream = (track: MediaStreamTrack | null) =>
+		track !== null && isLive(track) ? streamFor(track) : null;
 
 	let tiles: TileModel[] = $derived.by(() => {
 		const self: TileModel[] = [
 			{
 				key: 'self',
-				name: room.me?.name ?? name,
+				name: session.me?.name ?? 'You',
 				self: true,
-				host: room.isHost,
+				host: session.isHost,
 				source: 'camera',
 				stream: media.cameraStream,
 				micOn: media.micOn,
-				speaking: false
+				layerTrack: null,
+				actions: null
 			}
 		];
 		if (media.screenStream) {
@@ -39,31 +50,56 @@
 				source: 'screen',
 				stream: media.screenStream,
 				micOn: true,
-				speaking: false
+				layerTrack: null,
+				actions: null
 			});
 		}
-		const others = room.others.flatMap((p): TileModel[] => {
-			const base = {
-				name: p.name,
-				self: false,
-				host: p.role === 'Host',
-				stream: null,
-				micOn: isMicOn(p),
-				speaking: session.activeSpeaker === p.id
-			};
-			const camera: TileModel = { ...base, key: p.id, source: 'camera' };
-			const screen: TileModel[] = p.tracks.some((t) => t.source === 'screen')
-				? [{ ...base, key: `${p.id}-screen`, name: `${p.name}’s screen`, source: 'screen' }]
-				: [];
-			return [camera, ...screen];
+		const others = session.others.flatMap((p): TileModel[] => {
+			const camera = received(p.id, 'video');
+			const screen = liveStream(received(p.id, 'screen'));
+			const base = { name: p.name, self: false, host: p.role === 'host', actions: null };
+			return [
+				{
+					...base,
+					key: String(p.id),
+					source: 'camera',
+					stream: liveStream(camera),
+					micOn: p.tracks.includes('audio'),
+					layerTrack: camera ? { owner: p.id, kind: 'video' } : null,
+					actions: session.isHost
+						? {
+								mute: () => session.send({ type: 'mute', who: p.id }),
+								remove: () => (removing = p)
+							}
+						: null
+				},
+				...(screen
+					? [
+							{
+								...base,
+								key: `${p.id}-screen`,
+								name: `${p.name}’s screen`,
+								source: 'screen' as const,
+								stream: screen,
+								micOn: true,
+								layerTrack: null
+							}
+						]
+					: [])
+			];
 		});
 		return [...self, ...others];
 	});
 
-	/** A shared screen wins over the active speaker. */
-	let featured = $derived(
-		tiles.find((t) => t.source === 'screen') ?? tiles.find((t) => t.speaking) ?? null
+	let audio = $derived(
+		session.others.flatMap((p) => {
+			const track = received(p.id, 'audio');
+			return track ? [{ key: p.id, stream: streamFor(track) }] : [];
+		})
 	);
+
+	/** A shared screen gets the large tile. */
+	let featured = $derived(tiles.find((t) => t.source === 'screen') ?? null);
 
 	let connectionNote = $derived.by(() => {
 		const c = session.connection;
@@ -72,36 +108,61 @@
 			return `Connection lost. Retrying in ${Math.ceil(c.retryInMs / 1000)} s`;
 		return null;
 	});
+
+	function modal(dialog: HTMLDialogElement) {
+		dialog.showModal();
+		return () => dialog.close();
+	}
+
+	function confirmRemove(who: ParticipantId) {
+		session.send({ type: 'kick', who });
+		removing = null;
+	}
 </script>
 
 <div class="meeting">
 	<header>
-		{#if room.recording}
+		{#if session.room?.recording}
 			<p class="recording" role="status">
 				<span class="dot" aria-hidden="true"></span>
 				Recording
 			</p>
 		{/if}
 		<p class="title">{meeting}</p>
-		{#if room.locked}<p class="locked">Locked</p>{/if}
+		{#if session.room?.locked}<p class="locked">Locked</p>{/if}
 		{#if connectionNote}<p class="connection" role="status">{connectionNote}</p>{/if}
 	</header>
 
 	<div class="stage-wrap">
-		<Stage {tiles} {featured} />
+		<Stage {tiles} {featured} layers={session.layers} />
 	</div>
 
+	{#each audio as { key, stream } (key)}
+		<audio {@attach playAudio(stream)}></audio>
+	{/each}
+
 	<div class="notices" aria-live="polite">
-		{#if room.isHost}
-			{#each session.knocks as knock (knock.id)}
-				<div class="toast knock">
-					<p>{knock.name} wants to join</p>
-					<button class="button primary" type="button" onclick={() => session.admit(knock.id)}>
+		{#each session.knocking as knock (knock.id)}
+			<div class="toast knock">
+				<p>{knock.name} wants to join</p>
+				<div class="knock-actions">
+					<button
+						class="button quiet"
+						type="button"
+						onclick={() => session.send({ type: 'kick', who: knock.id })}
+					>
+						Deny
+					</button>
+					<button
+						class="button primary"
+						type="button"
+						onclick={() => session.send({ type: 'admit', who: knock.id })}
+					>
 						Let in
 					</button>
 				</div>
-			{/each}
-		{/if}
+			</div>
+		{/each}
 		{#each session.toasts.items as toast (toast.id)}
 			<p class={['toast', toast.tone]}>{toast.text}</p>
 		{/each}
@@ -109,6 +170,25 @@
 
 	<ControlBar {media} {session} />
 </div>
+
+{#if removing}
+	{@const who = removing}
+	<dialog
+		class="dialog"
+		aria-labelledby="remove-title"
+		{@attach modal}
+		onclose={() => (removing = null)}
+	>
+		<h2 id="remove-title">Remove {who.name} from the meeting?</h2>
+		<p>They can join again with the link unless you lock the meeting first.</p>
+		<div class="dialog-actions">
+			<button class="button quiet" type="button" onclick={() => (removing = null)}>Cancel</button>
+			<button class="button danger" type="button" onclick={() => confirmRemove(who.id)}>
+				Remove
+			</button>
+		</div>
+	</dialog>
+{/if}
 
 <style>
 	.meeting {
@@ -207,6 +287,11 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 1rem;
+	}
+
+	.knock-actions {
+		display: flex;
+		gap: 0.5rem;
 	}
 
 	.knock .button {

@@ -5,6 +5,10 @@
  * once when the page becomes visible or the network returns (iOS drops sockets of
  * backgrounded tabs). After every (re)connect `onOpen` runs, where the caller sends `Join`;
  * the server answers with `Welcome` and a full state, so no message replay is needed.
+ *
+ * While open, the client sends `{"type":"ping"}` every 30 s: the room closes a socket with code
+ * 1001 after about 60 s without one, and answers `{"type":"pong"}` without waking its Durable
+ * Object. The pong is not a `ServerMsg`, so `parseServerMsg` drops it.
  */
 import { parseServerMsg, type ClientMsg, type MeetingId, type ServerMsg } from './protocol.ts';
 
@@ -24,9 +28,14 @@ export interface SignalingHandlers {
 
 /**
  * Close codes 4000–4099 mean the server decided (meeting ended, kicked, refused);
- * reconnecting would not help. Other codes, including 1006 (connection lost), retry.
+ * reconnecting would not help. Other codes retry: 1006 (connection lost) and 1001 (the room
+ * closed an idle socket); the next `Join` carries the resume token.
  */
 const isTerminalClose = (code: number): boolean => code >= 4000 && code < 4100;
+
+const KEEPALIVE_MS = 30_000;
+/** The exact frame the room's auto-response matches; not part of `ClientMsg`. */
+const PING = JSON.stringify({ type: 'ping' });
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 10_000;
@@ -48,6 +57,7 @@ export class SignalingClient {
 	#socket: WebSocket | null = null;
 	#attempt = 0;
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
+	#keepalive: ReturnType<typeof setInterval> | undefined;
 	#stopped = false;
 
 	constructor(meeting: MeetingId, handlers: SignalingHandlers) {
@@ -72,6 +82,7 @@ export class SignalingClient {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		clearTimeout(this.#retryTimer);
+		clearInterval(this.#keepalive);
 		document.removeEventListener('visibilitychange', this.#retryNow);
 		window.removeEventListener('online', this.#retryNow);
 		this.#socket?.close(1000, 'client closed');
@@ -89,6 +100,10 @@ export class SignalingClient {
 		socket.addEventListener('open', () => {
 			if (socket !== this.#socket) return;
 			this.#attempt = 0;
+			clearInterval(this.#keepalive);
+			this.#keepalive = setInterval(() => {
+				if (socket.readyState === WebSocket.OPEN) socket.send(PING);
+			}, KEEPALIVE_MS);
 			this.#handlers.onStatus({ kind: 'open' });
 			this.#handlers.onOpen();
 		});
@@ -100,6 +115,7 @@ export class SignalingClient {
 		socket.addEventListener('close', (event) => {
 			if (socket !== this.#socket || this.#stopped) return;
 			this.#socket = null;
+			clearInterval(this.#keepalive);
 			if (isTerminalClose(event.code)) {
 				this.#stopped = true;
 				this.#handlers.onStatus({ kind: 'closed', code: event.code, reason: event.reason });

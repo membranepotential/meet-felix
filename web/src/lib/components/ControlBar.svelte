@@ -10,7 +10,8 @@
 	let hostOpen = $state(false);
 	let confirmEnd: HTMLDialogElement | undefined = $state();
 
-	let room = $derived(session.room);
+	let locked = $derived(session.room?.locked ?? false);
+	let recording = $derived(session.room?.recording !== undefined);
 
 	async function toggleShare() {
 		if (media.screen) {
@@ -23,7 +24,7 @@
 
 	function endForEveryone() {
 		confirmEnd?.close();
-		session.send({ type: 'End' });
+		session.send({ type: 'end' });
 	}
 </script>
 
@@ -61,7 +62,7 @@
 		</button>
 	{/if}
 
-	{#if room.isHost}
+	{#if session.isHost}
 		<button
 			type="button"
 			class={['control', 'host-toggle', hostOpen && 'active']}
@@ -76,21 +77,21 @@
 		<div id="host-controls" class={['host-group', hostOpen && 'open']}>
 			<button
 				type="button"
-				class={['control', room.locked && 'active']}
-				aria-pressed={room.locked}
-				onclick={() => session.send({ type: 'Lock', locked: !room.locked })}
+				class={['control', locked && 'active']}
+				aria-pressed={locked}
+				onclick={() => session.send({ type: 'lock', on: !locked })}
 			>
-				<Icon name={room.locked ? 'lock' : 'unlock'} />
-				<span class="label">{room.locked ? 'Unlock' : 'Lock'}</span>
+				<Icon name={locked ? 'lock' : 'unlock'} />
+				<span class="label">{locked ? 'Unlock' : 'Lock'}</span>
 			</button>
 			<button
 				type="button"
-				class={['control', room.recording && 'recording']}
-				aria-pressed={room.recording !== null}
-				onclick={() => session.send({ type: 'SetRecording', on: room.recording === null })}
+				class={['control', recording && 'recording']}
+				aria-pressed={recording}
+				onclick={() => session.send({ type: 'setRecording', on: !recording })}
 			>
 				<Icon name="record" />
-				<span class="label">{room.recording ? 'Stop recording' : 'Record'}</span>
+				<span class="label">{recording ? 'Stop recording' : 'Record'}</span>
 			</button>
 			<button type="button" class="control" onclick={() => confirmEnd?.showModal()}>
 				<Icon name="end" />
@@ -105,7 +106,7 @@
 	</button>
 </div>
 
-<dialog bind:this={confirmEnd} aria-labelledby="end-title">
+<dialog class="dialog" bind:this={confirmEnd} aria-labelledby="end-title">
 	<h2 id="end-title">End the meeting for everyone?</h2>
 	<p>Everyone is disconnected and the link stops working. The transcript is made afterwards.</p>
 	<div class="dialog-actions">
@@ -237,42 +238,5 @@
 		.leave {
 			margin-left: 0;
 		}
-	}
-
-	dialog {
-		max-width: min(28rem, calc(100vw - 32px));
-		padding: 1.5rem;
-		border: 0;
-		border-radius: var(--radius-m);
-		background: var(--water);
-		color: var(--fog);
-		box-shadow: inset 0 0 0 1px var(--reed);
-	}
-
-	dialog::backdrop {
-		background: rgb(6 12 15 / 0.7);
-	}
-
-	dialog h2 {
-		font-size: var(--step-1);
-		line-height: 1.25;
-	}
-
-	dialog p {
-		margin-top: 0.5rem;
-		color: var(--lichen);
-	}
-
-	.dialog-actions {
-		display: flex;
-		flex-wrap: wrap;
-		justify-content: flex-end;
-		gap: 0.5rem;
-		margin-top: 1.25rem;
-	}
-
-	.button.danger {
-		background: var(--signal);
-		color: var(--signal-ink);
 	}
 </style>

@@ -1,29 +1,19 @@
 /**
- * Loader for `meeting-core` compiled to WASM.
+ * `meeting-core` compiled to WASM (`pnpm build:core` writes it to `./wasm/`, gitignored).
  *
- * Build it with `wasm-pack build crates/meeting-core --target web --out-dir ../../web/src/lib/wasm`.
- * The `web` target fetches its `.wasm` via `new URL(..., import.meta.url)`, which Vite
- * bundles without plugins. `import.meta.glob` matches nothing while the package is absent,
- * so the app builds and runs without it and `loadCore()` returns `null`.
+ * The `web` target loads its `.wasm` through `new URL(..., import.meta.url)`, which Vite
+ * bundles without a plugin. The import is static on purpose: without the package,
+ * `vite.config.ts` stops dev and build with a hint, and `svelte-check` reports the missing
+ * module, instead of the app running with protocol types that may be stale or absent.
  */
+import init from './wasm/meeting_core.js';
 
-/** The part of the wasm-pack `web` output we rely on until tsify types are generated. */
-interface CoreModule {
-	/** wasm-bindgen's init: fetches and instantiates the `.wasm`. */
-	default: () => Promise<WebAssembly.Exports>;
-}
+export { generateMeetingId, validateMeetingId } from './wasm/meeting_core.js';
 
-const packages = import.meta.glob<CoreModule>('./wasm/meeting_core.js');
+let loading: Promise<void> | undefined;
 
-let loading: Promise<CoreModule | null> | undefined;
-
-export function loadCore(): Promise<CoreModule | null> {
-	loading ??= (async () => {
-		const load = packages['./wasm/meeting_core.js'];
-		if (!load) return null;
-		const core = await load();
-		await core.default();
-		return core;
-	})();
+/** Instantiates the module once; call before any exported function (the root layout does). */
+export function loadCore(): Promise<void> {
+	loading ??= init().then(() => undefined);
 	return loading;
 }

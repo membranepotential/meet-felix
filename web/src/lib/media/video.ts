@@ -19,3 +19,29 @@ export function showStream(stream: MediaStream | null) {
 		};
 	};
 }
+
+/**
+ * Plays a remote participant's audio. Usable as a Svelte attachment on `<audio>`. Browsers
+ * allow it because the user pressed Join, which counts as a gesture on the page.
+ */
+export function playAudio(stream: MediaStream) {
+	return (audio: HTMLAudioElement): (() => void) => {
+		audio.autoplay = true;
+		audio.srcObject = stream;
+		audio.play().catch(() => {});
+		return () => {
+			audio.srcObject = null;
+		};
+	};
+}
+
+/** Reports an element's rendered width in CSS pixels whenever it changes. */
+export function observeWidth(onWidth: (width: number) => void) {
+	return (element: HTMLElement): (() => void) => {
+		const observer = new ResizeObserver(([entry]) => {
+			if (entry) onWidth(entry.contentRect.width);
+		});
+		observer.observe(element);
+		return () => observer.disconnect();
+	};
+}

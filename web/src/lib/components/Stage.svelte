@@ -1,9 +1,14 @@
 <script lang="ts">
+	import type { LayerControl } from '../layers.ts';
 	import { fitGrid, tileAspect } from '../layout.ts';
 	import Tile, { type TileModel } from './Tile.svelte';
 
-	/** `featured` (a shared screen or the active speaker) gets the large tile. */
-	let { tiles, featured }: { tiles: TileModel[]; featured: TileModel | null } = $props();
+	/** `featured` (a shared screen) gets the large tile. */
+	let {
+		tiles,
+		featured,
+		layers
+	}: { tiles: TileModel[]; featured: TileModel | null; layers: LayerControl } = $props();
 
 	const GAP = 8;
 
@@ -18,11 +23,11 @@
 <div class="stage" bind:clientWidth={width} bind:clientHeight={height}>
 	{#if featured}
 		<div class={['spotlight', landscape ? 'beside' : 'below']}>
-			<div class="featured"><Tile tile={featured} /></div>
+			<div class="featured"><Tile tile={featured} {layers} /></div>
 			{#if rest.length > 0}
 				<ul class="strip" aria-label="Other participants">
 					{#each rest as tile (tile.key)}
-						<li><Tile {tile} compact /></li>
+						<li><Tile {tile} {layers} compact /></li>
 					{/each}
 				</ul>
 			{/if}
@@ -36,7 +41,7 @@
 			style:--gap="{GAP}px"
 		>
 			{#each tiles as tile (tile.key)}
-				<li><Tile {tile} /></li>
+				<li><Tile {tile} {layers} /></li>
 			{/each}
 		</ul>
 	{/if}

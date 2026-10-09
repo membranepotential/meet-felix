@@ -1,30 +1,42 @@
+<script lang="ts" module>
+	/** The meeting's recording policy, as far as the pre-join screen knows it. */
+	export type PolicyLookup =
+		{ kind: 'loading' } | { kind: 'failed' } | { kind: 'known'; policy: RecordingPolicy };
+</script>
+
 <script lang="ts">
 	import type { LocalMedia } from '../local-media.svelte.ts';
 	import type { CaptureError } from '../media/capture.ts';
 	import { showStream } from '../media/video.ts';
-	import type { MeetingId } from '../protocol.ts';
+	import type { MeetingId, RecordingPolicy } from '../protocol.ts';
 	import Icon from './Icon.svelte';
 
 	let {
 		meeting,
 		media,
-		recorded,
+		lookup,
 		name = $bindable(),
-		onjoin
+		onjoin,
+		onretry
 	}: {
 		meeting: MeetingId;
 		media: LocalMedia;
-		recorded: boolean;
+		lookup: PolicyLookup;
 		name: string;
-		onjoin: () => void;
+		/** `consent`: the user pressed "Join and accept recording". */
+		onjoin: (consent: boolean) => void;
+		onretry: () => void;
 	} = $props();
 
+	/** `DisplayName::MAX_CHARS` in the core. */
 	const NAME_MAX = 40;
-	let canJoin = $derived(name.trim().length > 0);
+	let policy = $derived(lookup.kind === 'known' ? lookup.policy : null);
+	let recorded = $derived(policy === 'fromStart');
+	let canJoin = $derived(name.trim().length > 0 && policy !== null);
 
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
-		if (canJoin) onjoin();
+		if (canJoin) onjoin(recorded);
 	}
 
 	function describe(error: CaptureError): string {
@@ -129,7 +141,12 @@
 			</label>
 		{/if}
 
-		{#if recorded}
+		{#if lookup.kind === 'failed'}
+			<div class="error" role="alert">
+				<p>The meeting could not be reached. Check your connection, then try again.</p>
+				<button class="button quiet" type="button" onclick={onretry}>Try again</button>
+			</div>
+		{:else if policy === 'fromStart'}
 			<div class="notice">
 				<p class="notice-title">
 					<Icon name="record" size={20} />
@@ -140,10 +157,19 @@
 					Everyone in the meeting gets the transcript link at the end. Video is not recorded.
 				</p>
 			</div>
+		{:else if policy === 'hostDecides'}
+			<p class="note">
+				A host may start recording during the meeting. You will be asked before your voice is
+				recorded.
+			</p>
 		{/if}
 
 		<button class="button primary join" type="submit" disabled={!canJoin}>
-			{recorded ? 'Join and accept recording' : 'Join'}
+			{lookup.kind === 'loading'
+				? 'Checking the meeting…'
+				: recorded
+					? 'Join and accept recording'
+					: 'Join'}
 		</button>
 	</form>
 </main>
@@ -289,6 +315,12 @@
 
 	.notice-title :global(svg) {
 		color: var(--signal);
+	}
+
+	.note {
+		color: var(--lichen);
+		font-size: var(--step--1);
+		line-height: 1.5;
 	}
 
 	.error {
