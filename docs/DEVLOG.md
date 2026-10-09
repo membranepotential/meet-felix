@@ -3,6 +3,46 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — meeting-core review fixes: consent gate, resume, subscription retry
+
+A review of `crates/meeting-core` found seven problems; all are fixed in the
+core, with tests.
+
+- Consent ([D15](recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)):
+  the check ran only at `Join`, so `Admit` and unlocking let in guests
+  without consent. Now no guest is admitted without consent while the room
+  records; they wait in the new `AwaitingConsent` presence. New messages
+  `ClientMsg::SetConsent` and `ServerMsg::ConsentRequired` (which replaces
+  `ErrorCode::ConsentRequired`), and the effect `StopRecordingTrack`. When
+  recording starts, everyone without consent is asked and muted. A new
+  `RecordingPolicy` (`FromStart`, `HostDecides`) is an argument of
+  `RoomState::new` and part of `RoomView`.
+- Subscriptions: a failed SFU call dropped the wanted tracks for good, and a
+  client that never answered blocked its subscribe session. Tracks now stay
+  wanted until delivered; a failed or timed-out negotiation (15 s per step)
+  is retried after 3 s. The room derives one alarm from its state (empty
+  room or subscribe retry) instead of setting it in two places.
+- Empty room ([D8](links/README.md#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09)):
+  a guest who knocked and left restarted the two-minute timer. `RoomState`
+  now stores `empty_since`, which only admitted participants change.
+- Word list ([D6](links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)):
+  152 words removed (offensive or sensitive words, past tenses,
+  near-homophones); 1,848 remain, and a test keeps the removed ones out.
+  `MeetingId` deserialization no longer checks the word list, so stored
+  state survives a removal; `MeetingId::parse` still does for user input.
+- Reconnect: `Welcome` carries a `ResumeToken`; `Join { resume }` moves the
+  participant to the new socket (`Effect::Rebind`). A repeated `Join` is
+  answered again instead of rejected (`ErrorCode::AlreadyJoined` is gone).
+- Property tests now also check that leavers' tracks are closed on every
+  subscriber, that SFU effects name the right session, that guests cannot
+  run host commands, the consent rules, lost subscriptions and the alarm.
+
+Protocol changes the worker and web shells must follow: `Event::Client` has
+a `fresh_token` the shell fills with 16 random bytes; `CloseSocket` means the
+shell reports no `SocketClosed` for that socket.
+
+Next: wire the worker and web shells to these messages and effects.
+
 ## 2026-10-09 — research, plan v2, repo, first workstreams, docs
 
 Research: nine notes and a synthesized report on running small video

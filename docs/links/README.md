@@ -32,8 +32,8 @@ Research: [00 — report](../research/00-report-serverless-rust-video-meetings.m
    returns the link plus a host token. The owner's browser keeps the host
    token.
 2. Guests open the link. The pre-join screen asks for a name, shows a device
-   check and the recording notice. In a recorded meeting the join button
-   reads "Join and accept recording"
+   check and the recording notice, taken from the room's `recordingPolicy`.
+   In a recorded meeting the join button reads "Join and accept recording"
    ([D15](../recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
 3. The meeting ends ([D8](#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09)).
    The words are released, and the `RecorderObject` closes its adapters and
@@ -44,13 +44,23 @@ Research: [00 — report](../research/00-report-serverless-rust-video-meetings.m
 ## D6: Meeting ids are three short English words that live only while the meeting runs (2026-10-09)
 
 A meeting id is three words from `meeting-core::words::WORDS`, joined by
-hyphens. There is no password. The list holds 2,000 lowercase words of 3–6
+hyphens. There is no password. The list holds 1,848 lowercase words of 3–6
 ASCII letters. It was built on 2026-10-09 from the EFF dice word lists,
 keeping words found in the CMU pronouncing dictionary and ranking them by
-English frequency. It leaves out homophones of common words, plurals and
-inflected forms, spelling variants and easily swapped spellings
-(`diary`/`dairy`), brand and proper names, and offensive words. The language
-is English (decision 3 of 2026-10-09).
+English frequency. It leaves out homophones of common words and
+near-homophones within the list (`latter`/`ladder`), plurals and inflected
+forms (including past tenses such as `broke`), spelling variants and easily
+swapped spellings (`diary`/`dairy`), brand and proper names, and offensive or
+sensitive words: sexual slang, slurs, body-shaming, violence and illness. A
+review on 2026-10-09 removed 152 words from the first 2,000; a test keeps
+them out. The language is English (decision 3 of 2026-10-09).
+
+Change the word list only with care. `MeetingId::parse`, which checks user
+input such as a typed link, accepts only listed words, so removing a word
+makes the link of a running meeting that uses it unparseable until that
+meeting ends. Stored room state does not depend on the list: a `MeetingId`
+deserializes from any well-formed id (three runs of lowercase ASCII letters
+joined by `-`).
 
 The words belong to a meeting only while it runs. When the room ends, the
 core emits `Effect::ReleaseMeetingId` and the words become available for a
@@ -59,7 +69,7 @@ later meeting.
 Why words: a three-word link is easy to remember, to say on the phone and to
 type on a phone keyboard.
 
-Why that is safe enough: 2,000³ ≈ 8 × 10⁹ combinations, about 33 bits. That
+Why that is safe enough: 1,848³ ≈ 6.3 × 10⁹ combinations, about 32.5 bits. That
 is far too little for a secret that lives long, so security does not come
 from the id alone:
 
@@ -96,8 +106,12 @@ The host token is a secret: it never goes into git or logs.
 ## D8: A meeting ends when a host ends it or after two empty minutes (2026-10-09)
 
 A room ends when a host sends `End`, or when it has had no admitted
-participant for two minutes (`EMPTY_ROOM_TIMEOUT_MS` = 2 × 60 × 1000 ms). A
-DO alarm measures the empty time. When the room ends, the core closes every
+participant for two minutes (`EMPTY_ROOM_TIMEOUT_MS` = 2 × 60 × 1000 ms).
+Admitted means connecting or joined. Guests who knock on a locked room or
+wait for their own consent to recording do not count: the empty time starts
+when the last admitted participant leaves, and a guest who knocks and leaves
+neither stops nor restarts it. A DO alarm measures the empty time
+([core/](../core/README.md#the-alarm)). When the room ends, the core closes every
 socket, stops a running recording, releases the words, and emits
 `Effect::EndMeeting` last. After that the room accepts no more sockets, and
 the transcript job starts.
@@ -105,7 +119,9 @@ the transcript job starts.
 Why: the words must become free again soon after a meeting
 ([D6](#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)),
 and an empty room should hold no adapters. The two-minute wait lets a
-participant whose connection dropped rejoin the same meeting.
+participant whose connection dropped rejoin the same meeting. A client whose
+socket drops but who is still in the room takes its place again with its
+resume token, keeping role and tracks ([core/](../core/README.md#reconnecting)).
 
 ## D9: Transcript links carry a 128-bit random token (2026-10-09)
 

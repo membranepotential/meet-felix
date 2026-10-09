@@ -17,8 +17,9 @@ Decisions on this page:
 - [D19: Show the transcript link to everyone at the end (2026-10-09)](#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09)
 
 Code: [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
-(`Recording`, `ClientMsg::SetRecording`), [`crates/meeting-core/src/shell.rs`](../../crates/meeting-core/src/shell.rs)
-(`StartRecording`, `RecordTrack`, `StopRecording`),
+(`Recording`, `RecordingPolicy`, `ClientMsg::SetRecording`, `ClientMsg::SetConsent`,
+`ServerMsg::ConsentRequired`), [`crates/meeting-core/src/shell.rs`](../../crates/meeting-core/src/shell.rs)
+(`StartRecording`, `RecordTrack`, `StopRecordingTrack`, `StopRecording`),
 [`crates/meeting-core/src/step.rs`](../../crates/meeting-core/src/step.rs).
 The `RecorderObject` and the `Transcriber` trait are not started (phase 3).
 Research: [09 — post-meeting transcription and recording](../research/09-post-meeting-transcription-recording.md),
@@ -28,21 +29,39 @@ Research: [09 — post-meeting transcription and recording](../research/09-post-
 
 ## D15: Recording is announced by the core, and joining means consent (2026-10-09)
 
-- The owner chooses at creation whether a meeting is recorded. Recording is
-  on by default, because the transcript is the point.
+- The owner chooses at creation whether a meeting is recorded, as a
+  `RecordingPolicy`: `FromStart` (the default, because the transcript is the
+  point) starts recording when the first host joins; `HostDecides` starts it
+  only when a host sends `SetRecording`. The policy is part of `RoomView`; the
+  Worker is to serve it at `GET /api/meeting/{words}` for the pre-join screen
+  (not built on 2026-10-09).
 - The pre-join screen shows the recording notice. In a recorded meeting the
   join button reads **"Join and accept recording"**; pressing it is explicit
-  consent (decision 2 of 2026-10-09). A guest cannot join a recording meeting
-  without it.
+  consent (decision 2 of 2026-10-09).
+- A guest cannot enter a recording meeting without consent. A guest who
+  joins, is admitted by a host, or is let in by unlocking while the room
+  records, but has not consented, waits in the `AwaitingConsent` state: they
+  get `ConsentRequired`, and hosts see them in the room view. They enter
+  when they send `SetConsent { consent: true }` or when recording stops. A
+  guest knocking on a locked room also gets `ConsentRequired`, so they can
+  consent while they wait for a host.
 - The recording state lives in `RoomState` (the plan sketched it as
   `Option<Recording { since, by }>`; the code has a `RecordingStatus`: never
-  started, on, or stopped) and is part of every state broadcast. The UI shows a persistent red "Recording"
-  badge and a banner when recording starts, and plays a chime.
+  started, on, or stopped) and is part of every state broadcast. The UI shows
+  a persistent red "Recording" badge and a banner when recording starts, and
+  plays a chime.
 - Only hosts start or stop recording (`ClientMsg::SetRecording`).
-- If a host starts recording during the meeting, everyone is asked again
-  with a consent dialog. Anyone who declines is muted and not recorded until
-  they accept or leave. The core asks the recorder only for the audio of
-  participants who consented (`Effect::RecordTrack`).
+- When recording starts during the meeting, everyone in the room without
+  consent gets `ConsentRequired` (the consent dialog) and `Muted`, and the
+  core asks the recorder for none of their tracks; a guest still knocking gets
+  only `ConsentRequired`. Everyone else's audio is
+  recorded (`Effect::RecordTrack`). A participant who later sends
+  `SetConsent { consent: true }` is recorded from then on. A participant who
+  withdraws consent with `SetConsent { consent: false }` while the room
+  records is no longer recorded (`Effect::StopRecordingTrack`), and gets
+  `ConsentRequired` and `Muted`. A host may enter a recording room without
+  consent, so they can stop the recording; they are muted and not recorded
+  like everyone else without consent.
 
 Why in the core and not in the UI: the core sends every change of the public
 room view to every joined client, so no client can miss a recording start,

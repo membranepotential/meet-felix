@@ -1,0 +1,20 @@
+[package]
+name = "meeting-core"
+version = "0.1.0"
+description = "Functional core of a meet-felix room: state, events, effects and a pure step function."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# TypeScript declarations (tsify) and a small wasm-bindgen API for the browser shell.
+wasm = ["dep:tsify", "dep:wasm-bindgen"]
+
+[dependencies]
+serde.workspace = true
+tsify = { version = "0.5.8", default-features = false, features = ["js"], optional = true }
+wasm-bindgen = { version = "0.2.129", optional = true }
+
+[dev-dependencies]
+proptest = "1.11.0"
+serde_json.workspace = true

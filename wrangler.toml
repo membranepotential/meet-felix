@@ -23,6 +23,7 @@ new_sqlite_classes = ["RoomObject"]
 # `wrangler dev --var ROOM_JURISDICTION:` to create rooms without one.
 ROOM_JURISDICTION = "eu"
 
-# No id: wrangler provisions the namespace on first deploy and uses a local store in `wrangler dev`.
+# Namespace MEETINGS created on 2026-10-09; `wrangler dev` uses a local store.
 [[kv_namespaces]]
 binding = "MEETINGS"
+id = "${MEETINGS_KV_ID}"

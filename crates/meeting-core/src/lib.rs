@@ -1,0 +1,54 @@
+//! The functional core of a meet-felix room.
+//!
+//! The shell (a Durable Object, or a test) owns a [`RoomState`], feeds every [`Event`] through
+//! [`step`] together with the current time, and carries out the returned [`Effect`]s in order.
+//! The core does no I/O and reads no clock or randomness, so it runs unchanged on the native
+//! target and on `wasm32-unknown-unknown`.
+//!
+//! Rules the core enforces:
+//! - A joiner with the host token becomes a host; guests joining a locked room knock until a
+//!   host admits them.
+//! - While the room records, no guest is admitted without consent: they wait until they send
+//!   `SetConsent` or recording stops. When recording starts, or a participant withdraws consent,
+//!   everyone in the room without consent is asked for it and muted, and is not recorded.
+//! - A [`RecordingPolicy::FromStart`] meeting starts recording when the first host joins.
+//! - Only hosts lock, admit, kick, mute, record and end.
+//! - Every change to the public [`RoomView`] reaches every joined client, so all of them see a
+//!   recording start; only consenting participants' audio is recorded.
+//! - Each participant has a publish session (the client offers) and a subscribe session (the SFU
+//!   offers, one negotiation at a time); new tracks reach every other joined participant, and a
+//!   leaving participant's tracks are closed on all subscribers. A track stays wanted until a
+//!   negotiation delivers it; a failed or timed-out negotiation is retried after
+//!   [`SUBSCRIBE_RETRY_MS`].
+//! - A client whose socket dropped takes its place again with its [`ResumeToken`].
+//! - The room ends when a host ends it or after [`EMPTY_ROOM_TIMEOUT_MS`] without admitted
+//!   participants; knocking guests do not count.
+//!
+//! With the `wasm` feature, the message and id types derive `tsify` TypeScript declarations,
+//! and `validateMeetingId` / `generateMeetingId` are exported through `wasm-bindgen`.
+
+mod ids;
+mod protocol;
+mod shell;
+mod state;
+mod step;
+#[cfg(feature = "wasm")]
+mod wasm;
+pub mod words;
+
+#[cfg(test)]
+mod tests;
+
+pub use ids::{
+    DisplayName, HostToken, InvalidDisplayName, InvalidMeetingId, MeetingId, Mid, Millis,
+    ParticipantId, ResumeToken, Sdp, SessionId, TrackName, TranscriptRef,
+};
+pub use protocol::{
+    ClientMsg, ErrorCode, IncomingTrack, LocalTrack, ParticipantView, Presence, Recording,
+    RecordingPolicy, Rid, Role, RoomView, ServerMsg, TrackKind, TrackRef,
+};
+pub use shell::{Effect, Event, OfferedTrack, RemoteTrack, SessionKind, SfuCall, SfuReply};
+pub use state::{EMPTY_ROOM_TIMEOUT_MS, NEGOTIATION_TIMEOUT_MS, RoomState, SUBSCRIBE_RETRY_MS};
+pub use step::step;
+#[cfg(feature = "wasm")]
+pub use wasm::{generate_meeting_id, validate_meeting_id};
