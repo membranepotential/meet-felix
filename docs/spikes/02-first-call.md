@@ -114,3 +114,106 @@ Not changed here: the task was to verify, not fix.
 5. Put the Playwright script into the repo (for example `web/e2e/`) with the `playwright` dependency, so phase 1 CI can run the call against a mock or the real SFU. It currently lives in the session scratchpad only.
 6. Have the `dev` script create `web/build`, or document step 2.
 7. Still untested: TURN (no credentials in `/api/ice`), screen share, reconnect/resume from the browser, more than three participants, and anything on a deployed Worker.
+
+## Run 4 (after fixes)
+
+*2026-10-09, main checkout at `d4fe54d` (after 94f1e7a "SFU offers kept" and d4fe54d "remote tiles follow the room view; empty offers; setLayer retry"). Same setup as above: `wrangler dev --port 8787` with `.dev.vars`, Vite on 5174, three headless Chromium contexts with fake media. The "Result" and "Checks" sections above describe runs 1–3; this section supersedes them. Script `…/scratchpad/pw/call4.mjs`, outputs in `…/scratchpad/run4/` (`logs/run4.log`, `logs/ws-*.log`, `logs/stats-*.json`, `logs/hold-samples.json`, `logs/wrangler.log`, `shots/`).*
+
+**Accepted locally.** Meeting `rug-duke-edgy`, 43/44 checks; the one FAIL is a false alarm of the script (below). Every participant now receives audio and video from every other one; the host's subscribe session is never stuck; a camera turned off reaches the other tiles in under 100 ms; the three-party call held for 3 minutes with no reconnect and no SFU error beyond two transient `not_found_track_error`s that the retry resolved.
+
+### Checks
+
+```
+PASS  host created a meeting with recording fromStart  (rug-duke-edgy)
+PASS  pre-join offers "Join and accept recording"
+PASS  host reaches the in-meeting view  (1020 ms after Join)
+PASS  both pages show two tiles
+PASS  no consent dialog after joining with consent  (dialogs=0)
+PASS  B: first remote frame from the host  (4846 ms after the guest clicked Join)
+PASS  A: first remote frame from the guest  (5134 ms after the guest clicked Join)
+PASS  A: inbound video bytesReceived grows over 5 s  (+140610 bytes, 225 kbit/s)
+PASS  A: inbound audio bytesReceived grows over 5 s  (+16172 bytes, 26 kbit/s)
+PASS  A: outbound video has three simulcast encodings (f, h, q)  (f 1280x720, h 640x360, q 320x180, H264)
+PASS  A: both peer connections have a selected candidate pair  (srflx->host, srflx->host)
+PASS  B: inbound video bytesReceived grows over 5 s  (+141204 bytes, 226 kbit/s)
+PASS  B: inbound audio bytesReceived grows over 5 s  (+15162 bytes, 24 kbit/s)
+PASS  B: outbound video has three simulcast encodings (f, h, q)
+PASS  B: both peer connections have a selected candidate pair  (srflx->host, srflx->host)
+PASS  A: remote <video> plays  (Guest 640x360, !paused, readyState 4)
+PASS  B: remote <video> plays  (Host 640x360, !paused, readyState 4)
+PASS  host received at least one subscribe offer for the guest  (A received: subscribeOffer 2, error:subscribeFailed 0 at this point)
+PASS  guest received at least one subscribe offer for the host
+PASS  guest shows host initials after camera off within 1 s  (after 68 ms; receiver tracks still muted=false)
+PASS  guest shows host video again after camera on  (after 1343 ms; first frames 320x180, later 640x360)
+PASS  a new publish offer was sent and answered for the new camera track  (publishOffer 1 -> 2, publishAnswer 1 -> 2)
+PASS  room shows Locked on host and guest
+PASS  third client sees the lobby (Waiting for the host)
+PASS  host sees the knock  (344 ms after Third clicked Join)
+PASS  after admit, A, B and C each show three tiles
+PASS  A: two remote videos play with three in the room  (Guest 640x360, Third 640x360)
+PASS  B: two remote videos play with three in the room  (Host 640x360, Third 320x180 at first)
+PASS  C: two remote videos play with three in the room  (Host 640x360, Guest 640x360)
+FAIL  three-party call held 180 s: every inbound stream kept growing in every 30 s window  (6 samples, 6 "stalled" windows: all B's mid 1, see below)
+PASS  no reconnect during the hold (no new socket, no new Join, no "Connection lost" banner, all 6 peer connections "connected" in all 6 samples)
+PASS  A: two remote videos still play after the hold  (currentTime 202 s and 181 s)
+PASS  B: two remote videos still play after the hold  (192 s and 181 s)
+PASS  C: two remote videos still play after the hold  (185 s and 185 s)
+PASS  A: subscribeFailed count 1, each followed by a subscribeOffer within 5 s  (3153 ms)
+PASS  B: subscribeFailed count 1, each followed by a subscribeOffer within 5 s  (3383 ms)
+PASS  C: subscribeFailed count 0
+PASS  A: reaches the end page
+PASS  B: reaches the end page
+PASS  C: reaches the end page
+PASS  a fresh join attempt gets the ended/unknown page  (This meeting does not exist; GET /api/meeting -> 404)
+PASS  A: no console errors
+PASS  B: no console errors
+PASS  C: no console errors
+```
+
+The FAIL: after the host's camera off, the guest's subscribe session keeps the m-line of the closed `cam-1` track (mid 1; the core's `unsubscribe_everyone` closes the track on every subscriber's session, the SFU keeps the m-line, and the re-published camera arrives on a new mid 2). Chromium keeps an `inbound-rtp` entry for mid 1 with no new bytes, and the script counted that as a stall. Every live stream grew in every window. The check should ignore m-lines whose track the room no longer lists.
+
+### Checklist against the task
+
+1. **Host receives the guest and the third participant: yes.** Host `inbound-rtp`: audio +16,172 and video +140,610 bytes over 5 s with the guest alone; four inbound streams (two audio, two video) during the hold at 420–455 kbit/s video and 48–50 kbit/s audio per page; remote `<video>` elements at 640x360, playing, `currentTime` advancing to 202 s. Screenshots `03-A-two-tiles.png`, `08-A-three.png`, `08b-A-after-hold.png` (the guests' fake-camera timers match the host's own to the frame).
+2. **Host's subscribe session never stuck: yes.** `error{subscribeFailed}` frames: A 1, B 1, C 0, all at 17:30:32.305, 0.3 s after Third's `publishAnswer` (17:30:31.996): the pull of Third's tracks into the host's and guest's sessions ran before Third's peer connection sent packets. The SFU answered both with `not_found_track_error` and no offer (nothing to renegotiate on an already connected session), so `subscribe()` returned the error, the core kept the tracks wanted and retried after `SUBSCRIBE_RETRY_MS`: `subscribeOffer` 3.15 s (A) and 3.38 s (B) after the error, answered within 0.1 s, first frame of Third 4.8 s (A) and 5.2 s (B) after the admit. The wrangler log has exactly two `SFU call failed: track: not_found_track_error …` lines and **no 406, no 410**. The host's first pull of the guest (17:30:10.996, 0.2 s after the guest's `publishAnswer`) returned an offer with one m-line (audio found, video not yet); the core retried the video at 17:30:14.133; such a partial pull logs no error.
+3. **Camera off reaches the guest's tile in < 1 s: yes, 68 ms** (host `unpublish` 17:30:22.242 → guest's `State` 17:30:22.322 → tile shows "H"). The receiver tracks on the guest were still `muted=false`, so the room view is what drives it, as intended. Camera on: `Start video` click → `publishOffer` +120 ms → `publishAnswer` +371 ms → guest `subscribeOffer` +550 ms → `subscribeAnswer` +615 ms → guest sees video after 1343 ms (first frames at 320x180: 1.3 s after the re-publish the host's encoder had produced 22 frames on `q` and none on `f` and `h`; during the hold the guest decodes 640x360). `getUserMedia` for the restart took 23 ms.
+4. **`setLayer` refusals retried: not exercised.** No `error{notSubscribed}` occurred in this run (0 on A, B and C; 7 `setLayer` frames in all); every subscriber decoded 640x360 (`h`) by the end, so every `setLayer` took effect. The retry is covered by `web/src/lib/layers.test.ts` only.
+5. **No console errors: yes.** A, B and C logged nothing but Vite's HMR debug lines, the `[probe]` timings and Chromium's password-field accessibility hint.
+
+### Timings
+
+| Step | Time |
+|---|---|
+| Host: Join click → in-meeting view | 1.02 s (Welcome 0.76 s after `join`) |
+| Guest: Join click → Welcome → first `subscribeOffer` → answer | 0.54 s → +0.19 s → +0.06 s |
+| Guest: Join click → first frame of the host | 4.85 s (4.1 s after the subscribe answer; unexplained, A and C decode within 0.6 s of theirs) |
+| Guest: Join click → host's first frame of the guest | 5.13 s (host's second `subscribeOffer`, with video, 3.1 s after the first) |
+| Third: Join click → knock on the host | 0.34 s |
+| Admit → Third sees host and guest | 1.30 s (`subscribeOffer` 0.16 s after Welcome, before Third's own `publishAnswer`) |
+| Admit → host / guest see Third | 4.80 s / 5.16 s (one `subscribeFailed` each, retry after 3 s) |
+| Camera off → initials on the guest | 68 ms |
+| Camera on → video on the guest | 1.34 s |
+| End → `ended` on all three sockets | 0.18 s, sockets closed with 1000 |
+
+### Hold (three participants, 180 s, sampled every 30 s)
+
+Per page and window: video 418–455 kbit/s (two streams), audio 47–50 kbit/s (two streams); `currentRoundTripTime` 9–29 ms on all six peer connections; `connectionState` `connected` in every sample; `packetsLost` 0 at the 5 s sample; one app WebSocket per page for the whole meeting (the second `OPEN` in the logs is Vite's HMR socket), no `join` after the first, no "Connection lost" banner. Meeting duration from the host's join to End: 3 min 32 s; three-party from admit to End: 3 min 07 s. `logs/hold-samples.json` has the numbers.
+
+### Wrangler log
+
+Only these non-info lines: `recording not implemented yet: StartRecording`, three `RecordTrack` (one per participant, `mic-1`), `StopRecording`, and the two `not_found_track_error` lines quoted under 2. No warnings, no panics.
+
+Unexpected, and outside the run: **stale local DO records.** On the first start, right after `Ready on`, wrangler printed twelve ``Uncaught Error: JSON serialization error … unknown variant `status`, expected `open` or `ended` `` before any request: Room DOs left in `.wrangler/state/v3/do/` by an earlier record schema fired their alarms, and `RoomObject` cannot deserialize them. The same twelve lines are in the previous session's log. For this run `.wrangler/state/v3` was moved into the scratchpad (`run4/stale-wrangler-state-v3`) and wrangler restarted clean. Open issue: an undeserializable record should be deleted (with its alarm) instead of throwing on every alarm.
+
+Also environmental: the first attempt of the script died on the home page with `net::ERR_NETWORK_CHANGED` in Chromium (a host interface changed at that moment); the rerun is the run reported here.
+
+### Verdict on the phase-1 acceptance
+
+The criterion "two browsers on different networks hold a 10-minute call" cannot be checked locally: all three browsers run on one machine behind one NAT, reach the SFU through the same srflx candidate, and `/api/ice` serves STUN only, so neither a second network nor TURN is exercised. As the local proxy, three headless browsers held a call through the real SFU for 3 minutes (3 min 32 s in all) with audio and video flowing in both directions for every pair, no reconnect, no stuck negotiation, and the SFU log clean apart from two transient `not_found` errors that the retry resolved. The run-3 failures (host receives nothing; 406/410 loop; frozen frame after camera off) are fixed. Phase 1 is accepted locally; the different-networks, 10-minute check remains for the deployed Worker.
+
+### Open issues after run 4
+
+1. Stale DO record: delete a record that fails to deserialize instead of throwing on every alarm (see "Wrangler log").
+2. The guest's first frame of the host came 4.1 s after its subscribe answer, against 0.5 s for the host and the third participant. Unexplained; check with `getStats()` sampled every 200 ms after the answer (`framesReceived`, `pliCount`, `keyFramesDecoded`).
+3. A `not_found_track_error` on a connected session costs 3 s (`SUBSCRIBE_RETRY_MS`) before the publisher's tracks arrive. A publisher-connected signal, or a shorter first retry, would bring "admit → seen by everyone" from ≈5 s to ≈1.5 s.
+4. Items 2–7 of "Open issues" above still stand (camera-off signalling is now solved by the room view; `setLayer` retry exists but was not exercised live; script not in the repo; `web/build` prerequisite; TURN, screen share, resume, >3 participants, deployed Worker untested).
