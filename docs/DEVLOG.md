@@ -27,7 +27,10 @@ Three changes followed on the same day.
   start and pre-join pages, past-meetings page, grid fix, phone chips for a
   shared screen, fog ring and level bars for the speaker, toasts off the
   tiles, transcript placeholder.
-- Worker: `GET /api/meetings` with a KV index; spike 62 checks.
+- Worker: `GET /api/meetings` with a KV index that records when a room
+  went live and ended, so the list shows Scheduled, Live or Ended; spike
+  63 checks. The web app shows the subscribe-retry toast only if a retry
+  has not succeeded within 10 s.
 - First deploy to `meet-felix.example.workers.dev` and secrets set;
   the call test run 4 accepted phase 1 locally ([spikes/02](spikes/02-first-call.md)).
 
