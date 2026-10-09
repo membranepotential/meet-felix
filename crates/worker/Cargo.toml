@@ -1,0 +1,19 @@
+[package]
+name = "meet-worker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = "0.8.7"
+serde.workspace = true
+serde_json.workspace = true
+# `#[durable_object]` expands to code that names the `wasm_bindgen` crate directly.
+wasm-bindgen = "0.2.129"
+# The `wasm_js` backend reads `crypto.getRandomValues`, which Workers provide.
+getrandom = { version = "0.4.3", features = ["wasm_js"] }

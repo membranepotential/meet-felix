@@ -16,4 +16,4 @@ thiserror = "2"
 opt-level = "s"
 lto = true
 codegen-units = 1
-strip = true
+strip = "debuginfo"

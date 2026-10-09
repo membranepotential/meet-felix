@@ -1,0 +1,130 @@
+/*
+ * meet-felix: a lake at night. Deep teal water, fog-white text, one warm lamp for the
+ * action you are about to take, and signal red only for recording and leaving.
+ */
+:root {
+	color-scheme: dark;
+
+	--lake: #0e1c22;
+	--water: #15303a;
+	--reed: #234652;
+	--reed-strong: #33606e;
+	--fog: #e4ecea;
+	--lichen: #93aeab;
+	--lamp: #f3b54a;
+	--lamp-ink: #2a1c02;
+	--signal: #e5484d;
+	--signal-ink: #fff4f4;
+
+	--font: 'Atkinson Hyperlegible Next Variable', system-ui, sans-serif;
+	/* Type scale: 15 · 17 · 21 · 28 · 40 · 64 (≈ perfect fourth from 17) */
+	--step--1: 0.9375rem;
+	--step-0: 1.0625rem;
+	--step-1: 1.3125rem;
+	--step-2: 1.75rem;
+	--step-3: 2.5rem;
+	--step-4: clamp(2.5rem, 9vw, 4rem);
+
+	--radius-s: 10px;
+	--radius-m: 16px;
+	--touch: 56px;
+	--gutter: clamp(16px, 4vw, 40px);
+	--focus: 0 0 0 3px var(--lake), 0 0 0 5px var(--lamp);
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	min-height: 100%;
+	background: var(--lake);
+	color: var(--fog);
+	font-family: var(--font);
+	font-size: var(--step-0);
+	line-height: 1.5;
+	-webkit-text-size-adjust: 100%;
+}
+
+h1,
+h2,
+p {
+	margin: 0;
+}
+
+button,
+input,
+select {
+	font: inherit;
+	color: inherit;
+}
+
+button {
+	cursor: pointer;
+}
+
+:focus-visible {
+	outline: none;
+	box-shadow: var(--focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		transition-duration: 0.01ms !important;
+	}
+}
+
+/* Buttons shared by every screen. */
+.button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.5rem;
+	min-height: var(--touch);
+	padding: 0 1.5rem;
+	border: 0;
+	border-radius: 999px;
+	font-weight: 650;
+	text-decoration: none;
+	transition: background-color 120ms ease;
+}
+
+.button.primary {
+	background: var(--lamp);
+	color: var(--lamp-ink);
+}
+
+.button.primary:hover {
+	background: #f7c76d;
+}
+
+.button.quiet {
+	background: var(--water);
+	color: var(--fog);
+	box-shadow: inset 0 0 0 1px var(--reed);
+}
+
+.button.quiet:hover {
+	background: var(--reed);
+}
+
+.button:disabled {
+	cursor: not-allowed;
+	opacity: 0.45;
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}

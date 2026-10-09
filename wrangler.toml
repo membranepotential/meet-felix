@@ -1,0 +1,28 @@
+name = "meet-felix"
+main = "build/index.js"
+# Newest date the pinned workerd (1.20261001.1) supports. `RoomObject::alarm` relies on
+# dates >= 2026-02-24, where deleteAll() also deletes the alarm.
+compatibility_date = "2026-10-01"
+
+[build]
+cwd = "crates/worker"
+# worker-build resolves --out-dir against the crate, so the bundle lands in /build at the repo root.
+command = "worker-build --release --out-dir ../../build"
+watch_dir = "crates/worker/src"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomObject"]
+
+[vars]
+# Pins each new Room DO to the EU. Local workerd implements no jurisdictions, so run
+# `wrangler dev --var ROOM_JURISDICTION:` to create rooms without one.
+ROOM_JURISDICTION = "eu"
+
+# No id: wrangler provisions the namespace on first deploy and uses a local store in `wrangler dev`.
+[[kv_namespaces]]
+binding = "MEETINGS"

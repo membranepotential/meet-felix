@@ -1,0 +1,6 @@
+node_modules
+/.svelte-kit
+/build
+# wasm-pack output of meeting-core, built locally
+/src/lib/wasm
+vite.config.ts.timestamp-*
