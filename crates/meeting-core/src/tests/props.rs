@@ -8,12 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use super::support::{Room, name, token};
-use crate::state::{AlarmReason, Connection, Lifecycle};
+use crate::state::{AlarmReason, Connection, Lifecycle, SessionSlot};
 use crate::{
-    ClientMsg, Effect, ErrorCode, Event, LocalTrack, Mid, Millis, NEGOTIATION_TIMEOUT_MS,
-    OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, Rid, Role, RoomState,
-    RoomView, SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionId, SessionKind, SfuCall, SfuReply,
-    TrackKind, TrackName, TrackRef,
+    ClientMsg, Effect, ErrorCode, Event, FailureCause, LocalTrack, Mid, Millis,
+    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken,
+    Rid, Role, RoomState, RoomView, SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionEpochs, SessionId,
+    SessionKind, SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
 };
 
 const POOL: u32 = 6;
@@ -39,10 +39,10 @@ enum Action {
         whose: u32,
         owner: bool,
     },
-    /// Answer a pending SFU call.
+    /// Answer a pending SFU call, or fail it.
     Reply {
         pick: usize,
-        fail: bool,
+        fail: Option<FailureCause>,
     },
     /// The reply to a pending SFU call is lost.
     Lose {
@@ -87,6 +87,12 @@ enum Msg {
     Mute(u32),
     SetRecording(bool),
     SetConsent(bool),
+    /// The client's peer connection for this session failed; `stale` names an epoch other than
+    /// the current one, as a report about a replaced session's connection does.
+    ResetSession {
+        kind: SessionKind,
+        stale: bool,
+    },
     End,
     Leave,
 }
@@ -103,7 +109,7 @@ fn msg() -> impl Strategy<Value = Msg> {
     let rid = proptest::sample::select(vec![Rid::Low, Rid::Mid, Rid::High]);
     prop_oneof![
         4 => proptest::sample::subsequence(KINDS.to_vec(), 0..=3).prop_map(Msg::Publish),
-        3 => any::<usize>().prop_map(Msg::Unpublish),
+        4 => any::<usize>().prop_map(Msg::Unpublish),
         1 => Just(Msg::StrayAnswer),
         2 => (who(), kind(), rid).prop_map(|(owner, kind, rid)| Msg::SetLayer { owner, kind, rid }),
         1 => any::<bool>().prop_map(Msg::Lock),
@@ -112,6 +118,8 @@ fn msg() -> impl Strategy<Value = Msg> {
         1 => who().prop_map(Msg::Mute),
         4 => any::<bool>().prop_map(Msg::SetRecording),
         3 => any::<bool>().prop_map(Msg::SetConsent),
+        1 => (proptest::sample::select(vec![SessionKind::Publish, SessionKind::Subscribe]), any::<bool>())
+            .prop_map(|(kind, stale)| Msg::ResetSession { kind, stale }),
         1 => (0..20u8).prop_filter_map("rare", |n| (n == 0).then_some(Msg::End)),
         1 => Just(Msg::Leave),
     ]
@@ -124,7 +132,12 @@ fn action() -> impl Strategy<Value = Action> {
         8 => (who(), msg()).prop_map(|(who, msg)| Action::Send { who, msg }),
         1 => (who(), who(), (0..4u8).prop_map(|n| n == 0))
             .prop_map(|(socket, whose, owner)| Action::Resume { socket, whose, owner }),
-        16 => (any::<usize>(), (0..20u8).prop_map(|n| n == 0)).prop_map(|(pick, fail)| Action::Reply { pick, fail }),
+        16 => (any::<usize>(), (0..40u8).prop_map(|n| match n {
+            0 | 1 => Some(FailureCause::Transient),
+            2 => Some(FailureCause::SessionGone),
+            _ => None,
+        }))
+            .prop_map(|(pick, fail)| Action::Reply { pick, fail }),
         1 => any::<usize>().prop_map(|pick| Action::Lose { pick }),
         6 => any::<usize>().prop_map(|pick| Action::Answer { pick }),
         1 => (who(), kind()).prop_map(|(who, kind)| Action::TrackClosed { who, kind }),
@@ -270,7 +283,7 @@ impl Sim {
                             .state
                             .joined()
                             .find(|&(owner, ..)| owner == id(who))
-                            .map(|(_, publish, _)| publish.kinds())
+                            .and_then(|(_, publish, _)| Some(publish.ready()?.kinds()))
                             .filter(|kinds| !kinds.is_empty())
                             .unwrap_or_else(|| KINDS.to_vec());
                         ClientMsg::Unpublish {
@@ -293,6 +306,15 @@ impl Sim {
                     Msg::Mute(w) => ClientMsg::Mute { who: id(w) },
                     Msg::SetRecording(on) => ClientMsg::SetRecording { on },
                     Msg::SetConsent(consent) => ClientMsg::SetConsent { consent },
+                    Msg::ResetSession { kind, stale } => {
+                        let epoch = current_epochs(&self.room.state, id(who))
+                            .unwrap_or_default()
+                            .of(kind);
+                        ClientMsg::ResetSession {
+                            kind,
+                            epoch: if stale { epoch.next() } else { epoch },
+                        }
+                    }
                     Msg::End => ClientMsg::End,
                     Msg::Leave => ClientMsg::Leave,
                 };
@@ -303,44 +325,52 @@ impl Sim {
                     return None;
                 }
                 let call = self.pending.remove(pick % self.pending.len());
+                let failed = |who, call, cause| SfuReply::Failed { who, call, cause };
                 Event::Sfu(match (call, fail) {
-                    (Effect::SfuNewSession { who, kind }, false) => SfuReply::SessionCreated {
+                    (Effect::SfuNewSession { who, kind }, None) => SfuReply::SessionCreated {
                         who,
                         kind,
                         session: SessionId::new(self.fresh("s")),
                     },
-                    (Effect::SfuNewSession { who, kind }, true) => SfuReply::Failed {
+                    (Effect::SfuNewSession { who, kind }, Some(cause)) => {
+                        failed(who, SfuCall::NewSession(kind), cause)
+                    }
+                    (Effect::SfuPublish { who, session, .. }, None) => SfuReply::Published {
                         who,
-                        call: SfuCall::NewSession(kind),
-                    },
-                    (Effect::SfuPublish { who, .. }, false) => SfuReply::Published {
-                        who,
+                        session,
                         sdp_answer: Sdp::new("a"),
                     },
-                    (Effect::SfuPublish { who, .. }, true) => SfuReply::Failed {
-                        who,
-                        call: SfuCall::Publish,
-                    },
-                    (Effect::SfuSubscribe { who, tracks, .. }, false) => {
+                    (Effect::SfuPublish { who, session, .. }, Some(cause)) => {
+                        failed(who, SfuCall::Publish { session }, cause)
+                    }
+                    (
+                        Effect::SfuSubscribe {
+                            who,
+                            session,
+                            tracks,
+                        },
+                        None,
+                    ) => {
                         let tracks = tracks.into_iter().map(|track| OfferedTrack {
                             mid: Mid::new(self.fresh("r")),
                             track,
                         });
                         SfuReply::SubscribeOffer {
                             who,
+                            session,
                             sdp_offer: Sdp::new("o"),
                             tracks: tracks.collect(),
                         }
                     }
-                    (Effect::SfuSubscribe { who, .. }, true) => SfuReply::Failed {
-                        who,
-                        call: SfuCall::Subscribe,
-                    },
-                    (Effect::SfuRenegotiate { who, .. }, false) => SfuReply::Renegotiated { who },
-                    (Effect::SfuRenegotiate { who, .. }, true) => SfuReply::Failed {
-                        who,
-                        call: SfuCall::Renegotiate,
-                    },
+                    (Effect::SfuSubscribe { who, session, .. }, Some(cause)) => {
+                        failed(who, SfuCall::Subscribe { session }, cause)
+                    }
+                    (Effect::SfuRenegotiate { who, session, .. }, None) => {
+                        SfuReply::Renegotiated { who, session }
+                    }
+                    (Effect::SfuRenegotiate { who, session, .. }, Some(cause)) => {
+                        failed(who, SfuCall::Renegotiate { session }, cause)
+                    }
                     (other, _) => unreachable!("not an SFU call: {other:?}"),
                 })
             }
@@ -495,6 +525,9 @@ impl Sim {
                     self.seen.insert(who, state.clone());
                 }
                 ServerMsg::SubscribeOffer { .. } => self.offers.push(who),
+                // A client drops its subscriber peer connection, and the offer it holds, when
+                // the room replaced the subscribe session.
+                ServerMsg::SubscribeReset { .. } => self.offers.retain(|&o| o != who),
                 // A client drops the offer it holds when the subscription failed.
                 ServerMsg::Error {
                     code: ErrorCode::SubscribeFailed,
@@ -593,17 +626,30 @@ impl Sim {
                 .is_some_and(|p| p.connection.presence().is_some())
         };
         let present = |who: &ParticipantId| present_in(after, who);
-        let session_of = |who: &ParticipantId, kind: SessionKind| match after
-            .participants
-            .get(who)
-            .map(|p| &p.connection)
+        let session_of =
+            |who: &ParticipantId, kind: SessionKind| current_session(after, *who, kind);
+
+        // A joined client's reset for a session epoch that is not the current one changes
+        // nothing.
+        if let Event::Client {
+            from,
+            msg: ClientMsg::ResetSession { kind, epoch },
+            ..
+        } = event
+            && current_epochs(before, *from).is_some_and(|epochs| epochs.of(*kind) != *epoch)
         {
-            Some(Connection::Joined { publish, subscribe }) => Some(match kind {
-                SessionKind::Publish => publish.id.clone(),
-                SessionKind::Subscribe => subscribe.id.clone(),
-            }),
-            _ => None,
-        };
+            prop_assert_eq!(before, after);
+            prop_assert!(effects.is_empty(), "{effects:?}");
+        }
+
+        // A reply about a session the participant no longer uses changes nothing.
+        if let Event::Sfu(reply) = event
+            && let Some((who, kind, session)) = reply_session(reply)
+            && current_session(before, who, kind).as_ref() != Some(session)
+        {
+            prop_assert_eq!(before, after);
+            prop_assert!(effects.is_empty(), "{effects:?}");
+        }
         for effect in effects {
             match effect {
                 Effect::Send { to, .. } => prop_assert!(known(to), "{effect:?}"),
@@ -649,7 +695,7 @@ impl Sim {
                         } if from == who => before
                             .joined()
                             .find(|&(id, ..)| id == *who)
-                            .and_then(|(_, publish, _)| publish.published.get(kind))
+                            .and_then(|(_, publish, _)| publish.ready()?.published.get(kind))
                             .map(|track| track.mid.clone()),
                         _ => None,
                     };
@@ -684,8 +730,10 @@ impl Sim {
                     // Every requested track is published right now.
                     for track in tracks {
                         let published = after.joined().any(|(_, publish, _)| {
-                            publish.id == track.session
-                                && publish.published.values().any(|p| p.name == track.name)
+                            publish.ready().is_some_and(|publish| {
+                                publish.id == track.session
+                                    && publish.published.values().any(|p| p.name == track.name)
+                            })
                         });
                         prop_assert!(published, "{track:?} is not published");
                     }
@@ -699,7 +747,9 @@ impl Sim {
         if after.ended().is_none() {
             let still_joined = |who: ParticipantId| after.joined().any(|(id, ..)| id == who);
             for (subscriber, _, subscribe) in before.joined() {
-                if still_joined(subscriber) {
+                if let SessionSlot::Ready(subscribe) = subscribe
+                    && still_joined(subscriber)
+                {
                     let received: BTreeSet<_> = subscribe
                         .receiving
                         .iter()
@@ -737,19 +787,23 @@ impl Sim {
                 prop_assert!(owner_join && p.role == Role::Host, "{who:?} changed role");
             }
             match &p.connection {
-                // Nobody joins before the SFU created both sessions.
-                Connection::Joined { publish, subscribe } => {
-                    prop_assert!(self.created.contains(&(who, true, publish.id.clone())));
-                    prop_assert!(self.created.contains(&(who, false, subscribe.id.clone())));
-                    // Every received track is still published under the same name.
-                    for (&track, receiving) in &subscribe.receiving {
-                        prop_assert_eq!(after.resolve(track), Some(receiving.remote.clone()));
+                // Nobody joins before the SFU created both sessions, and every session in use
+                // is one the SFU created for its participant.
+                Connection::Joined {
+                    publish, subscribe, ..
+                } => {
+                    if let SessionSlot::Ready(publish) = publish {
+                        prop_assert!(self.created.contains(&(who, true, publish.id.clone())));
                     }
-                    // No subscription is lost: every other joined participant's track is
-                    // received under its current name or still wanted.
-                    for (owner, publish, _) in after.joined().filter(|&(o, ..)| o != who) {
-                        for &kind in publish.published.keys() {
-                            let track = TrackRef { owner, kind };
+                    if let SessionSlot::Ready(subscribe) = subscribe {
+                        prop_assert!(self.created.contains(&(who, false, subscribe.id.clone())));
+                        // Every received track is still published under the same name.
+                        for (&track, receiving) in &subscribe.receiving {
+                            prop_assert_eq!(after.resolve(track), Some(receiving.remote.clone()));
+                        }
+                        // No subscription is lost: every other joined participant's track is
+                        // received under its current name or still wanted.
+                        for track in after.published_tracks().filter(|t| t.owner != who) {
                             let received = subscribe
                                 .receiving
                                 .get(&track)
@@ -798,15 +852,34 @@ impl Sim {
             }
         }
 
-        // No negotiation older than the timeout survives an alarm at or after its deadline.
+        // No negotiation older than the timeout, and no due request for a replacement session,
+        // survives an alarm at or after its deadline.
         if *event == Event::AlarmFired {
             let now = self.room.now;
             for (who, publish, subscribe) in after.joined() {
-                for since in [publish.negotiation.since(), subscribe.negotiation.since()] {
+                let since = [
+                    publish.ready().and_then(|p| p.negotiation.since()),
+                    subscribe.ready().and_then(|s| s.negotiation.since()),
+                ];
+                for since in since {
                     prop_assert!(
                         since.is_none_or(|since| since.after(NEGOTIATION_TIMEOUT_MS) > now),
                         "{who:?}'s negotiation since {since:?} survived the alarm at {now:?}"
                     );
+                }
+                // A request for a replacement session is never older than the timeout.
+                let replacements = [
+                    match publish {
+                        SessionSlot::Replacing(r) => Some(r.due()),
+                        SessionSlot::Ready(_) => None,
+                    },
+                    match subscribe {
+                        SessionSlot::Replacing(r) => Some(r.due()),
+                        SessionSlot::Ready(_) => None,
+                    },
+                ];
+                for due in replacements.into_iter().flatten() {
+                    prop_assert!(due > now, "{who:?}'s replacement due at {due:?}");
                 }
             }
         }
@@ -955,6 +1028,52 @@ impl Sim {
     }
 }
 
+/// The id of `who`'s session of `kind`, if they are joined and it is in use.
+fn current_session(state: &RoomState, who: ParticipantId, kind: SessionKind) -> Option<SessionId> {
+    match &state.participants.get(&who)?.connection {
+        Connection::Joined {
+            publish, subscribe, ..
+        } => match kind {
+            SessionKind::Publish => publish.ready().map(|p| p.id.clone()),
+            SessionKind::Subscribe => subscribe.ready().map(|s| s.id.clone()),
+        },
+        _ => None,
+    }
+}
+
+/// The epochs of `who`'s sessions, if they are joined.
+fn current_epochs(state: &RoomState, who: ParticipantId) -> Option<SessionEpochs> {
+    match state.participants.get(&who)?.connection {
+        Connection::Joined { epochs, .. } => Some(epochs),
+        _ => None,
+    }
+}
+
+/// The participant, kind and id of the session a reply is about, for replies that name one.
+fn reply_session(reply: &SfuReply) -> Option<(ParticipantId, SessionKind, &SessionId)> {
+    match reply {
+        SfuReply::Published { who, session, .. }
+        | SfuReply::Failed {
+            who,
+            call: SfuCall::Publish { session },
+            ..
+        } => Some((*who, SessionKind::Publish, session)),
+        SfuReply::SubscribeOffer { who, session, .. }
+        | SfuReply::Renegotiated { who, session }
+        | SfuReply::Failed {
+            who,
+            call: SfuCall::Subscribe { session } | SfuCall::Renegotiate { session },
+            ..
+        } => Some((*who, SessionKind::Subscribe, session)),
+        SfuReply::SessionCreated { .. }
+        | SfuReply::TrackClosed { .. }
+        | SfuReply::Failed {
+            call: SfuCall::NewSession(_),
+            ..
+        } => None,
+    }
+}
+
 fn policy(from_start: bool) -> RecordingPolicy {
     if from_start {
         RecordingPolicy::FromStart
@@ -991,18 +1110,20 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
     let (mut receiving, mut recording, mut ended) = (0, 0, 0);
     let (mut awaiting, mut resumed, mut retried) = (0, 0, 0);
     let (mut unpublished, mut publish_timeouts) = (0, 0);
-    let (mut released, mut expired, mut promoted) = (0, 0, 0);
-    for case in 0..400 {
+    let (mut released, mut expired, mut promoted, mut replaced) = (0, 0, 0, 0);
+    for case in 0..500 {
         let actions = proptest::collection::vec(action(), 1..250)
             .new_tree(&mut runner)
             .expect("tree")
             .current();
         let mut sim = Sim::new(policy(case % 2 == 0));
-        let mut saw = [false; 5];
+        let mut saw = [false; 6];
         for action in actions {
             sim.run(action).expect("invariants hold");
             let state = &sim.room.state;
-            saw[0] |= state.joined().any(|(_, _, s)| !s.receiving.is_empty());
+            saw[0] |= state
+                .joined()
+                .any(|(_, _, s)| s.ready().is_some_and(|s| !s.receiving.is_empty()));
             saw[1] |= state.recording.current().is_some();
             saw[2] |= state
                 .participants
@@ -1010,7 +1131,13 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
                 .any(|p| p.connection == Connection::AwaitingConsent);
             saw[3] |= sim.rebinds > 0;
             saw[4] |= state.joined().any(|(_, _, s)| {
-                s.negotiation.since().is_none() && s.wanted.values().any(|&due| due > sim.room.now)
+                s.ready().is_some_and(|s| {
+                    s.negotiation.since().is_none()
+                        && s.wanted.values().any(|&due| due > sim.room.now)
+                })
+            });
+            saw[5] |= state.joined().any(|(_, p, s)| {
+                matches!(p, SessionSlot::Replacing(_)) || matches!(s, SessionSlot::Replacing(_))
             });
         }
         receiving += usize::from(saw[0]);
@@ -1024,6 +1151,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
         released += usize::from(sim.released > 0);
         expired += usize::from(sim.expired);
         promoted += usize::from(sim.promoted > 0);
+        replaced += usize::from(saw[5]);
     }
     assert!(
         [
@@ -1038,6 +1166,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
             released,
             expired,
             promoted,
+            replaced,
         ]
         .iter()
         .all(|&n| n >= 20),
@@ -1045,6 +1174,6 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
          awaiting consent {awaiting}, resumed {resumed}, retry pending {retried}, \
          unpublished {unpublished}, publish timed out {publish_timeouts}, \
          waiting guests let in by the first host {released}, expired unused {expired}, \
-         promoted by the owner {promoted}"
+         promoted by the owner {promoted}, session replaced {replaced}"
     );
 }

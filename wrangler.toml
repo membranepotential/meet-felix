@@ -29,6 +29,8 @@ ROOM_JURISDICTION = "eu"
 # - CREATE_SECRET: the owner password. `POST /api/login` checks it and issues the session cookie; owner routes also accept it as a bearer token.
 # - CALLS_APP_ID, CALLS_APP_SECRET: the Realtime SFU app. Without them every join fails with
 #   `SfuUnavailable`.
+# - TURN_KEY_ID, TURN_KEY_API_TOKEN: a Realtime TURN key. With them, `GET /api/ice` adds TURN
+#   servers with 24-hour credentials; without them it serves STUN only.
 
 # Namespace MEETINGS created on 2026-10-09; `wrangler dev` uses a local store.
 [[kv_namespaces]]

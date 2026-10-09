@@ -13,12 +13,12 @@ is tested, and what changed when.
 
 | Document | Read it for |
 |---|---|
-| [Design decisions](#design-decisions) | The decision records, D1–D32, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
+| [Design decisions](#design-decisions) | The decision records, D1–D33, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
 | [architecture/](architecture/README.md) | The cross-cutting decisions: platform, core and shells, browser stack, backend, EU location; plus goal, non-goals, component map, phases and risks. |
 | [cost/](cost/README.md) | What it costs per month and per meeting-hour, against Google Workspace. |
 | [DEVLOG.md](DEVLOG.md) | The running log, newest first: what changed, why, what's next. |
 | [TESTING.md](TESTING.md) | The test layers: core unit and property tests, worker spike scripts, web checks, and the planned device and deployment checks. |
-| [spikes/](spikes/) | One write-up per phase-0 spike, starting with [01 — DO hibernation](spikes/01-do-hibernation.md). |
+| [spikes/](spikes/) | One write-up per spike: [01 — DO hibernation](spikes/01-do-hibernation.md), [02 — first call through the SFU](spikes/02-first-call.md), [03 — Whisper input formats and a pure-Rust Opus encoder](spikes/03-whisper-input-and-opus.md). |
 | [research/](#research) | The research the design rests on. Cite it; don't re-argue it without new evidence. |
 
 Outside this folder: [STATUS.md](../STATUS.md) is the live dashboard of what
@@ -47,9 +47,9 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D13](media/README.md#d13-detect-features-not-browsers-screen-share-is-desktop-only-2026-10-09) | Detect features, not browsers; screen share is desktop-only | [media/](media/README.md) |
 | [D14](media/README.md#d14-calls-work-in-a-plain-browser-tab-and-ios-gets-defensive-handling-2026-10-09) | Calls work in a plain browser tab, and iOS gets defensive handling | [media/](media/README.md) |
 | [D15](recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09) | Recording is announced by the core, and joining means consent | [recording/](recording/README.md) |
-| [D16](recording/README.md#d16-capture-each-speakers-audio-on-the-server-in-30-second-chunks-2026-10-09) | Capture each speaker's audio on the server, in 30-second chunks | [recording/](recording/README.md) |
+| [D16](recording/README.md#d16-capture-each-speakers-audio-on-the-server-as-oggopus-chunks-of-up-to-30-seconds-2026-10-09) | Capture each speaker's audio on the server, as Ogg/Opus chunks of up to 30 seconds | [recording/](recording/README.md) |
 | [D17](recording/README.md#d17-transcribe-after-the-meeting-with-whisper-large-v3-turbo-behind-a-transcriber-trait-2026-10-09) | Transcribe after the meeting with Whisper large-v3-turbo, behind a Transcriber trait | [recording/](recording/README.md) |
-| [D18](recording/README.md#d18-keep-recordings-and-transcripts-indefinitely-for-now-2026-10-09) | Keep recordings and transcripts indefinitely for now | [recording/](recording/README.md) |
+| [D18](recording/README.md#d18-keep-the-audio-48-hours-keep-transcripts-until-the-owner-deletes-them-2026-10-09) | Keep the audio 48 hours; keep transcripts until the owner deletes them | [recording/](recording/README.md) |
 | [D19](recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09) | Show the transcript link to everyone at the end | [recording/](recording/README.md) |
 | [D20](core/README.md#d20-core-first-2026-10-09) | Core first | [core/](core/README.md) |
 | [D21](cost/README.md#d21-build-and-measure-no-further-price-analysis-2026-10-09) | Build and measure; no further price analysis | [cost/](cost/README.md) |
@@ -64,13 +64,14 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D30](ui/README.md#d30-the-active-speaker-gets-a-fog-ring-and-level-bars-never-the-lamp-colour-2026-10-09) | The active speaker gets a fog ring and level bars, never the lamp colour | [ui/](ui/README.md) |
 | [D31](ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09) | The transcript page shows speaker-labelled paragraphs with wall-clock times | [ui/](ui/README.md) |
 | [D32](architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09) | One owner is the only host; everyone else is a guest | [architecture/](architecture/README.md) |
+| [D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09) | A dead SFU session is replaced, not retried | [media/](media/README.md) |
 
 ## Features with their own docs
 
 | Folder | Feature | Decisions |
 |---|---|---|
 | [links/](links/README.md) | Three-word meeting ids, who creates meetings, how a meeting ends, transcript links | [D6](links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)–[D9](links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09) |
-| [media/](media/README.md) | SFU sessions, simulcast, codecs, browser capabilities, iOS handling | [D10](media/README.md#d10-each-participant-has-separate-publish-and-subscribe-sessions-2026-10-09)–[D14](media/README.md#d14-calls-work-in-a-plain-browser-tab-and-ios-gets-defensive-handling-2026-10-09) |
+| [media/](media/README.md) | SFU sessions, simulcast, codecs, browser capabilities, iOS handling, replacing a dead session | [D10](media/README.md#d10-each-participant-has-separate-publish-and-subscribe-sessions-2026-10-09)–[D14](media/README.md#d14-calls-work-in-a-plain-browser-tab-and-ios-gets-defensive-handling-2026-10-09), [D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09) |
 | [recording/](recording/README.md) | Consent, per-speaker capture, chunks in R2, the post-meeting transcript, compressed copies of the audio, retention, sharing | [D15](recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)–[D19](recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09) |
 | [core/](core/README.md) | The functional core: state, events, effects, invariants | [D20](core/README.md#d20-core-first-2026-10-09) |
 | [cost/](cost/README.md) | The cost model and the Google Workspace baseline | [D21](cost/README.md#d21-build-and-measure-no-further-price-analysis-2026-10-09) |

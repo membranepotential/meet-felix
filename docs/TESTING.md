@@ -70,7 +70,9 @@ credentials, `SFU_API_URL` pointing at the mock). It checks:
 - `POST /api/new`: 401 without or with a wrong secret, 201 with the bearer
   secret or the owner's cookie, three words and nothing else in the
   response; `GET /api/meeting/:words` with the recording policy and
-  `phase: "scheduled"`, case-insensitive; 404 and 426 cases; `GET /api/ice`;
+  `phase: "scheduled"`, case-insensitive; 404 and 426 cases; `GET
+  /api/ice?meeting=` answers STUN for a known meeting and 404 for an unknown
+  one or none;
 - a guest who joins the scheduled room gets `Waiting`, even with a forged
   `x-meet-owner` header; the owner's socket (session cookie on the upgrade)
   joins as host, the room goes live (`phase: "live"`) and records from the
@@ -100,6 +102,13 @@ credentials, `SFU_API_URL` pointing at the mock). It checks:
 - `GET /api/meetings`: 401 without or with a wrong secret; 200 with the
   owner's cookie; with the secret, the list is newest first and shows the ended meeting with `phase: "ended"`,
   `ended: true` and the transcript token from `Ended`, and a never-joined meeting with `phase: "scheduled"`;
+- session recovery ([D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09)): the mock answers a guest's
+  pull with HTTP 410 `session_error` and every later call on that session
+  too; the room creates a new session, sends `SubscribeReset`, delivers the
+  host's track on the new session and makes no further call on the lost one;
+  `ResetSession` for either kind is answered with `PublishReset` or
+  `SubscribeReset` and the new epoch, and a `ResetSession` with an old epoch
+  gets no answer;
 - with the mock SFU down, joining yields `Error{SfuUnavailable}` and the
   socket closes;
 - with `SPIKE_KEEPALIVE=1` (two more minutes): a socket that never pings is

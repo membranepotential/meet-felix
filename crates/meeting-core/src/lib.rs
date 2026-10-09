@@ -25,6 +25,11 @@
 //!   timed-out subscribe negotiation is retried after [`SUBSCRIBE_RETRY_MS`]. A publish offer
 //!   the SFU does not answer within [`NEGOTIATION_TIMEOUT_MS`] fails, so the client may offer
 //!   again.
+//! - A subscribe or publish session the SFU declares gone ([`FailureCause::SessionGone`]), or
+//!   whose peer connection the client reports failed ([`ClientMsg::ResetSession`]), is replaced
+//!   by a new one, not retried. A lost publish session takes its tracks with it, for everyone.
+//!   The client hears [`ServerMsg::SubscribeReset`] or [`ServerMsg::PublishReset`] once the new
+//!   session exists; a failed request for it is sent again after [`SUBSCRIBE_RETRY_MS`].
 //! - A client whose socket dropped takes its place again with its [`ResumeToken`].
 //! - A live room ends when a host ends it or after [`EMPTY_ROOM_TIMEOUT_MS`] without admitted
 //!   participants; knocking guests do not count. A scheduled room has no empty timer: it ends
@@ -48,13 +53,14 @@ mod tests;
 
 pub use ids::{
     DisplayName, InvalidDisplayName, InvalidMeetingId, MeetingId, Mid, Millis, ParticipantId,
-    ResumeToken, Sdp, SessionId, TrackName, TranscriptRef,
+    ResumeToken, Sdp, SessionEpoch, SessionId, TrackName, TranscriptRef,
 };
 pub use protocol::{
     ClientMsg, ErrorCode, IncomingTrack, LocalTrack, ParticipantView, Phase, Presence, Recording,
-    RecordingPolicy, Rid, Role, RoomView, ServerMsg, TrackKind, TrackRef,
+    RecordingPolicy, Rid, Role, RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind,
+    TrackRef,
 };
-pub use shell::{Effect, Event, OfferedTrack, RemoteTrack, SessionKind, SfuCall, SfuReply};
+pub use shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 pub use state::{
     EMPTY_ROOM_TIMEOUT_MS, NEGOTIATION_TIMEOUT_MS, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
 };

@@ -69,6 +69,24 @@ opaque_string!(
     TranscriptRef
 );
 
+/// Counts the SFU sessions of one kind a participant has had: 0 for the session created when
+/// they joined, one more for each replacement (D33 in `docs/media`). The client names the
+/// session whose peer connection failed by its epoch, so a stale report cannot replace a new
+/// session.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
+pub struct SessionEpoch(pub u32);
+
+impl SessionEpoch {
+    /// The epoch of the session that replaces this one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 /// The secret that lets a client whose socket dropped take its place in the room again. The
 /// room hands it out in [`crate::ServerMsg::Welcome`]; the client sends it back in
 /// [`crate::ClientMsg::Join`]. Its `Debug` output hides the value.

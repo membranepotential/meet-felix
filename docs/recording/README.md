@@ -11,9 +11,9 @@ Workers AI. There is no video recording and no live captioning
 Decisions on this page:
 
 - [D15: Recording is announced by the core, and joining means consent (2026-10-09)](#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)
-- [D16: Capture each speaker's audio on the server, in 30-second chunks (2026-10-09)](#d16-capture-each-speakers-audio-on-the-server-in-30-second-chunks-2026-10-09)
+- [D16: Capture each speaker's audio on the server, as Ogg/Opus chunks of up to 30 seconds (2026-10-09)](#d16-capture-each-speakers-audio-on-the-server-as-oggopus-chunks-of-up-to-30-seconds-2026-10-09)
 - [D17: Transcribe after the meeting with Whisper large-v3-turbo, behind a Transcriber trait (2026-10-09)](#d17-transcribe-after-the-meeting-with-whisper-large-v3-turbo-behind-a-transcriber-trait-2026-10-09)
-- [D18: Keep recordings and transcripts indefinitely for now (2026-10-09)](#d18-keep-recordings-and-transcripts-indefinitely-for-now-2026-10-09)
+- [D18: Keep the audio 48 hours; keep transcripts until the owner deletes them (2026-10-09)](#d18-keep-the-audio-48-hours-keep-transcripts-until-the-owner-deletes-them-2026-10-09)
 - [D19: Show the transcript link to everyone at the end (2026-10-09)](#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09)
 
 Code: [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
@@ -76,7 +76,14 @@ that bypasses `RoomState`.
 Why consent is not optional: in Germany, §201 StGB makes recording privately
 spoken words without consent a crime.
 
-## D16: Capture each speaker's audio on the server, in 30-second chunks (2026-10-09)
+What the notice says (owner's decision, 2026-10-09): that the meeting is
+recorded, that voices become a transcript everyone in the meeting gets, and
+that video is not recorded. It does not list Cloudflare's subprocessors or
+where the speech model runs (research 11 found no EU-residency commitment
+for Workers AI); the owner judged that detail frightening for no gain in a
+private meeting app with a known host.
+
+## D16: Capture each speaker's audio on the server, as Ogg/Opus chunks of up to 30 seconds (2026-10-09)
 
 The pipeline, per meeting:
 
@@ -90,15 +97,29 @@ The pipeline, per meeting:
    `wss://` endpoint. The adapter cannot send custom headers, so a scoped
    token goes in the URL.
 3. The `RecorderObject` downmixes and resamples each stream to 16 kHz mono
-   (`rubato`).
-4. It cuts the stream into chunks: at the first silence after 25 seconds, or
-   hard at 30 seconds. A chunk is a 16 kHz mono 16-bit WAV of about 1 MB, the
-   size Cloudflare's own Whisper tutorial uses.
-5. It writes each chunk with one R2 `put` to
-   `rec/{meeting}/{speaker}/{n}.wav`. There is no multipart upload during the
-   meeting, so hibernation can lose at most the current partial chunk.
-6. It records chunks that are entirely silent but flags them, so the
+   (a small FIR low-pass and 3:1 decimation; no resampling crate needed for
+   an integer ratio).
+4. It encodes every 20 ms frame to Opus as it arrives (`opus-rs`, pure Rust,
+   voip mode, 16 kHz mono, about 16–24 kbps), so the encoding cost is spread
+   over the WebSocket messages: about 0.5 ms per frame in wasm
+   ([spike 3](../spikes/03-whisper-input-and-opus.md)).
+5. It cuts the stream into chunks: at the first silence after 25 seconds, or
+   hard at 30 seconds, and at a gap in the stream. A chunk is an Ogg/Opus
+   file of about 40–90 KB.
+6. It writes each chunk with one R2 `put` to
+   `rec/{recorder}/{speaker}/{n}.ogg`, with the chunk's wall-clock start and
+   a silent flag in the object's custom metadata. There is no multipart upload
+   during the meeting, so hibernation can lose at most the current partial
+   chunk.
+7. It records chunks that are entirely silent but flags them, so the
    transcript job skips them.
+
+Changed on 2026-10-09 (the user asked for compressed storage; spike 3): the
+plan had 16 kHz WAV chunks of about 1 MB plus a compressed copy made after
+the meeting. Ogg/Opus from the start makes the copy unnecessary: Whisper on
+Workers AI reads Ogg/Opus directly, and a speaker-hour shrinks from 115 MB
+to roughly 7–11 MB. If the encoder ever proves too costly in production, the
+fallback is WAV chunks again.
 
 Load at 10 speakers: about 1.9 MB/s in messages of at most 32 KB, about 60
 messages per second, billed 20:1 as about 3 requests per second. That is
@@ -132,17 +153,17 @@ alarm loop:
 - Each alarm run takes at most 15 minutes of wall time. Every step is
   idempotent and recorded in DO storage (chunk → segments), so a retried
   alarm repeats no finished work.
-- Each chunk that is not silent goes to Workers AI Whisper large-v3-turbo with
-  the `language` parameter set. Whisper returns segments with word
-  timestamps.
+- Each chunk that is not silent goes to Workers AI Whisper large-v3-turbo as
+  base64 Ogg/Opus, without a `language` parameter: the model detects the
+  language per chunk, and a mixed German/English chunk came back correct in
+  both languages ([spike 3](../spikes/03-whisper-input-and-opus.md)).
+  Whisper returns segments with word timestamps.
 - The job merges all speakers' segments by wall-clock time into one
   transcript, stored in R2 as `transcript.md` and `transcript.json`.
-- It stitches the chunks into one WAV per speaker with R2 multipart, and
-  optionally one mixed WAV.
-- A post-processing step then makes a compressed copy of each speaker's
-  audio. The transcript page offers this copy, not the raw WAV
-  ([D31](../ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09);
-  added on 2026-10-09).
+- Later (not in the first phase-3 delivery): it joins the chunks into one
+  Ogg/Opus file per speaker for the transcript page, which the chunks allow
+  without re-encoding. The earlier "compressed copy" post-processing step is
+  gone (see D16).
 - Workers AI allows 720 speech requests per minute. Four speakers × 1 hour
   are about 480 chunks, which is a few alarm runs.
 
@@ -157,27 +178,43 @@ available behind the same trait if German quality disappoints.
 Why an alarm loop: Cloudflare Workflows have no Rust API
 ([09 §3](../research/09-post-meeting-transcription-recording.md)).
 
-Why a compressed copy: a 16 kHz mono 16-bit WAV holds 32,000 bytes per
-second, about 115 MB per speaker-hour (a 46-minute speaker is about 90 MB).
-That is too much to stream or download on a phone. Not chosen yet: the codec,
-and where the encoding runs.
+Why Opus at capture time and not a copy afterwards: a 16 kHz mono WAV holds
+115 MB per speaker-hour, too much to stream to a phone, and the copy would
+have been a second pipeline. Spike 3 showed the encoder is cheap inside the
+Durable Object and that Whisper reads the result.
 
 Target (phase 3): a recorded 4-person meeting yields a correctly attributed
 German/English transcript within 15 minutes of its end.
 
-Open: the maximum audio size per Workers AI speech request is undocumented.
-Spike 3 compares Whisper and Nova-3 on German and mixed German/English audio
-and confirms the chunk size.
+Open: the maximum audio size per Workers AI speech request is undocumented;
+a 30 s Opus chunk is under 100 KB, far from any plausible limit. Spike 3
+checked Whisper only; Nova-3 stays an option behind the trait.
 
-## D18: Keep recordings and transcripts indefinitely for now (2026-10-09)
+## D18: Keep the audio 48 hours; keep transcripts until the owner deletes them (2026-10-09)
 
-Audio chunks, stitched WAVs, their compressed copies and transcripts stay in
-R2 until deleted by hand.
-A cleanup job comes later (phase 5). This replaces the plan v2 draft of
-"recordings 30 days, transcripts until deleted" (decision 4 of 2026-10-09).
+- The recorder deletes a meeting's audio chunks from R2 48 hours after the
+  meeting ended (its own alarm); an R2 lifecycle rule deletes any chunk older
+  than 3 days as the backstop for a recorder that never gets there. Within
+  those 48 hours the transcript page can offer each speaker's audio.
+- Transcripts stay until the owner deletes them: the past-meetings page gets
+  a delete button per meeting, which removes the transcript objects and the
+  index entry.
+- The recording notice names this: audio is kept for two days, the
+  transcript stays until the host deletes it.
+
+Why: German guidance on meeting transcription (GDD Kurzpapier 4, January
+2026; DSK Orientierungshilfe Videokonferenzsysteme) says to delete the
+recording once the transcript exists and to state a retention period
+([research 11](../research/11-gotchas-on-cloudflare.md)). The owner
+approved this change on 2026-10-09 and set the audio retention to 48 hours;
+it replaces "keep both indefinitely"
+(decision 4 of 2026-10-09), which itself had replaced the plan v2 draft of
+"recordings 30 days, transcripts until deleted". A joined per-speaker audio
+file for the transcript page (D17, later) is available only within those
+48 hours.
 
 Context: R2 storage costs less than $0.01 per month for a recorded 4-person
-meeting-hour and $0.02 for a 10-person one ([cost/](../cost/README.md)).
+meeting-hour of Opus audio ([cost/](../cost/README.md)).
 
 ## D19: Show the transcript link to everyone at the end (2026-10-09)
 

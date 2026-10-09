@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, MeetingId, Millis, ParticipantId, RoomState, ServerMsg,
-    SfuReply,
+    ClientMsg, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId, RoomState,
+    ServerMsg, SfuReply,
 };
 use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
@@ -319,18 +319,21 @@ impl RoomObject {
         if *sfu_calls >= MAX_SFU_CALLS {
             // Fed back as a failure, so the participant is not left waiting for a reply; the
             // core retries through its alarm, not at once.
-            console_error!("more than {MAX_SFU_CALLS} SFU calls in one handler; failed {effect:?}");
-            return failure_reply(effect);
+            console_error!(
+                "more than {MAX_SFU_CALLS} SFU calls in one handler; failed {}",
+                describe_call(effect)
+            );
+            return failure_reply(effect, FailureCause::Transient);
         }
         *sfu_calls += 1;
         let Some(client) = sfu::client(&self.env) else {
             console_warn!("CALLS_APP_ID or CALLS_APP_SECRET is not set; SFU calls fail");
-            return failure_reply(effect);
+            return failure_reply(effect, FailureCause::Transient);
         };
         match client.perform(effect).await {
             Ok(reply) => reply,
             Err(Failure { error, reply }) => {
-                console_error!("SFU call failed: {error}");
+                console_error!("{} failed: {error}", describe_call(effect));
                 reply
             }
         }
@@ -436,6 +439,23 @@ fn is_sfu_call(effect: &Effect) -> bool {
         | Effect::ReleaseMeetingId { .. }
         | Effect::EndMeeting => false,
     }
+}
+
+/// Names the SFU call an effect makes, its participant and its session, for the log, e.g.
+/// `SFU Subscribe for ParticipantId(0) on session 2a45…`.
+fn describe_call(effect: &Effect) -> String {
+    let (call, who, session) = match effect {
+        Effect::SfuNewSession { who, kind } => {
+            return format!("SFU NewSession({kind:?}) for {who:?}");
+        }
+        Effect::SfuPublish { who, session, .. } => ("Publish", who, session),
+        Effect::SfuSubscribe { who, session, .. } => ("Subscribe", who, session),
+        Effect::SfuRenegotiate { who, session, .. } => ("Renegotiate", who, session),
+        Effect::SfuCloseTracks { who, session, .. } => ("CloseTracks", who, session),
+        Effect::SfuUpdateLayer { who, session, .. } => ("UpdateLayer", who, session),
+        other => return format!("{other:?}"),
+    };
+    format!("SFU {call} for {who:?} on session {}", session.as_str())
 }
 
 fn attachment(ws: &WebSocket) -> Result<Option<Attachment>> {

@@ -2,14 +2,14 @@
 
 use std::fmt;
 
-use meeting_core::{LocalTrack, Mid, OfferedTrack, RemoteTrack, Rid, Sdp, SessionId};
+use meeting_core::{FailureCause, LocalTrack, Mid, OfferedTrack, RemoteTrack, Rid, Sdp, SessionId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::wire::{
     CLOSE_TRACK_ERROR, CloseTrackObject, CloseTracksRequest, ErrorFields, LayerFallback,
-    NewSessionResponse, RenegotiateRequest, SdpType, SessionDescription, Simulcast, TrackObject,
-    TrackResult, TracksRequest, TracksResponse, UpdateTracksRequest,
+    NewSessionResponse, RenegotiateRequest, SESSION_ERROR, SdpType, SessionDescription, Simulcast,
+    TrackObject, TrackResult, TracksRequest, TracksResponse, UpdateTracksRequest,
 };
 
 /// The API's base URL.
@@ -104,6 +104,29 @@ pub enum SfuError {
     /// The response lacks the SDP the operation must return.
     #[error("the response has no SDP {0:?}")]
     MissingSdp(SdpType),
+}
+
+/// HTTP 410 Gone: the SFU no longer serves the session.
+const GONE: u16 = 410;
+
+impl SfuError {
+    /// Whether the session the call was made on is gone: the SFU answered HTTP 410, or with
+    /// [`SESSION_ERROR`] (also seen with 406 after an unanswered offer). Every later call on such
+    /// a session fails as well, so the room replaces it rather than retrying.
+    pub fn cause(&self) -> FailureCause {
+        match self {
+            Self::Api { status: GONE, .. } | Self::Status { status: GONE } => {
+                FailureCause::SessionGone
+            }
+            Self::Api { code, .. } if code == SESSION_ERROR => FailureCause::SessionGone,
+            Self::Api { .. }
+            | Self::Status { .. }
+            | Self::Transport(_)
+            | Self::Decode(_)
+            | Self::Track { .. }
+            | Self::MissingSdp(_) => FailureCause::Transient,
+        }
+    }
 }
 
 /// The SFU's offer for a subscribe session and the tracks it adds.
@@ -300,10 +323,12 @@ impl<T: SfuTransport> SfuClient<T> {
                 mid: Some(mid.clone()),
                 simulcast: Some(Simulcast {
                     preferred_rid: rid,
-                    // Keep the chosen layer under bandwidth pressure, but never show nothing
-                    // when the publisher drops it. In a–z order (f, h, q) a missing layer
-                    // falls back to the next smaller one.
-                    priority_ordering: LayerFallback::None,
+                    // In a–z order (f, h, q) a layer the link cannot carry, or one the
+                    // publisher dropped, falls back to the next smaller one. Both must be
+                    // set: with `priorityOrdering: none` the SFU keeps sending the preferred
+                    // layer however weak the link (Cloudflare simulcast docs, research 11,
+                    // 2026-10-09).
+                    priority_ordering: LayerFallback::Asciibetical,
                     rid_not_available: LayerFallback::Asciibetical,
                 }),
             }],

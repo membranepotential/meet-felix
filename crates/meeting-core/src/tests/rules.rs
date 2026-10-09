@@ -2,10 +2,10 @@
 
 use super::support::{Room, T0, name, session, track_name, transcript};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, Mid, Millis,
+    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FailureCause, Mid, Millis,
     NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Phase, Presence, RecordingPolicy,
     RemoteTrack, Role, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg,
-    SessionKind, SfuCall, SfuReply, TrackKind,
+    SessionEpoch, SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -197,7 +197,8 @@ fn the_owners_socket_turns_the_guest_whose_place_it_takes_into_a_host() {
                 msg: ServerMsg::Welcome {
                     you: GUEST,
                     state: view,
-                    resume: room.state.participants[&GUEST].resume.clone()
+                    resume: room.state.participants[&GUEST].resume.clone(),
+                    epochs: SessionEpochs::default(),
                 }
             },
         ]
@@ -624,7 +625,8 @@ fn a_client_takes_its_place_again_on_a_new_socket() {
                 msg: ServerMsg::Welcome {
                     you: GUEST,
                     state: before.view(),
-                    resume: token
+                    resume: token,
+                    epochs: SessionEpochs::default(),
                 }
             },
         ]
@@ -687,7 +689,10 @@ fn a_failed_subscription_is_retried_after_a_pause() {
     let track = host_publishes_audio(&mut room);
     let effects = room.sfu(SfuReply::Failed {
         who: GUEST,
-        call: SfuCall::Subscribe,
+        call: SfuCall::Subscribe {
+            session: session(GUEST, SessionKind::Subscribe),
+        },
+        cause: FailureCause::Transient,
     });
     assert_eq!(
         effects,
@@ -727,6 +732,7 @@ fn an_unanswered_subscribe_offer_times_out_and_is_requested_again() {
     let mid = Mid::new("sub-audio");
     room.sfu(SfuReply::SubscribeOffer {
         who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
         sdp_offer: Sdp::new("offer"),
         tracks: vec![OfferedTrack {
             mid: mid.clone(),
@@ -778,6 +784,7 @@ fn guest_receives_host_audio(room: &mut Room) -> (RemoteTrack, Mid) {
     let mid = Mid::new("sub-audio");
     room.sfu(SfuReply::SubscribeOffer {
         who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
         sdp_offer: Sdp::new("offer"),
         tracks: vec![OfferedTrack {
             mid: mid.clone(),
@@ -790,7 +797,10 @@ fn guest_receives_host_audio(room: &mut Room) -> (RemoteTrack, Mid) {
             sdp: Sdp::new("answer"),
         },
     );
-    room.sfu(SfuReply::Renegotiated { who: GUEST });
+    room.sfu(SfuReply::Renegotiated {
+        who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
+    });
     (track, mid)
 }
 
@@ -900,6 +910,7 @@ fn an_unanswered_publish_offer_times_out_and_a_new_offer_goes_through() {
     assert_eq!(
         room.sfu(SfuReply::Published {
             who: GUEST,
+            session: session(GUEST, SessionKind::Publish),
             sdp_answer: Sdp::new("late")
         }),
         []
@@ -908,4 +919,426 @@ fn an_unanswered_publish_offer_times_out_and_a_new_offer_goes_through() {
         room.client(GUEST, offer()).as_slice(),
         [Effect::SfuPublish { .. }, Effect::SetAlarm { .. }]
     ));
+}
+
+fn session_gone(who: ParticipantId, call: SfuCall) -> SfuReply {
+    SfuReply::Failed {
+        who,
+        call,
+        cause: FailureCause::SessionGone,
+    }
+}
+
+#[test]
+fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again() {
+    let mut room = meeting_room();
+    let (audio, _) = guest_receives_host_audio(&mut room);
+    room.publish(HOST, &[TrackKind::Video]);
+    let video = RemoteTrack {
+        session: session(HOST, SessionKind::Publish),
+        name: track_name(HOST, TrackKind::Video),
+    };
+    let old = session(GUEST, SessionKind::Subscribe);
+
+    // The pull of the host's video meets a session the SFU declared gone.
+    assert_eq!(
+        room.sfu(session_gone(
+            GUEST,
+            SfuCall::Subscribe {
+                session: old.clone()
+            }
+        )),
+        [Effect::SfuNewSession {
+            who: GUEST,
+            kind: SessionKind::Subscribe
+        }]
+    );
+    assert_eq!(presence(&room, GUEST), Some(Presence::Joined));
+    // A late offer for the lost session changes nothing.
+    assert_eq!(
+        room.sfu(SfuReply::SubscribeOffer {
+            who: GUEST,
+            session: old.clone(),
+            sdp_offer: Sdp::new("late"),
+            tracks: Vec::new(),
+        }),
+        []
+    );
+
+    let new = SessionId::new("subscribe-again");
+    assert_eq!(
+        room.sfu(SfuReply::SessionCreated {
+            who: GUEST,
+            kind: SessionKind::Subscribe,
+            session: new.clone(),
+        }),
+        [
+            Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::SubscribeReset {
+                    epoch: SessionEpoch(1)
+                }
+            },
+            // The alarm stays: the subscribe offer times out when the request would have.
+            Effect::SfuSubscribe {
+                who: GUEST,
+                session: new.clone(),
+                tracks: vec![audio, video]
+            },
+        ]
+    );
+    // Replies about the lost session can no longer touch the new one.
+    for late in [
+        SfuReply::SubscribeOffer {
+            who: GUEST,
+            session: old.clone(),
+            sdp_offer: Sdp::new("late"),
+            tracks: Vec::new(),
+        },
+        session_gone(
+            GUEST,
+            SfuCall::Renegotiate {
+                session: old.clone(),
+            },
+        ),
+    ] {
+        assert_eq!(room.sfu(late), []);
+    }
+    assert!(matches!(
+        room.sfu(SfuReply::SubscribeOffer {
+            who: GUEST,
+            session: new,
+            sdp_offer: Sdp::new("offer"),
+            tracks: Vec::new(),
+        })
+        .as_slice(),
+        [
+            Effect::Send {
+                msg: ServerMsg::SubscribeOffer { .. },
+                ..
+            },
+            ..
+        ]
+    ));
+}
+
+#[test]
+fn a_publish_session_the_sfu_lost_takes_its_tracks_with_it_and_is_replaced() {
+    let mut room = meeting_room();
+    let (audio, mid) = guest_receives_host_audio(&mut room);
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    let old = session(HOST, SessionKind::Publish);
+    room.client(
+        HOST,
+        ClientMsg::PublishOffer {
+            sdp: Sdp::new("offer"),
+            tracks: vec![super::support::local_track(HOST, TrackKind::Video)],
+        },
+    );
+
+    let effects = room.sfu(session_gone(
+        HOST,
+        SfuCall::Publish {
+            session: old.clone(),
+        },
+    ));
+    let [
+        Effect::Broadcast {
+            msg: ServerMsg::State { state },
+            ..
+        },
+        rest @ ..,
+    ] = effects.as_slice()
+    else {
+        panic!("unexpected effects {effects:#?}");
+    };
+    assert!(state.participants.iter().all(|p| p.tracks.is_empty()));
+    // Nothing is closed on the lost session itself, and the client hears nothing yet.
+    assert_eq!(
+        rest,
+        [
+            Effect::StopRecordingTrack {
+                who: HOST,
+                track: audio
+            },
+            Effect::SfuCloseTracks {
+                who: GUEST,
+                session: session(GUEST, SessionKind::Subscribe),
+                mids: vec![mid]
+            },
+            Effect::SfuNewSession {
+                who: HOST,
+                kind: SessionKind::Publish
+            },
+        ]
+    );
+    // An offer before the new session exists is dropped; the reset makes the client offer again.
+    assert_eq!(
+        room.client(
+            HOST,
+            ClientMsg::PublishOffer {
+                sdp: Sdp::new("offer"),
+                tracks: vec![super::support::local_track(HOST, TrackKind::Audio)],
+            }
+        ),
+        []
+    );
+
+    let new = SessionId::new("publish-again");
+    assert_eq!(
+        room.sfu(SfuReply::SessionCreated {
+            who: HOST,
+            kind: SessionKind::Publish,
+            session: new.clone(),
+        }),
+        [Effect::Send {
+            to: HOST,
+            msg: ServerMsg::PublishReset {
+                epoch: SessionEpoch(1)
+            }
+        }]
+    );
+    let tracks = vec![super::support::local_track(HOST, TrackKind::Audio)];
+    assert!(matches!(
+        room.client(
+            HOST,
+            ClientMsg::PublishOffer {
+                sdp: Sdp::new("offer"),
+                tracks: tracks.clone(),
+            }
+        )
+        .as_slice(),
+        [Effect::SfuPublish { session, .. }, Effect::SetAlarm { .. }] if *session == new
+    ));
+    // The late answer for the lost session is not taken for the new one.
+    assert_eq!(
+        room.sfu(SfuReply::Published {
+            who: HOST,
+            session: old,
+            sdp_answer: Sdp::new("late"),
+        }),
+        []
+    );
+    let effects = room.sfu(SfuReply::Published {
+        who: HOST,
+        session: new.clone(),
+        sdp_answer: Sdp::new("answer"),
+    });
+    let track = RemoteTrack {
+        session: new,
+        name: track_name(HOST, TrackKind::Audio),
+    };
+    assert!(effects.contains(&Effect::RecordTrack { who: HOST, track }));
+}
+
+/// A client's report that its peer connection for the current session of `kind` failed.
+fn reset(kind: SessionKind, epoch: u32) -> ClientMsg {
+    ClientMsg::ResetSession {
+        kind,
+        epoch: SessionEpoch(epoch),
+    }
+}
+
+#[test]
+fn a_client_whose_peer_connection_failed_gets_a_new_session_once() {
+    let mut room = meeting_room();
+    // The request times out, so the first one sets the alarm.
+    let deadline = Effect::SetAlarm {
+        at: room.now.after(NEGOTIATION_TIMEOUT_MS),
+    };
+    for (kind, alarm) in [
+        (SessionKind::Subscribe, vec![deadline]),
+        (SessionKind::Publish, vec![]),
+    ] {
+        let mut expected = vec![Effect::SfuNewSession { who: GUEST, kind }];
+        expected.extend(alarm);
+        assert_eq!(room.client(GUEST, reset(kind, 0)), expected);
+        // A reset while the replacement runs changes nothing.
+        assert_eq!(room.client(GUEST, reset(kind, 0)), []);
+    }
+
+    // Someone who is not in yet has no session to reset.
+    room.client(HOST, ClientMsg::Lock { on: true });
+    room.join(OTHER, false, true);
+    assert_eq!(room.client(OTHER, reset(SessionKind::Subscribe, 0)), []);
+}
+
+#[test]
+fn a_late_report_about_a_replaced_sessions_connection_changes_nothing() {
+    let mut room = meeting_room();
+    // The SFU lost the guest's subscribe session, and the room replaced it.
+    room.sfu(session_gone(
+        GUEST,
+        SfuCall::Subscribe {
+            session: session(GUEST, SessionKind::Subscribe),
+        },
+    ));
+    let effects = room.sfu(SfuReply::SessionCreated {
+        who: GUEST,
+        kind: SessionKind::Subscribe,
+        session: SessionId::new("subscribe-again"),
+    });
+    assert!(effects.contains(&Effect::Send {
+        to: GUEST,
+        msg: ServerMsg::SubscribeReset {
+            epoch: SessionEpoch(1)
+        }
+    }));
+    // The old peer connection fails only now; its report names the old epoch.
+    let before = room.state.clone();
+    assert_eq!(room.client(GUEST, reset(SessionKind::Subscribe, 0)), []);
+    assert_eq!(room.state, before);
+    // A report about the new session's connection replaces it.
+    assert!(matches!(
+        room.client(GUEST, reset(SessionKind::Subscribe, 1))
+            .as_slice(),
+        [Effect::SfuNewSession { .. }, ..]
+    ));
+    // A client that reconnects learns the current epochs from its welcome.
+    let effects = room.join(GUEST, false, true);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Send {
+            msg: ServerMsg::Welcome { epochs, .. },
+            ..
+        }] if *epochs == SessionEpochs { publish: SessionEpoch(0), subscribe: SessionEpoch(1) }
+    ));
+}
+
+#[test]
+fn a_replacement_the_sfu_cannot_create_is_requested_again_through_the_alarm() {
+    let mut room = meeting_room();
+    room.client(GUEST, reset(SessionKind::Subscribe, 0));
+    let failed = || SfuReply::Failed {
+        who: GUEST,
+        call: SfuCall::NewSession(SessionKind::Subscribe),
+        cause: FailureCause::Transient,
+    };
+    let retry = room.now.after(SUBSCRIBE_RETRY_MS);
+    assert_eq!(
+        room.sfu(failed()),
+        [
+            Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::Error {
+                    code: ErrorCode::SfuUnavailable
+                }
+            },
+            Effect::SetAlarm { at: retry },
+        ]
+    );
+    // The guest stays in the meeting.
+    assert_eq!(presence(&room, GUEST), Some(Presence::Joined));
+
+    room.now = retry;
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        [
+            Effect::SfuNewSession {
+                who: GUEST,
+                kind: SessionKind::Subscribe
+            },
+            Effect::SetAlarm {
+                at: retry.after(NEGOTIATION_TIMEOUT_MS)
+            },
+        ]
+    );
+    // The guest was told once; a further failure only sets the alarm again.
+    assert_eq!(
+        room.sfu(failed()),
+        [Effect::SetAlarm {
+            at: room.now.after(SUBSCRIBE_RETRY_MS)
+        }]
+    );
+}
+
+#[test]
+fn a_request_for_a_replacement_that_gets_no_reply_times_out_and_is_sent_again() {
+    let mut room = meeting_room();
+    let requested = room.now;
+    assert_eq!(
+        room.client(GUEST, reset(SessionKind::Publish, 0)),
+        [
+            Effect::SfuNewSession {
+                who: GUEST,
+                kind: SessionKind::Publish
+            },
+            Effect::SetAlarm {
+                at: requested.after(NEGOTIATION_TIMEOUT_MS)
+            },
+        ]
+    );
+    // The SFU's reply is lost. Once the request timed out, it counts as failed.
+    room.now = requested.after(NEGOTIATION_TIMEOUT_MS);
+    let retry = room.now.after(SUBSCRIBE_RETRY_MS);
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        [
+            Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::Error {
+                    code: ErrorCode::SfuUnavailable
+                }
+            },
+            Effect::SetAlarm { at: retry },
+        ]
+    );
+    room.now = retry;
+    assert!(matches!(
+        room.apply(Event::AlarmFired).as_slice(),
+        [
+            Effect::SfuNewSession {
+                who: GUEST,
+                kind: SessionKind::Publish
+            },
+            Effect::SetAlarm { .. }
+        ]
+    ));
+    // A late reply to the first request still brings the new session.
+    assert_eq!(
+        room.sfu(SfuReply::SessionCreated {
+            who: GUEST,
+            kind: SessionKind::Publish,
+            session: SessionId::new("publish-again"),
+        }),
+        [Effect::Send {
+            to: GUEST,
+            msg: ServerMsg::PublishReset {
+                epoch: SessionEpoch(1)
+            }
+        }]
+    );
+}
+
+#[test]
+fn messages_about_a_session_being_replaced_are_dropped_without_an_error() {
+    let mut room = meeting_room();
+    guest_receives_host_audio(&mut room);
+    room.publish(GUEST, &[TrackKind::Audio]);
+    room.client(GUEST, reset(SessionKind::Subscribe, 0));
+    room.client(GUEST, reset(SessionKind::Publish, 0));
+    let host_audio = crate::TrackRef {
+        owner: HOST,
+        kind: TrackKind::Audio,
+    };
+    for msg in [
+        ClientMsg::SetLayer {
+            track: host_audio,
+            rid: crate::Rid::Low,
+        },
+        ClientMsg::SubscribeAnswer {
+            sdp: Sdp::new("late"),
+        },
+        ClientMsg::Unpublish {
+            kind: TrackKind::Audio,
+        },
+        ClientMsg::PublishOffer {
+            sdp: Sdp::new("offer"),
+            tracks: vec![super::support::local_track(GUEST, TrackKind::Video)],
+        },
+    ] {
+        let before = room.state.clone();
+        assert_eq!(room.client(GUEST, msg.clone()), [], "{msg:?}");
+        assert_eq!(room.state, before, "{msg:?}");
+    }
 }

@@ -10,10 +10,13 @@
 //! - `GET /api/meetings` (owner only) returns the owner's last meetings, newest first:
 //!   `{"meetings": [{"meeting", "createdAt", "phase", "ended", "transcript"?}]}`.
 //! - `GET /api/meeting/:words` returns `{"recordingPolicy", "phase", "ended"}`, or 404.
-//! - `GET /api/ice` returns the ICE servers for `RTCPeerConnection`.
+//! - `GET /api/ice?meeting=:words` returns `{"iceServers"}` for `RTCPeerConnection` in a known
+//!   meeting, or 404: STUN, plus TURN with fresh credentials if the secrets `TURN_KEY_ID` and
+//!   `TURN_KEY_API_TOKEN` are set. TURN traffic is billed, so strangers get no credentials.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
 //!   A socket opened with the owner's session cookie joins as host (D32 in `docs/architecture`).
 
+mod ice;
 mod internal;
 mod meetings;
 mod owner;
@@ -50,8 +53,6 @@ const MEETING_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 const _: () = assert!(MEETING_TTL_SECS * 1000 > SCHEDULED_TTL_MS);
 /// Draws of fresh words before giving up when all drawn combinations are taken.
 const WORD_DRAWS: usize = 8;
-/// Cloudflare's free STUN server. TURN credentials follow in phase 2.
-const STUN_URL: &str = "stun:stun.cloudflare.com:3478";
 
 /// Where new rooms run and store data
 /// (<https://developers.cloudflare.com/durable-objects/reference/data-location/>).
@@ -113,18 +114,6 @@ struct LoginRequest {
     password: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IceServers {
-    ice_servers: Vec<IceServer>,
-}
-
-/// An `RTCIceServer`.
-#[derive(Serialize)]
-struct IceServer {
-    urls: Vec<&'static str>,
-}
-
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let jurisdiction = match Jurisdiction::from_var(&env.var(ROOM_JURISDICTION)?.to_string()) {
@@ -152,13 +141,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/api/new", new_meeting)
         .get_async("/api/meetings", past_meetings)
         .get_async("/api/meeting/:words", meeting_info)
-        .get("/api/ice", |_, _| {
-            Response::from_json(&IceServers {
-                ice_servers: vec![IceServer {
-                    urls: vec![STUN_URL],
-                }],
-            })
-        })
+        .get_async("/api/ice", ice_servers)
         .get_async("/ws/:words", join_meeting)
         .run(req, env)
         .await
@@ -379,6 +362,22 @@ async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Respons
     room.fetch_with_request(forwarded).await
 }
 
+/// `GET /api/ice?meeting=:words`: the ICE servers, for a meeting that exists only.
+async fn ice_servers(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+    let url = req.url()?;
+    let meeting = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "meeting").then_some(value));
+    let known = match meeting {
+        Some(words) => room_of(&ctx.kv(MEETINGS)?, &words).await?.is_some(),
+        None => false,
+    };
+    if !known {
+        return Response::error("unknown meeting", 404);
+    }
+    Response::from_json(&ice::ice_servers(&ctx.env).await)
+}
+
 /// Draws words until a combination is not mapped in KV.
 async fn unused_words(kv: &KvStore) -> Result<Option<MeetingId>> {
     for _ in 0..WORD_DRAWS {
@@ -393,13 +392,10 @@ async fn unused_words(kv: &KvStore) -> Result<Option<MeetingId>> {
 /// The room for the `:words` route parameter, matched case-insensitively; `None` for malformed
 /// or unknown words.
 async fn room_stub(ctx: &RouteContext<Config>) -> Result<Option<worker::Stub>> {
-    let Some(words) = ctx
-        .param("words")
-        .and_then(|words| MeetingId::parse(&words.to_ascii_lowercase()).ok())
-    else {
+    let Some(words) = ctx.param("words") else {
         return Ok(None);
     };
-    let Some(room) = ctx.kv(MEETINGS)?.get(words.as_str()).text().await? else {
+    let Some(room) = room_of(&ctx.kv(MEETINGS)?, words).await? else {
         return Ok(None);
     };
     Ok(Some(
@@ -407,6 +403,15 @@ async fn room_stub(ctx: &RouteContext<Config>) -> Result<Option<worker::Stub>> {
             .id_from_string(&room)?
             .get_stub()?,
     ))
+}
+
+/// The id (hex) of the room for `words`, matched case-insensitively; `None` for malformed or
+/// unknown words.
+async fn room_of(kv: &KvStore, words: &str) -> Result<Option<String>> {
+    let Ok(words) = MeetingId::parse(&words.to_ascii_lowercase()) else {
+        return Ok(None);
+    };
+    Ok(kv.get(words.as_str()).text().await?)
 }
 
 /// The Worker's clock.

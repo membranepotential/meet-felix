@@ -141,3 +141,7 @@ pub struct TrackResult {
 /// `errorCode` of a close result whose track is absent or already closed, which satisfies the
 /// close.
 pub const CLOSE_TRACK_ERROR: &str = "close_track_error";
+
+/// `errorCode` of a request on a session the SFU no longer serves, e.g. "Session appears to be
+/// disconnected" with HTTP 410 (seen in production on 2026-10-09).
+pub const SESSION_ERROR: &str = "session_error";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { INITIAL, reduce, type ClientState } from './client-state.ts';
-import type { ParticipantView, RoomView } from './protocol.ts';
+import type { ParticipantView, RoomView, SessionEpochs } from './protocol.ts';
 
 const person = (
 	id: number,
@@ -25,8 +25,10 @@ const room = (extra: Partial<RoomView> = {}): RoomView => ({
 	...extra
 });
 
+const EPOCHS: SessionEpochs = { publish: 0, subscribe: 0 };
+
 const welcomed = (you = 1, view = room()): ClientState =>
-	reduce(INITIAL, { type: 'welcome', you, state: view, resume: 'r1' })[0];
+	reduce(INITIAL, { type: 'welcome', you, state: view, resume: 'r1', epochs: EPOCHS })[0];
 
 describe('reduce', () => {
 	it('enters on welcome, keeps the resume token and asks for fresh media', () => {
@@ -34,18 +36,31 @@ describe('reduce', () => {
 			type: 'welcome',
 			you: 1,
 			state: room(),
-			resume: 'r1'
+			resume: 'r1',
+			epochs: EPOCHS
 		});
 		expect(state.stage).toEqual({ kind: 'in', you: 1, room: room() });
 		expect(state.resume).toBe('r1');
-		expect(commands).toEqual([{ kind: 'welcomed', fresh: true }]);
+		expect(commands).toEqual([{ kind: 'welcomed', fresh: true, epochs: EPOCHS }]);
 	});
 
 	it('keeps media after a resumed welcome but renews it for a new participant id', () => {
-		const resumed = reduce(welcomed(1), { type: 'welcome', you: 1, state: room(), resume: 'r1' });
-		expect(resumed[1]).toEqual([{ kind: 'welcomed', fresh: false }]);
-		const replaced = reduce(welcomed(1), { type: 'welcome', you: 7, state: room(), resume: 'r2' });
-		expect(replaced[1]).toEqual([{ kind: 'welcomed', fresh: true }]);
+		const resumed = reduce(welcomed(1), {
+			type: 'welcome',
+			you: 1,
+			state: room(),
+			resume: 'r1',
+			epochs: EPOCHS
+		});
+		expect(resumed[1]).toEqual([{ kind: 'welcomed', fresh: false, epochs: EPOCHS }]);
+		const replaced = reduce(welcomed(1), {
+			type: 'welcome',
+			you: 7,
+			state: room(),
+			resume: 'r2',
+			epochs: EPOCHS
+		});
+		expect(replaced[1]).toEqual([{ kind: 'welcomed', fresh: true, epochs: EPOCHS }]);
 		expect(replaced[0].resume).toBe('r2');
 	});
 
@@ -105,6 +120,17 @@ describe('reduce', () => {
 		]);
 		expect(reduce(welcomed(), { type: 'publishAnswer', sdp: 'a' })[1]).toEqual([
 			{ kind: 'publish-answer', sdp: 'a' }
+		]);
+	});
+
+	it("turns the room's session resets into new connections of that kind", () => {
+		expect(reduce(welcomed(), { type: 'subscribeReset', epoch: 1 })).toEqual([
+			welcomed(),
+			[{ kind: 'subscribe-reset', epoch: 1 }]
+		]);
+		expect(reduce(welcomed(), { type: 'publishReset', epoch: 2 })).toEqual([
+			welcomed(),
+			[{ kind: 'publish-reset', epoch: 2 }]
 		]);
 	});
 });

@@ -68,6 +68,21 @@ describe('trackName', () => {
 	});
 });
 
+/** Adds the connection state of `RTCPeerConnection` to a fake; `fail()` makes it fail. */
+function failable<T extends object>(fake: T) {
+	const events = new EventTarget();
+	const pc = Object.assign(fake, {
+		connectionState: 'new' as RTCPeerConnectionState,
+		addEventListener: events.addEventListener.bind(events),
+		removeEventListener: events.removeEventListener.bind(events)
+	});
+	const fail = () => {
+		pc.connectionState = 'failed';
+		events.dispatchEvent(new Event('connectionstatechange'));
+	};
+	return { pc, fail };
+}
+
 /** The part of `RTCPeerConnection` the publisher uses, answering every offer at once. */
 function fakePeerConnection() {
 	const transceivers: { mid: string | null; stop: () => void }[] = [];
@@ -88,7 +103,8 @@ function fakePeerConnection() {
 		setRemoteDescription: () => Promise.resolve(),
 		close: () => {}
 	};
-	return { pc: pc as unknown as RTCPeerConnection, transceivers };
+	const { fail } = failable(pc);
+	return { pc: pc as unknown as RTCPeerConnection, transceivers, fail };
 }
 
 describe('Publisher', () => {
@@ -96,8 +112,9 @@ describe('Publisher', () => {
 
 	/** A publisher whose offers the room answers right away while `connected` is true. */
 	function setup() {
-		const { pc, transceivers } = fakePeerConnection();
+		const { pc, transceivers, fail } = fakePeerConnection();
 		const sent: ClientMsg[] = [];
+		const connectionFailed = vi.fn();
 		let connected = true;
 		const publisher: Publisher = new Publisher(
 			pc,
@@ -107,11 +124,19 @@ describe('Publisher', () => {
 				if (msg.type === 'publishOffer') queueMicrotask(() => publisher.answer('answer'));
 				return true;
 			},
-			() => {}
+			() => {},
+			connectionFailed
 		);
 		const setConnected = (on: boolean) => (connected = on);
-		return { publisher, sent, transceivers, setConnected };
+		return { publisher, sent, transceivers, setConnected, fail, connectionFailed };
 	}
+
+	it('reports a failed connection once', () => {
+		const { fail, connectionFailed } = setup();
+		fail();
+		fail();
+		expect(connectionFailed).toHaveBeenCalledOnce();
+	});
 
 	it('unpublishes a camera turned off and stops its transceiver', async () => {
 		const { publisher, sent, transceivers } = setup();
@@ -153,21 +178,31 @@ function fakeSubscribePeerConnection() {
 		close: () => {}
 	};
 	const offerMids = (next: string[]) => (mids = next);
-	return { pc, offerMids };
+	const { fail } = failable(pc);
+	return { pc, offerMids, fail };
 }
 
 describe('Subscriber', () => {
 	function setup() {
-		const { pc, offerMids } = fakeSubscribePeerConnection();
+		const { pc, offerMids, fail } = fakeSubscribePeerConnection();
 		const answers: Sdp[] = [];
 		const updates: { tracks: RemoteTracks; delivered: TrackRef[] }[] = [];
+		const connectionFailed = vi.fn();
 		const subscriber = new Subscriber(
 			pc as unknown as RTCPeerConnection,
 			(sdp) => answers.push(sdp),
-			(tracks, delivered) => updates.push({ tracks, delivered })
+			(tracks, delivered) => updates.push({ tracks, delivered }),
+			connectionFailed
 		);
-		return { subscriber, pc, offerMids, answers, updates };
+		return { subscriber, pc, offerMids, answers, updates, fail, connectionFailed };
 	}
+
+	it('reports a failed connection once', () => {
+		const { fail, connectionFailed } = setup();
+		fail();
+		fail();
+		expect(connectionFailed).toHaveBeenCalledOnce();
+	});
 
 	it('answers an offer that carries no track', async () => {
 		const { subscriber, pc, answers, updates } = setup();

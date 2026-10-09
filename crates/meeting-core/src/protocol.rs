@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
 use crate::ids::{
-    DisplayName, MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, TrackName, TranscriptRef,
+    DisplayName, MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, SessionEpoch, TrackName,
+    TranscriptRef,
 };
 
 /// A participant's authority in the room.
@@ -31,6 +32,44 @@ pub enum TrackKind {
     Video,
     /// Screen share.
     Screen,
+}
+
+/// Which of a participant's two SFU sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
+#[serde(rename_all = "camelCase")]
+pub enum SessionKind {
+    /// Carries the participant's own tracks; the client sends offers.
+    Publish,
+    /// Carries other participants' tracks; the SFU sends offers.
+    Subscribe,
+}
+
+/// The epochs of a participant's current SFU sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
+pub struct SessionEpochs {
+    /// The publish session's.
+    pub publish: SessionEpoch,
+    /// The subscribe session's.
+    pub subscribe: SessionEpoch,
+}
+
+impl SessionEpochs {
+    /// The epoch of the session of `kind`.
+    pub fn of(self, kind: SessionKind) -> SessionEpoch {
+        match kind {
+            SessionKind::Publish => self.publish,
+            SessionKind::Subscribe => self.subscribe,
+        }
+    }
+
+    pub(crate) fn of_mut(&mut self, kind: SessionKind) -> &mut SessionEpoch {
+        match kind {
+            SessionKind::Publish => &mut self.publish,
+            SessionKind::Subscribe => &mut self.subscribe,
+        }
+    }
 }
 
 /// A simulcast layer. The publisher must use the serialized names (`f`, `h`, `q`) as its
@@ -236,6 +275,17 @@ pub enum ClientMsg {
         /// The preferred layer.
         rid: Rid,
     },
+    /// Your peer connection for this session failed (`connectionState` became `failed`): the
+    /// room replaces the SFU session and answers with [`ServerMsg::PublishReset`] or
+    /// [`ServerMsg::SubscribeReset`]. Ignored while the replacement runs, and if `epoch` is not
+    /// the session's current one, i.e. the failed connection belonged to an earlier session.
+    ResetSession {
+        /// Which of your sessions.
+        kind: SessionKind,
+        /// The epoch of the session whose connection failed, from [`ServerMsg::Welcome`] or the
+        /// last reset of that kind.
+        epoch: SessionEpoch,
+    },
     /// Host: lock or unlock the room. Unlocking admits everyone knocking.
     Lock {
         /// Whether guests must knock from now on.
@@ -280,6 +330,9 @@ pub enum ServerMsg {
         state: RoomView,
         /// Send this in [`ClientMsg::Join`] to take your place again if the socket drops.
         resume: ResumeToken,
+        /// Your current SFU sessions. After a reconnect, a peer connection made for an older
+        /// epoch belongs to a replaced session: replace it as on a reset.
+        epochs: SessionEpochs,
     },
     /// The room changed.
     State {
@@ -300,6 +353,18 @@ pub enum ServerMsg {
         sdp: Sdp,
         /// Which transceiver carries which participant's track.
         tracks: Vec<IncomingTrack>,
+    },
+    /// The room replaced your publish session: close the publisher's peer connection, open a
+    /// new one and publish your current tracks again with a new [`ClientMsg::PublishOffer`].
+    PublishReset {
+        /// The new session's epoch.
+        epoch: SessionEpoch,
+    },
+    /// The room replaced your subscribe session: close the subscriber's peer connection and
+    /// open a new one. Every [`ServerMsg::SubscribeOffer`] after this applies to the new one.
+    SubscribeReset {
+        /// The new session's epoch.
+        epoch: SessionEpoch,
     },
     /// Hosts only: someone is waiting to be admitted.
     Knock {
@@ -351,7 +416,8 @@ pub enum ErrorCode {
     UnexpectedAnswer,
     /// You do not receive that track.
     NotSubscribed,
-    /// The SFU could not create your sessions; reconnect later.
+    /// The SFU could not create a session for you. Before you joined, the room lets you go:
+    /// reconnect later. Once you are in, the room keeps trying to replace a lost session.
     SfuUnavailable,
     /// The SFU rejected your publish offer, or did not answer it in time.
     PublishFailed,

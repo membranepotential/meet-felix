@@ -8,8 +8,8 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use meeting_core::{
-    Effect, LocalTrack, Mid, OfferedTrack, ParticipantId, RemoteTrack, Rid, Sdp, SessionId,
-    SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
+    Effect, FailureCause, LocalTrack, Mid, OfferedTrack, ParticipantId, RemoteTrack, Rid, Sdp,
+    SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
 };
 use serde_json::{Value, json};
 
@@ -255,6 +255,7 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
         ready(client(&answered).perform(&effect)),
         Ok(Some(SfuReply::Published {
             who: ALICE,
+            session: SessionId::new(PUBLISHER),
             sdp_answer: Sdp::new("answer"),
         }))
     );
@@ -295,6 +296,7 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
         ready(client(&partly).perform(&two_tracks)),
         Ok(Some(SfuReply::Published {
             who: ALICE,
+            session: SessionId::new(PUBLISHER),
             sdp_answer: Sdp::new("answer"),
         }))
     );
@@ -315,7 +317,10 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
             },
             reply: Some(SfuReply::Failed {
                 who: ALICE,
-                call: SfuCall::Publish,
+                call: SfuCall::Publish {
+                    session: SessionId::new(PUBLISHER),
+                },
+                cause: FailureCause::Transient,
             }),
         })
     );
@@ -352,6 +357,7 @@ fn subscribe_effect_maps_mids_and_drops_rejected_tracks() {
         ready(client(&sfu).perform(&effect)),
         Ok(Some(SfuReply::SubscribeOffer {
             who: ALICE,
+            session: SessionId::new(SUBSCRIBER),
             sdp_offer: Sdp::new("offer"),
             tracks: vec![OfferedTrack {
                 mid: Mid::new("5"),
@@ -389,6 +395,7 @@ fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
         ready(client(&sfu).perform(&effect)),
         Ok(Some(SfuReply::SubscribeOffer {
             who: ALICE,
+            session: SessionId::new(SUBSCRIBER),
             sdp_offer: Sdp::new("offer"),
             tracks: Vec::new(),
         }))
@@ -410,7 +417,10 @@ fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
             },
             reply: Some(SfuReply::Failed {
                 who: ALICE,
-                call: SfuCall::Subscribe,
+                call: SfuCall::Subscribe {
+                    session: SessionId::new(SUBSCRIBER),
+                },
+                cause: FailureCause::Transient,
             }),
         })
     );
@@ -463,7 +473,10 @@ fn api_and_http_errors_become_failed_replies() {
     let accepted = Canned::new([(200, json!({}))]);
     assert_eq!(
         ready(client(&accepted).perform(&effect)),
-        Ok(Some(SfuReply::Renegotiated { who: ALICE }))
+        Ok(Some(SfuReply::Renegotiated {
+            who: ALICE,
+            session: SessionId::new(SUBSCRIBER),
+        }))
     );
 
     let api_error = Canned::new([(
@@ -480,7 +493,10 @@ fn api_and_http_errors_become_failed_replies() {
             },
             reply: Some(SfuReply::Failed {
                 who: ALICE,
-                call: SfuCall::Renegotiate,
+                call: SfuCall::Renegotiate {
+                    session: SessionId::new(SUBSCRIBER),
+                },
+                cause: FailureCause::Transient,
             }),
         })
     );
@@ -493,4 +509,56 @@ fn api_and_http_errors_become_failed_replies() {
             ..
         })
     ));
+}
+
+/// The answer the live SFU gave on 2026-10-09 to every subscribe after the phone's peer
+/// connection dropped: the session is gone, and the room must replace it.
+#[test]
+fn a_session_the_sfu_declares_gone_is_reported_as_such() {
+    let effect = Effect::SfuSubscribe {
+        who: ALICE,
+        session: SessionId::new(SUBSCRIBER),
+        tracks: vec![RemoteTrack {
+            session: SessionId::new(PUBLISHER),
+            name: TrackName::new("camera"),
+        }],
+    };
+    let gone = Canned::new([(
+        410,
+        json!({
+          "errorCode": "session_error",
+          "errorDescription": "Session appears to be disconnected. Please check if the PeerConnection is connected."
+        }),
+    )]);
+    assert_eq!(
+        ready(client(&gone).perform(&effect)).map_err(|f| f.reply),
+        Err(Some(SfuReply::Failed {
+            who: ALICE,
+            call: SfuCall::Subscribe {
+                session: SessionId::new(SUBSCRIBER),
+            },
+            cause: FailureCause::SessionGone,
+        }))
+    );
+
+    let api = |status, code: &str| SfuError::Api {
+        status,
+        code: code.to_owned(),
+        description: String::new(),
+    };
+    for (error, cause) in [
+        (SfuError::Status { status: 410 }, FailureCause::SessionGone),
+        (api(406, "session_error"), FailureCause::SessionGone),
+        (
+            api(406, "invalid_session_description"),
+            FailureCause::Transient,
+        ),
+        (SfuError::Status { status: 503 }, FailureCause::Transient),
+        (
+            SfuError::Transport("reset".to_owned()),
+            FailureCause::Transient,
+        ),
+    ] {
+        assert_eq!(error.cause(), cause, "{error}");
+    }
 }

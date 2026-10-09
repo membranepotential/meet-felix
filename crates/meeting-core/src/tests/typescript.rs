@@ -14,7 +14,7 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     ));
     assert!(ClientMsg::DECL.contains(r#"{ type: "setConsent"; consent: boolean }"#));
     assert!(ServerMsg::DECL.contains(
-        r#"{ type: "welcome"; you: ParticipantId; state: RoomView; resume: ResumeToken }"#
+        r#"{ type: "welcome"; you: ParticipantId; state: RoomView; resume: ResumeToken; epochs: SessionEpochs }"#
     ));
     assert!(ServerMsg::DECL.contains(r#"{ type: "consentRequired" }"#));
     assert!(ServerMsg::DECL.contains(r#"{ type: "ended"; transcript?: TranscriptRef }"#));
@@ -25,6 +25,12 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     assert!(crate::Presence::DECL.contains(r#""waitingForHost""#));
     assert!(ClientMsg::DECL.contains(r#"{ type: "unpublish"; kind: TrackKind }"#));
     assert!(crate::Rid::DECL.contains(r#""q" | "h" | "f""#));
+    assert!(
+        ClientMsg::DECL
+            .contains(r#"{ type: "resetSession"; kind: SessionKind; epoch: SessionEpoch }"#)
+    );
+    assert!(crate::SessionKind::DECL.contains(r#""publish" | "subscribe""#));
+    assert!(ServerMsg::DECL.contains(r#"{ type: "subscribeReset"; epoch: SessionEpoch }"#));
 }
 
 /// Every [`ServerMsg`] variant survives JSON, as `parseServerMsg` reads it.
@@ -61,6 +67,7 @@ fn every_server_msg_round_trips_through_json() {
             you,
             state: state.clone(),
             resume: ResumeToken::from_random([7; 16]),
+            epochs: crate::SessionEpochs::default(),
         },
         ServerMsg::State { state },
         ServerMsg::Waiting,
@@ -76,6 +83,12 @@ fn every_server_msg_round_trips_through_json() {
                     kind: TrackKind::Screen,
                 },
             }],
+        },
+        ServerMsg::PublishReset {
+            epoch: crate::SessionEpoch(1),
+        },
+        ServerMsg::SubscribeReset {
+            epoch: crate::SessionEpoch(2),
         },
         ServerMsg::Knock { who: you },
         ServerMsg::ConsentRequired,
@@ -103,6 +116,8 @@ fn every_server_msg_round_trips_through_json() {
             ServerMsg::Kicked => 8,
             ServerMsg::Ended { .. } => 9,
             ServerMsg::Error { .. } => 10,
+            ServerMsg::PublishReset { .. } => 11,
+            ServerMsg::SubscribeReset { .. } => 12,
         })
         .collect();
     assert_eq!(covered.len(), all.len());
@@ -143,6 +158,16 @@ fn json_uses_camel_case_tags_and_omits_absent_options() {
         msg,
         ClientMsg::Unpublish {
             kind: crate::TrackKind::Video
+        }
+    );
+    let msg: ClientMsg =
+        serde_json::from_str(r#"{"type":"resetSession","kind":"subscribe","epoch":2}"#)
+            .expect("valid");
+    assert_eq!(
+        msg,
+        ClientMsg::ResetSession {
+            kind: crate::SessionKind::Subscribe,
+            epoch: crate::SessionEpoch(2),
         }
     );
 }

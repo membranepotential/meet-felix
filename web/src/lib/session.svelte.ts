@@ -22,8 +22,12 @@ import type {
 	ParticipantId,
 	ParticipantView,
 	ServerMsg,
+	SessionEpoch,
+	SessionEpochs,
+	SessionKind,
 	TrackKind
 } from './protocol.ts';
+import { SessionResets } from './resets.ts';
 import {
 	NO_REMOTE_TRACKS,
 	peerConnection,
@@ -53,10 +57,11 @@ const KIND_LABEL: Record<TrackKind, string> = {
 	screen: 'screen'
 };
 
-interface MediaLink {
-	publisher: Publisher;
-	subscriber: Subscriber;
-}
+/** The quiet notice while the room replaces a session whose connection failed. */
+const RECONNECTING: Record<SessionKind, string> = {
+	publish: 'Reconnecting your camera and microphone…',
+	subscribe: 'Reconnecting to the others…'
+};
 
 /** Participants who get a tile: admitted, not waiting outside. */
 const isInRoom = (p: ParticipantView) => p.presence === 'joined' || p.presence === 'connecting';
@@ -87,7 +92,14 @@ export class Session {
 	readonly #signaling: SignalingClient;
 	readonly #ice: Promise<RTCIceServer[]>;
 	#join: JoinRequest;
-	#link: Promise<MediaLink> | null = null;
+	/** The two SFU peer connections; `null` until the first welcome. */
+	#publisher: Promise<Publisher> | null = null;
+	#subscriber: Promise<Subscriber> | null = null;
+	/** The epochs of the room's sessions the two connections belong to. */
+	#epochs: SessionEpochs = { publish: 0, subscribe: 0 };
+	readonly #resets = new SessionResets((kind, epoch) =>
+		this.#signaling.send({ type: 'resetSession', kind, epoch })
+	);
 	/** The first pull often races the publisher's connection and succeeds on the room's retry. */
 	readonly #subscribeNotice = new GraceNotice(SUBSCRIBE_GRACE_MS, (text) =>
 		this.toasts.show(text, 'alert')
@@ -110,7 +122,7 @@ export class Session {
 			this.#signaling.send({ type: 'setLayer', track, rid })
 		);
 		// Fetched once, while the socket connects; TURN credentials last hours.
-		this.#ice = getIceServers().then((result) => {
+		this.#ice = getIceServers(meeting).then((result) => {
 			if (result.ok) return result.value;
 			console.warn('ICE servers unavailable, using STUN only', result.error);
 			return FALLBACK_ICE;
@@ -124,7 +136,7 @@ export class Session {
 		this.#stopSync = $effect.root(() => {
 			$effect(() => {
 				const outgoing = this.#media.outgoing;
-				void this.#link?.then(({ publisher }) => publisher.sync(outgoing));
+				void this.#publisher?.then((publisher) => publisher.sync(outgoing));
 			});
 		});
 	}
@@ -164,7 +176,7 @@ export class Session {
 			const published = next.stage.room.participants.flatMap((p) =>
 				p.tracks.map((kind) => ({ owner: p.id, kind }))
 			);
-			void this.#link?.then(({ subscriber }) => subscriber.retain(published));
+			void this.#subscriber?.then((subscriber) => subscriber.retain(published));
 		}
 	}
 
@@ -175,6 +187,7 @@ export class Session {
 		this.#stopSync();
 		this.#signaling.close();
 		this.#closeLink();
+		this.#resets.cancel();
 		this.#subscribeNotice.cancel();
 		this.layers.dispose();
 		this.#releaseWakeLock();
@@ -189,18 +202,23 @@ export class Session {
 				console.warn(command.text);
 				return;
 			case 'welcomed':
-				if (command.fresh || this.#link === null) this.#openLink();
-				else void this.#link.then(({ publisher }) => publisher.retryFailed());
+				this.#welcomed(command.fresh, command.epochs);
 				return;
 			case 'publish-answer':
-				void this.#link?.then(({ publisher }) => publisher.answer(command.sdp));
+				void this.#publisher?.then((publisher) => publisher.answer(command.sdp));
 				return;
 			case 'publish-rejected':
-				void this.#link?.then(({ publisher }) => publisher.rejected());
+				void this.#publisher?.then((publisher) => publisher.rejected());
+				return;
+			case 'publish-reset':
+				this.#openPublisher(command.epoch);
 				return;
 			case 'subscribe-offer':
 				this.#subscribeNotice.cancel();
-				void this.#link?.then(({ subscriber }) => subscriber.offer(command.sdp, command.tracks));
+				void this.#subscriber?.then((subscriber) => subscriber.offer(command.sdp, command.tracks));
+				return;
+			case 'subscribe-reset':
+				this.#openSubscriber(command.epoch);
 				return;
 			case 'subscribe-retrying':
 				this.#subscribeNotice.start(command.notice);
@@ -217,38 +235,84 @@ export class Session {
 		}
 	}
 
-	/** New SFU sessions on the room side: new peer connections here, everything republished. */
-	#openLink(): void {
-		this.#closeLink();
-		const link: Promise<MediaLink> = this.#ice.then((iceServers) => {
-			const publisher = new Publisher(
+	/**
+	 * A new participant opens new peer connections. After a reconnect, the old ones stay,
+	 * except a connection whose session the room replaced while the socket was down: its reset
+	 * never arrived, but the welcome's epochs tell.
+	 */
+	#welcomed(fresh: boolean, epochs: SessionEpochs): void {
+		const current = (kind: SessionKind) => !fresh && this.#epochs[kind] === epochs[kind];
+		if (this.#publisher === null || !current('publish')) this.#openPublisher(epochs.publish);
+		else void this.#publisher.then((publisher) => publisher.retryFailed());
+		if (this.#subscriber === null || !current('subscribe')) this.#openSubscriber(epochs.subscribe);
+	}
+
+	/**
+	 * The room's publish session of `epoch`: a new peer connection that publishes it all again.
+	 */
+	#openPublisher(epoch: SessionEpoch): void {
+		this.#closePublisher();
+		this.#epochs = { ...this.#epochs, publish: epoch };
+		const publisher: Promise<Publisher> = this.#ice.then((iceServers) => {
+			const created = new Publisher(
 				peerConnection(iceServers),
 				(msg) => this.#signaling.send(msg),
-				(kinds, reason) => this.#onPublishFailed(kinds, reason)
-			);
-			const subscriber = new Subscriber(
-				peerConnection(iceServers),
-				(sdp) => this.#signaling.send({ type: 'subscribeAnswer', sdp }),
-				(tracks, delivered) => {
-					// A late answer from a replaced link must not overwrite the current tracks.
-					if (this.#link !== link) return;
-					this.remote = tracks;
-					this.layers.received(delivered);
+				(kinds, reason) => this.#onPublishFailed(kinds, reason),
+				() => {
+					if (this.#publisher === publisher) this.#onConnectionFailed('publish', epoch);
 				}
 			);
-			publisher.sync(this.#media.outgoing);
-			return { publisher, subscriber };
+			created.sync(this.#media.outgoing);
+			return created;
 		});
-		this.#link = link;
+		this.#publisher = publisher;
+	}
+
+	/** The room's subscribe session of `epoch`: a new peer connection that receives nothing yet. */
+	#openSubscriber(epoch: SessionEpoch): void {
+		this.#closeSubscriber();
+		this.#epochs = { ...this.#epochs, subscribe: epoch };
+		const subscriber: Promise<Subscriber> = this.#ice.then(
+			(iceServers) =>
+				new Subscriber(
+					peerConnection(iceServers),
+					(sdp) => this.#signaling.send({ type: 'subscribeAnswer', sdp }),
+					(tracks, delivered) => {
+						// A late answer from a replaced connection must not overwrite the current tracks.
+						if (this.#subscriber !== subscriber) return;
+						this.remote = tracks;
+						this.layers.received(delivered);
+					},
+					() => {
+						if (this.#subscriber === subscriber) this.#onConnectionFailed('subscribe', epoch);
+					}
+				)
+		);
+		this.#subscriber = subscriber;
 	}
 
 	#closeLink(): void {
-		void this.#link?.then(({ publisher, subscriber }) => {
-			publisher.close();
-			subscriber.close();
-		});
-		this.#link = null;
+		this.#closePublisher();
+		this.#closeSubscriber();
+	}
+
+	#closePublisher(): void {
+		void this.#publisher?.then((publisher) => publisher.close());
+		this.#publisher = null;
+		this.#resets.done('publish');
+	}
+
+	#closeSubscriber(): void {
+		void this.#subscriber?.then((subscriber) => subscriber.close());
+		this.#subscriber = null;
+		this.#resets.done('subscribe');
 		this.remote = NO_REMOTE_TRACKS;
+		this.layers.reset();
+	}
+
+	/** The peer connection for a session failed: ask the room for a new one, quietly. */
+	#onConnectionFailed(kind: SessionKind, epoch: SessionEpoch): void {
+		if (this.#resets.failed(kind, epoch)) this.toasts.show(RECONNECTING[kind], 'info');
 	}
 
 	#onPublishFailed(kinds: TrackKind[], reason: PublishFailure): void {

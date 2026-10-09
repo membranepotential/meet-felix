@@ -155,7 +155,7 @@ Rejected:
 Consequences: we cannot choose where media is processed
 ([D5](#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)), and we
 build recording ourselves
-([D16](../recording/README.md#d16-capture-each-speakers-audio-on-the-server-in-30-second-chunks-2026-10-09)).
+([D16](../recording/README.md#d16-capture-each-speakers-audio-on-the-server-as-oggopus-chunks-of-up-to-30-seconds-2026-10-09)).
 
 ## D2: A pure Rust core with imperative shells (2026-10-09)
 
@@ -288,7 +288,7 @@ truth for what exists today.
 | Component | Where | Role |
 |---|---|---|
 | `meeting-core` | [`crates/meeting-core`](../../crates/meeting-core/) | Pure Rust library for `wasm32` and native: `RoomState`, participants, tracks, roles, `Recording`, `ClientMsg`/`ServerMsg` (serde + tsify), `Event`, `Effect`, `step()`. Planned: simulcast layer policy, the state machine that cuts chunks and gates silence, transcript merge. |
-| `sfu-api` | `crates/sfu-api` (not started) | Typed client for the SFU HTTPS API and the adapter protobuf (`prost`). |
+| `sfu-api` | `crates/sfu-api` | Typed client for the SFU HTTPS API (the adapter protobuf follows in phase 3). |
 | `worker` | [`crates/worker`](../../crates/worker/) | Router (owner session cookie or bearer on `/api/login`, `/api/new`, `/api/meetings`; words → DO lookup; static assets); `RoomObject`; `RecorderObject` (adapter ingress, resampling, one R2 `put` per chunk, transcript job in the alarm loop, R2 multipart stitch); `Transcriber` trait with `WhisperTurbo` and `Nova3Http` implementations through `worker::Ai`. |
 | `web` | [`web/`](../../web/) | SvelteKit static site: new-meeting page, pre-join with consent, meeting grid, device picker, end-of-meeting page, transcript page. Loads the core as WASM built with `wasm-pack`. |
 | Realtime SFU | `rtc.live.cloudflare.com/v1` | Forwards media; sessions, tracks, simulcast, adapters ([media/](../media/README.md)). |
@@ -307,7 +307,7 @@ truth for what exists today.
 | **2. Multi-party** | Simulcast + per-tile layer selection, active-speaker detection, desktop screen share with `contentHint: "detail"`, room lock/knock, host controls (mute, kick, end), ICE restart and network-switch reconnect, responsive grid. | 8 participants incl. one phone and one shared screen for 30 min without manual intervention. |
 | **3. Recording + transcript** | `RecorderObject`, consent flow and badge, chunking, R2 layout, transcription job, transcript page (`/t/{token}`), stitched per-speaker WAVs. | A recorded 4-person meeting yields a correctly attributed German/English transcript within 15 minutes of ending; every participant saw the notice. |
 | **4. Mobile polish** | iOS background handling, Wake Lock, PWA manifest, speaker selection, Picture-in-Picture. | Checklist run on iPhone, iPad, Android, desktop Chrome/Firefox/Safari. |
-| **5. Operations and extras** | Cloudflare usage dashboard, monthly budget alert, join rate limits, retention cleanup ([D18](../recording/README.md#d18-keep-recordings-and-transcripts-indefinitely-for-now-2026-10-09)), docs; transcript by email ([D19](../recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09)); cancel Workspace. | A month of real use stays under 10 €. |
+| **5. Operations and extras** | Cloudflare usage dashboard, monthly budget alert, join rate limits, retention cleanup ([D18](../recording/README.md#d18-keep-the-audio-48-hours-keep-transcripts-until-the-owner-deletes-them-2026-10-09)), docs; transcript by email ([D19](../recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09)); cancel Workspace. | A month of real use stays under 10 €. |
 
 Phases 1–3 are the bulk of the work; phase 3 is mostly a Rust port of
 Cloudflare's `ai-tts-stt` example plus R2. Plan v2 had a retention cleanup by

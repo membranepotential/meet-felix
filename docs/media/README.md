@@ -14,13 +14,14 @@ Decisions on this page:
 - [D12: Codecs are H.264 first, VP8 as fallback, no AV1 (2026-10-09)](#d12-codecs-are-h264-first-vp8-as-fallback-no-av1-2026-10-09)
 - [D13: Detect features, not browsers; screen share is desktop-only (2026-10-09)](#d13-detect-features-not-browsers-screen-share-is-desktop-only-2026-10-09)
 - [D14: Calls work in a plain browser tab, and iOS gets defensive handling (2026-10-09)](#d14-calls-work-in-a-plain-browser-tab-and-ios-gets-defensive-handling-2026-10-09)
+- [D33: A dead SFU session is replaced, not retried (2026-10-09)](#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09)
 
 Code: [`crates/meeting-core/src/shell.rs`](../../crates/meeting-core/src/shell.rs)
 (the SFU effects and replies), [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
 (`Rid`, `TrackKind`), [`web/src/lib/sfu.ts`](../../web/src/lib/sfu.ts),
 [`web/src/lib/layers.ts`](../../web/src/lib/layers.ts),
 [`web/src/lib/signaling.ts`](../../web/src/lib/signaling.ts),
-[`web/src/lib/media/`](../../web/src/lib/media/); `crates/sfu-api` (not started).
+[`web/src/lib/media/`](../../web/src/lib/media/), [`crates/sfu-api`](../../crates/sfu-api/).
 Research: [01 §1 — Realtime SFU and TURN](../research/01-hosting-and-media-platforms.md),
 [02 §2 — SFU features and limits](../research/02-cloudflare-deep-dive.md),
 [05 §4–6 — browser constraints, PWA, codecs](../research/05-frontend-and-browser.md),
@@ -47,6 +48,17 @@ Facts checked on 2026-10-09 ([01 §1](../research/01-hosting-and-media-platforms
 - TURN: TURN over TLS on port 443, credentials valid for up to 48 hours, no
   charge for traffic between TURN and the SFU, IPv4 relay addresses only, no
   TCP relaying. STUN at `stun.cloudflare.com` is free.
+- TURN is used since 2026-10-09: `GET /api/ice?meeting=<words>` asks
+  Cloudflare for credentials valid for 24 hours (`POST
+  /v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers` with the
+  secret `TURN_KEY_API_TOKEN`) and hands the servers to the browser, minus
+  the URLs on port 53, which browsers block
+  ([Generate credentials](https://developers.cloudflare.com/realtime/turn/generate-credentials/),
+  checked 2026-10-09). TURN traffic is billed, so the route answers only for
+  a meeting that exists (404 otherwise). Without the two secrets, if the
+  call fails, or if Cloudflare takes longer than 3 seconds, it serves STUN
+  only; the browser gives up after 4 seconds and uses STUN. A phone on
+  mobile data may need TURN to reach the SFU.
 - No SFU region can be chosen
   ([D5](../architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)).
 
@@ -198,3 +210,63 @@ unverified; spike 4 tests it on real devices. iOS 26 opens every site added to
 the home screen as a web app by default, and home-screen web apps have a
 history of camera bugs, which is why the plain tab is the default
 ([05 §4–5](../research/05-frontend-and-browser.md)).
+
+## D33: A dead SFU session is replaced, not retried (2026-10-09)
+
+When the SFU no longer serves one of a participant's sessions, or the
+browser's peer connection for it has failed, the room drops that session and
+creates a new one; the browser then opens a new peer connection for it. The
+room never retries calls on a session the SFU declared gone.
+
+Why: in the second real test (2026-10-09, Firefox on a PC, a phone on mobile
+data), the phone's audio and video never reached the PC. For four minutes the
+Worker log showed, every few seconds, `HTTP 410: session_error: Session
+appears to be disconnected. Please check if the PeerConnection is
+connected.` The room treated each failed subscribe as transient and retried
+it against a session that could never work again, and the browser never
+learned that its peer connection was unusable.
+
+Triggers:
+
+- The SFU answers a call on a session with HTTP 410, or with the error code
+  `session_error` (also seen with 406 after an unanswered offer). `sfu-api`
+  reports this as `FailureCause::SessionGone`; every other failure is
+  `Transient` and is retried as before.
+  - A subscribe or renegotiate call fails this way: the subscribe session is
+    replaced.
+  - A publish call fails this way: the publish session is replaced.
+- The browser's `RTCPeerConnection.connectionState` becomes `failed`: it
+  sends `ClientMsg::ResetSession { kind, epoch }`, at most once per kind
+  until the room's reset arrives or 15 seconds pass, and shows a quiet
+  notice. The epoch counts the sessions of that kind (0 for the first, one
+  more per replacement; `Welcome` carries the current ones, each reset the
+  new one). The room ignores a reset whose epoch is not current, so the late
+  failure of a connection the room already replaced cannot replace the new
+  session.
+
+What the room does (`meeting-core`, [D20](../core/README.md#d20-core-first-2026-10-09)):
+
+- Subscribe session: it forgets what the session received and any running
+  negotiation, closes nothing (the SFU no longer serves the session) and
+  emits `SfuNewSession`. Once the new session exists, it sends
+  `ServerMsg::SubscribeReset`, and the browser replaces its subscriber peer
+  connection. The new session wants every track the others publish, and the
+  room requests them at once.
+- Publish session: its tracks are gone for everyone, so the room does what an
+  `Unpublish` of each does (closes them on every subscriber, stops recording
+  them, removes them from the room view) and emits `SfuNewSession`. Once the
+  new session exists, it sends `ServerMsg::PublishReset`; the browser opens a
+  new publisher peer connection and publishes its current tracks again.
+- While a session is being replaced, everything that works on that session
+  skips it, and a second reset changes nothing. Client messages about it
+  (`PublishOffer`, `Unpublish`, `SubscribeAnswer`, `SetLayer`) are dropped
+  without an error; the reset makes the client redo them. SFU replies carry
+  the session they are about, so a late reply about the old session is
+  ignored.
+- If the SFU cannot create the new session, or does not answer within
+  `NEGOTIATION_TIMEOUT_MS` (15 seconds), the participant stays in the
+  meeting, gets `Error { SfuUnavailable }` once, and the room asks again
+  `SUBSCRIBE_RETRY_MS` (3 seconds) later through its alarm.
+- A client that reconnects compares the epochs in its `Welcome` with its
+  connections and replaces any whose session the room replaced while the
+  socket was down.

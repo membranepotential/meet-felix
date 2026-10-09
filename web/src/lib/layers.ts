@@ -90,6 +90,15 @@ export class LayerControl {
 		this.#schedule(LAYER_RETRY_MS);
 	}
 
+	/**
+	 * The subscribe connection was replaced: nothing is received any more, and every track
+	 * arrives anew at the SFU default.
+	 */
+	reset(): void {
+		this.#received.clear();
+		this.#sent.clear();
+	}
+
 	dispose(): void {
 		clearTimeout(this.#timer);
 	}

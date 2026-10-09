@@ -4,9 +4,13 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- deployed-check — user retries the host join on https://meet.example.com in Firefox; an HTTP 500 after "Join" could not be reproduced (headless Firefox and raw handshakes all pass) — Workers Logs now persist every request, waiting for the retry
+- session-recovery + meeting-ui — implemented (core 41 tests, worker 27, web 112, spike 71/71; fullscreen share, toast pills) — code-reviewer-high running — then deploy when no meeting runs (stored open rooms do not load after the RoomState change)
+- turn-key — user creates a TURN key in the Cloudflare dashboard (Realtime → TURN) and uploads `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` as Worker secrets — waiting
+- phase-3 — recorder DO, SFU WebSocket adapters, R2 chunks, Whisper job, transcript page — design next, after the two above
 
 ## Done
+- 2026-10-09 Research 11 (docs/research/11-gotchas-on-cloudflare.md): 8 changes to make now (simulcast priorityOrdering, stored-record versioning, audio unlock after a session reset, iOS mic recovery control, consent record, retention, transcript-link hygiene, recorder checklist), 18 to watch; Workers Paid is required for the recorder.
+- 2026-10-09 Second real test (Firefox + phone on mobile data): no server error; the phone's audio and video never reached the PC, log shows 41 × `HTTP 410 session_error` on subscribe retries against a dead session → session-recovery above. No recording existed yet (phase 3).
 - 2026-10-09 First real test fixes, version b5cfcaa4: Workers Logs on; meeting list asks unsettled rooms for their phase and settles ended ones in the index (no more lost marks); owner's name prefilled; device lists deduplicated (Svelte `each_key_duplicate` seen in Firefox); start, meetings, lobby and end pages centred on desktop. Review by code-reviewer-high, findings fixed; worker 24 tests, spike 63/63, web 99 tests.
 - 2026-10-09 Quiet subscribe retries and Scheduled/Live/Ended labels; deployed version 4e79e91a.
 - 2026-10-09 Redeployed (version 7f62b3e0); production probe of the owner flow through meet.example.com green; call test run 5 (owner session, scheduled meeting, join as host) 70/70 locally.

@@ -1,18 +1,18 @@
 //! The pure transition function.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use crate::ids::{Millis, ParticipantId, ResumeToken, Sdp, SessionId};
+use crate::ids::{Millis, ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId};
 use crate::protocol::{
     ClientMsg, ErrorCode, IncomingTrack, LocalTrack, Recording, RecordingPolicy, Rid, Role,
-    RoomView, ServerMsg, TrackKind, TrackRef,
+    RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind, TrackRef,
 };
-use crate::shell::{Effect, Event, OfferedTrack, RemoteTrack, SessionKind, SfuCall, SfuReply};
+use crate::shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 use crate::state::{
     AlarmReason, Connection, Lifecycle, NEGOTIATION_TIMEOUT_MS, Offered, Participant,
-    PublishNegotiation, PublishSession, PublishedTrack, Receiving, RecordingStatus, RoomState,
-    SUBSCRIBE_RETRY_MS, SubscribeNegotiation, SubscribeSession,
+    PublishNegotiation, PublishSession, PublishedTrack, Receiving, RecordingStatus, Replacement,
+    RoomState, SUBSCRIBE_RETRY_MS, SessionSlot, SubscribeNegotiation, SubscribeSession,
 };
 
 /// Applies one event and returns the new state and what the shell must do, in order.
@@ -124,6 +124,13 @@ impl Effects {
     }
 }
 
+/// The session a client message works on: `NotJoined` if the sender is not joined, and `None`
+/// while the session is being replaced. Such a message is dropped without an error: the reset
+/// that follows the replacement makes the client start over on the new session (D33).
+fn in_use<S>(slot: Option<&mut SessionSlot<S>>) -> Result<Option<&mut S>, ErrorCode> {
+    slot.map(SessionSlot::ready_mut).ok_or(ErrorCode::NotJoined)
+}
+
 /// The audio track of `owner`.
 fn audio(owner: ParticipantId) -> TrackRef {
     TrackRef {
@@ -205,6 +212,13 @@ impl RoomState {
             ClientMsg::Unpublish { kind } => self.unpublish(from, kind, fx),
             ClientMsg::SubscribeAnswer { sdp } => self.subscribe_answer(now, from, sdp, fx),
             ClientMsg::SetLayer { track, rid } => self.set_layer(from, track, rid, fx),
+            ClientMsg::ResetSession { kind, epoch } => {
+                let current = self.epochs_mut(from).map(|epochs| epochs.of(kind));
+                if current == Some(epoch) {
+                    self.replace_session(now, from, kind, fx);
+                }
+                Ok(())
+            }
             ClientMsg::Leave => {
                 self.leave(now, from, fx);
                 fx.push(Effect::CloseSocket { who: from });
@@ -314,10 +328,15 @@ impl RoomState {
     /// The welcome for a joined participant. It carries the current view, so send it only when
     /// this step changes the view no further, or through [`Effects::finish`].
     fn welcome(&self, you: ParticipantId) -> ServerMsg {
+        let participant = &self.participants[&you];
+        let Connection::Joined { epochs, .. } = participant.connection else {
+            unreachable!("only joined participants are welcomed");
+        };
         ServerMsg::Welcome {
             you,
             state: self.view(),
-            resume: self.participants[&you].resume.clone(),
+            resume: participant.resume.clone(),
+            epochs,
         }
     }
 
@@ -448,7 +467,9 @@ impl RoomState {
         tracks: Vec<LocalTrack>,
         fx: &mut Effects,
     ) -> Result<(), ErrorCode> {
-        let publish = self.publish_session_mut(who).ok_or(ErrorCode::NotJoined)?;
+        let Some(publish) = in_use(self.publish_slot_mut(who))? else {
+            return Ok(());
+        };
         if publish.negotiation != PublishNegotiation::Idle {
             return Err(ErrorCode::NegotiationInProgress);
         }
@@ -490,7 +511,9 @@ impl RoomState {
         kind: TrackKind,
         fx: &mut Effects,
     ) -> Result<(), ErrorCode> {
-        let publish = self.publish_session_mut(who).ok_or(ErrorCode::NotJoined)?;
+        let Some(publish) = in_use(self.publish_slot_mut(who))? else {
+            return Ok(());
+        };
         let track = publish
             .published
             .get(&kind)
@@ -512,9 +535,9 @@ impl RoomState {
         sdp: Sdp,
         fx: &mut Effects,
     ) -> Result<(), ErrorCode> {
-        let subscribe = self
-            .subscribe_session_mut(who)
-            .ok_or(ErrorCode::NotJoined)?;
+        let Some(subscribe) = in_use(self.subscribe_slot_mut(who))? else {
+            return Ok(());
+        };
         let SubscribeNegotiation::AwaitingAnswer { offered, .. } = &mut subscribe.negotiation
         else {
             return Err(ErrorCode::UnexpectedAnswer);
@@ -538,9 +561,9 @@ impl RoomState {
         rid: Rid,
         fx: &mut Effects,
     ) -> Result<(), ErrorCode> {
-        let subscribe = self
-            .subscribe_session_mut(who)
-            .ok_or(ErrorCode::NotJoined)?;
+        let Some(subscribe) = in_use(self.subscribe_slot_mut(who))? else {
+            return Ok(());
+        };
         let receiving = subscribe
             .receiving
             .get_mut(&track)
@@ -617,15 +640,20 @@ impl RoomState {
             SfuReply::SessionCreated { who, kind, session } => {
                 self.session_created(now, who, kind, session, fx)
             }
-            SfuReply::Published { who, sdp_answer } => self.published(now, who, sdp_answer, fx),
+            SfuReply::Published {
+                who,
+                session,
+                sdp_answer,
+            } => self.published(now, who, &session, sdp_answer, fx),
             SfuReply::SubscribeOffer {
                 who,
+                session,
                 sdp_offer,
                 tracks,
-            } => self.subscribe_offer(now, who, sdp_offer, tracks, fx),
-            SfuReply::Renegotiated { who } => self.renegotiated(now, who, fx),
+            } => self.subscribe_offer(now, who, &session, sdp_offer, tracks, fx),
+            SfuReply::Renegotiated { who, session } => self.renegotiated(now, who, &session, fx),
             SfuReply::TrackClosed { who, kind } => self.withdraw(who, &[kind], fx),
-            SfuReply::Failed { who, call } => self.sfu_failed(now, who, call, fx),
+            SfuReply::Failed { who, call, cause } => self.sfu_failed(now, who, call, cause, fx),
         }
     }
 
@@ -642,7 +670,7 @@ impl RoomState {
         };
         let role = p.role;
         let Connection::Connecting { publish, subscribe } = &mut p.connection else {
-            return;
+            return self.session_replaced(now, who, kind, session, fx);
         };
         let slot = match kind {
             SessionKind::Publish => &mut *publish,
@@ -654,37 +682,133 @@ impl RoomState {
         let (Some(publish), Some(subscribe)) = (publish.clone(), subscribe.clone()) else {
             return;
         };
-        let wanted = self
-            .joined()
-            .filter(|&(owner, ..)| owner != who)
-            .flat_map(|(owner, publish, _)| {
-                publish
-                    .published
-                    .keys()
-                    .map(move |&kind| (TrackRef { owner, kind }, now))
-            })
-            .collect();
+        let wanted = self.others_tracks(now, who);
         self.participants
             .get_mut(&who)
             .expect("checked above")
             .connection = Connection::Joined {
-            publish: PublishSession {
-                id: publish,
-                published: Default::default(),
-                negotiation: PublishNegotiation::Idle,
-            },
-            subscribe: SubscribeSession {
-                id: subscribe,
-                receiving: Default::default(),
-                wanted,
-                negotiation: SubscribeNegotiation::Idle,
-            },
+            publish: SessionSlot::Ready(PublishSession::new(publish)),
+            subscribe: SessionSlot::Ready(SubscribeSession::new(subscribe, wanted)),
+            epochs: SessionEpochs::default(),
         };
         fx.welcomed.push(who);
         if role == Role::Host && matches!(self.lifecycle, Lifecycle::Scheduled { .. }) {
             self.go_live(now, who, fx);
         }
         self.request_wanted(now, who, fx);
+    }
+
+    /// Every track the others publish, wanted by `who` from `now`.
+    fn others_tracks(&self, now: Millis, who: ParticipantId) -> BTreeMap<TrackRef, Millis> {
+        self.published_tracks()
+            .filter(|track| track.owner != who)
+            .map(|track| (track, now))
+            .collect()
+    }
+
+    /// Installs the new session that replaces a joined participant's lost one, and tells the
+    /// client to start over on a new peer connection. A new subscribe session wants every track
+    /// the others publish. Ignored unless that session is being replaced.
+    fn session_replaced(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        kind: SessionKind,
+        session: SessionId,
+        fx: &mut Effects,
+    ) {
+        match kind {
+            SessionKind::Publish => {
+                let Some(slot @ SessionSlot::Replacing(_)) = self.publish_slot_mut(who) else {
+                    return;
+                };
+                *slot = SessionSlot::Ready(PublishSession::new(session));
+                let epoch = self.next_epoch(who, kind);
+                fx.send(who, ServerMsg::PublishReset { epoch });
+            }
+            SessionKind::Subscribe => {
+                let wanted = self.others_tracks(now, who);
+                let Some(slot @ SessionSlot::Replacing(_)) = self.subscribe_slot_mut(who) else {
+                    return;
+                };
+                *slot = SessionSlot::Ready(SubscribeSession::new(session, wanted));
+                let epoch = self.next_epoch(who, kind);
+                fx.send(who, ServerMsg::SubscribeReset { epoch });
+                self.request_wanted(now, who, fx);
+            }
+        }
+    }
+
+    /// Counts a new session of `kind` for joined participant `who`; returns its epoch.
+    fn next_epoch(&mut self, who: ParticipantId, kind: SessionKind) -> SessionEpoch {
+        let epoch = self
+            .epochs_mut(who)
+            .expect("only joined participants replace sessions")
+            .of_mut(kind);
+        *epoch = epoch.next();
+        *epoch
+    }
+
+    /// Gives up `who`'s session of `kind` and asks the SFU for a new one (D33 in `docs/media`).
+    /// Nothing is closed on the lost session, as the SFU no longer serves it, but a lost publish
+    /// session takes its tracks with it: they stop being recorded and reach no subscriber any
+    /// more. Ignored unless `who` is joined and the session is in use.
+    fn replace_session(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        kind: SessionKind,
+        fx: &mut Effects,
+    ) {
+        let requested = Replacement::Requested { since: now };
+        match kind {
+            SessionKind::Publish => {
+                let Some(publish) = self.publish_session_mut(who) else {
+                    return;
+                };
+                let kinds = publish.kinds();
+                self.withdraw(who, &kinds, fx);
+                *self.publish_slot_mut(who).expect("checked above") =
+                    SessionSlot::Replacing(requested);
+            }
+            SessionKind::Subscribe => {
+                let Some(slot @ SessionSlot::Ready(_)) = self.subscribe_slot_mut(who) else {
+                    return;
+                };
+                *slot = SessionSlot::Replacing(requested);
+            }
+        }
+        fx.push(Effect::SfuNewSession { who, kind });
+    }
+
+    /// The SFU could not create a replacement session: tell the participant after the first
+    /// failure, and ask again after [`SUBSCRIBE_RETRY_MS`] through the alarm.
+    fn replacement_failed(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        kind: SessionKind,
+        fx: &mut Effects,
+    ) {
+        let Some(replacement) = self.replacement_mut(who, kind) else {
+            return;
+        };
+        let first = match replacement {
+            Replacement::Requested { .. } => true,
+            Replacement::Retrying { .. } => false,
+            Replacement::Failed { .. } => return,
+        };
+        *replacement = Replacement::Failed {
+            retry_at: now.after(SUBSCRIBE_RETRY_MS),
+        };
+        if first {
+            fx.send(
+                who,
+                ServerMsg::Error {
+                    code: ErrorCode::SfuUnavailable,
+                },
+            );
+        }
     }
 
     /// The first host joined: the room goes live, starts recording if the meeting records from
@@ -713,8 +837,18 @@ impl RoomState {
         }
     }
 
-    fn published(&mut self, now: Millis, who: ParticipantId, sdp_answer: Sdp, fx: &mut Effects) {
-        let Some(publish) = self.publish_session_mut(who) else {
+    fn published(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        session: &SessionId,
+        sdp_answer: Sdp,
+        fx: &mut Effects,
+    ) {
+        let Some(publish) = self
+            .publish_session_mut(who)
+            .filter(|publish| publish.id == *session)
+        else {
             return;
         };
         let PublishNegotiation::OfferPending { tracks, .. } =
@@ -758,11 +892,12 @@ impl RoomState {
         &mut self,
         now: Millis,
         who: ParticipantId,
+        session: &SessionId,
         sdp: Sdp,
         tracks: Vec<OfferedTrack>,
         fx: &mut Effects,
     ) {
-        let Some(subscribe) = self.subscribe_session_mut(who) else {
+        let Some(subscribe) = self.current_subscribe_session(who, session) else {
             return;
         };
         let SubscribeNegotiation::AwaitingOffer { requested, .. } = &subscribe.negotiation else {
@@ -807,8 +942,14 @@ impl RoomState {
         );
     }
 
-    fn renegotiated(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
-        let Some(subscribe) = self.subscribe_session_mut(who) else {
+    fn renegotiated(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        session: &SessionId,
+        fx: &mut Effects,
+    ) {
+        let Some(subscribe) = self.current_subscribe_session(who, session) else {
             return;
         };
         let SubscribeNegotiation::Renegotiating { offered, .. } = &mut subscribe.negotiation else {
@@ -844,9 +985,29 @@ impl RoomState {
         self.request_wanted(now, who, fx);
     }
 
-    fn sfu_failed(&mut self, now: Millis, who: ParticipantId, call: SfuCall, fx: &mut Effects) {
+    /// `who`'s subscribe session if it is `session`; `None` for a reply about a session the
+    /// room has replaced since.
+    fn current_subscribe_session(
+        &mut self,
+        who: ParticipantId,
+        session: &SessionId,
+    ) -> Option<&mut SubscribeSession> {
+        self.subscribe_session_mut(who)
+            .filter(|subscribe| subscribe.id == *session)
+    }
+
+    /// A failed call on a session the SFU no longer serves replaces that session; any other
+    /// failed call is retried later. Failures about a replaced session are ignored.
+    fn sfu_failed(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        call: SfuCall,
+        cause: FailureCause,
+        fx: &mut Effects,
+    ) {
         match call {
-            SfuCall::NewSession(_) => {
+            SfuCall::NewSession(kind) => {
                 let connecting = self
                     .participants
                     .get(&who)
@@ -860,20 +1021,38 @@ impl RoomState {
                     );
                     self.leave(now, who, fx);
                     fx.push(Effect::CloseSocket { who });
+                } else {
+                    self.replacement_failed(now, who, kind, fx);
                 }
             }
-            SfuCall::Publish => self.publish_failed(who, fx),
-            SfuCall::Subscribe | SfuCall::Renegotiate => {
-                let Some(subscribe) = self.subscribe_session_mut(who) else {
+            SfuCall::Publish { session } => {
+                if self
+                    .publish_session_mut(who)
+                    .is_none_or(|publish| publish.id != session)
+                {
+                    return;
+                }
+                match cause {
+                    FailureCause::SessionGone => {
+                        self.replace_session(now, who, SessionKind::Publish, fx)
+                    }
+                    FailureCause::Transient => self.publish_failed(who, fx),
+                }
+            }
+            SfuCall::Subscribe { ref session } | SfuCall::Renegotiate { ref session } => {
+                let Some(subscribe) = self.current_subscribe_session(who, session) else {
                     return;
                 };
+                if cause == FailureCause::SessionGone {
+                    return self.replace_session(now, who, SessionKind::Subscribe, fx);
+                }
                 let running = matches!(
-                    (call, &subscribe.negotiation),
+                    (&call, &subscribe.negotiation),
                     (
-                        SfuCall::Subscribe,
+                        SfuCall::Subscribe { .. },
                         SubscribeNegotiation::AwaitingOffer { .. }
                     ) | (
-                        SfuCall::Renegotiate,
+                        SfuCall::Renegotiate { .. },
                         SubscribeNegotiation::Renegotiating { .. }
                     )
                 );
@@ -943,7 +1122,11 @@ impl RoomState {
     /// Drops wanted tracks that are gone or already received.
     fn request_wanted(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
         let Some(Participant {
-            connection: Connection::Joined { subscribe, .. },
+            connection:
+                Connection::Joined {
+                    subscribe: SessionSlot::Ready(subscribe),
+                    ..
+                },
             ..
         }) = self.participants.get(&who)
         else {
@@ -1019,7 +1202,11 @@ impl RoomState {
             return;
         }
         for (&who, p) in &mut self.participants {
-            let Connection::Joined { subscribe, .. } = &mut p.connection else {
+            let Connection::Joined {
+                subscribe: SessionSlot::Ready(subscribe),
+                ..
+            } = &mut p.connection
+            else {
                 continue;
             };
             subscribe
@@ -1050,7 +1237,10 @@ impl RoomState {
             | Connection::Knocking
             | Connection::AwaitingConsent
             | Connection::Connecting { .. } => Vec::new(),
-            Connection::Joined { publish, .. } => publish.kinds(),
+            Connection::Joined { publish, .. } => publish
+                .ready()
+                .map(PublishSession::kinds)
+                .unwrap_or_default(),
         };
         self.withdraw(who, &published, fx);
         self.participants
@@ -1084,12 +1274,29 @@ impl RoomState {
                     let timed_out = self
                         .joined()
                         .find(|&(id, ..)| id == who)
-                        .and_then(|(.., subscribe)| subscribe.negotiation.since())
+                        .and_then(|(.., subscribe)| subscribe.ready()?.negotiation.since())
                         .is_some_and(|since| since.after(NEGOTIATION_TIMEOUT_MS) <= now);
                     if timed_out {
                         self.subscription_failed(now, who, fx);
                     }
                     self.request_wanted(now, who, fx);
+                }
+                AlarmReason::Replace(who, kind) => {
+                    let Some(&mut replacement) = self.replacement_mut(who, kind) else {
+                        continue;
+                    };
+                    match replacement {
+                        _ if replacement.due() > now => {}
+                        Replacement::Failed { .. } => {
+                            *self.replacement_mut(who, kind).expect("checked above") =
+                                Replacement::Retrying { since: now };
+                            fx.push(Effect::SfuNewSession { who, kind });
+                        }
+                        // No reply in time: the request counts as failed.
+                        Replacement::Requested { .. } | Replacement::Retrying { .. } => {
+                            self.replacement_failed(now, who, kind, fx);
+                        }
+                    }
                 }
             }
         }

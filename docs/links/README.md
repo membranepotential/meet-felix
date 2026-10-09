@@ -195,5 +195,5 @@ and the owner's past-meetings page lists it
 changed on 2026-10-09 from "the host's browser lists it").
 
 Why a different scheme than meeting ids: transcripts live long
-([D18](../recording/README.md#d18-keep-recordings-and-transcripts-indefinitely-for-now-2026-10-09)),
+([D18](../recording/README.md#d18-keep-the-audio-48-hours-keep-transcripts-until-the-owner-deletes-them-2026-10-09)),
 so their link must be impossible to guess, and nobody needs to say it aloud.

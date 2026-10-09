@@ -1,6 +1,6 @@
 //! Carries out the core's SFU effects and builds the replies the core expects.
 
-use meeting_core::{Effect, SfuCall, SfuReply};
+use meeting_core::{Effect, FailureCause, SfuCall, SfuReply};
 
 use crate::client::{SfuClient, SfuError, SfuTransport, SubscribeOffer};
 
@@ -18,9 +18,9 @@ impl<T: SfuTransport> SfuClient<T> {
     /// `SfuCloseTracks` and `SfuUpdateLayer` expect none; effects that are not SFU calls do
     /// nothing and return `Ok(None)`.
     pub async fn perform(&self, effect: &Effect) -> Result<Option<SfuReply>, Failure> {
-        let failed = |error| Failure {
+        let failed = |error: SfuError| Failure {
+            reply: failure_reply(effect, error.cause()),
             error,
-            reply: failure_reply(effect),
         };
         let reply = match effect {
             Effect::SfuNewSession { who, kind } => {
@@ -43,6 +43,7 @@ impl<T: SfuTransport> SfuClient<T> {
                     .map_err(failed)?;
                 Some(SfuReply::Published {
                     who: *who,
+                    session: session.clone(),
                     sdp_answer,
                 })
             }
@@ -55,6 +56,7 @@ impl<T: SfuTransport> SfuClient<T> {
                     self.subscribe(session, tracks).await.map_err(failed)?;
                 Some(SfuReply::SubscribeOffer {
                     who: *who,
+                    session: session.clone(),
                     sdp_offer: sdp,
                     tracks,
                 })
@@ -67,7 +69,10 @@ impl<T: SfuTransport> SfuClient<T> {
                 self.renegotiate(session, sdp_answer)
                     .await
                     .map_err(failed)?;
-                Some(SfuReply::Renegotiated { who: *who })
+                Some(SfuReply::Renegotiated {
+                    who: *who,
+                    session: session.clone(),
+                })
             }
             Effect::SfuCloseTracks { session, mids, .. } => {
                 self.close_tracks(session, mids).await.map_err(failed)?;
@@ -91,15 +96,34 @@ impl<T: SfuTransport> SfuClient<T> {
     }
 }
 
-/// The [`SfuReply::Failed`] the core expects when the call for `effect` fails or cannot be
-/// made; `None` for effects that expect no reply.
-pub fn failure_reply(effect: &Effect) -> Option<SfuReply> {
+/// The [`SfuReply::Failed`] the core expects when the call for `effect` fails for `cause` or
+/// cannot be made ([`FailureCause::Transient`]); `None` for effects that expect no reply.
+pub fn failure_reply(effect: &Effect, cause: FailureCause) -> Option<SfuReply> {
     let (who, call) = match effect {
         Effect::SfuNewSession { who, kind } => (who, SfuCall::NewSession(*kind)),
-        Effect::SfuPublish { who, .. } => (who, SfuCall::Publish),
-        Effect::SfuSubscribe { who, .. } => (who, SfuCall::Subscribe),
-        Effect::SfuRenegotiate { who, .. } => (who, SfuCall::Renegotiate),
+        Effect::SfuPublish { who, session, .. } => (
+            who,
+            SfuCall::Publish {
+                session: session.clone(),
+            },
+        ),
+        Effect::SfuSubscribe { who, session, .. } => (
+            who,
+            SfuCall::Subscribe {
+                session: session.clone(),
+            },
+        ),
+        Effect::SfuRenegotiate { who, session, .. } => (
+            who,
+            SfuCall::Renegotiate {
+                session: session.clone(),
+            },
+        ),
         _ => return None,
     };
-    Some(SfuReply::Failed { who: *who, call })
+    Some(SfuReply::Failed {
+        who: *who,
+        call,
+        cause,
+    })
 }

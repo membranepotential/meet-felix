@@ -15,7 +15,11 @@
 		| 'host'
 		| 'remove'
 		| 'share'
-		| 'download';
+		| 'download'
+		| 'info'
+		| 'alert'
+		| 'fullscreen'
+		| 'fullscreen-exit';
 </script>
 
 <script lang="ts">
@@ -68,5 +72,15 @@
 		<path d="M12 3v12M8 7l4-4 4 4M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" />
 	{:else if name === 'download'}
 		<path d="M12 4v11M8 11l4 4 4-4M5 20h14" />
+	{:else if name === 'info'}
+		<circle cx="12" cy="12" r="9" />
+		<path d="M12 11v5M12 8h.01" />
+	{:else if name === 'alert'}
+		<path d="M10.3 4.6 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.6a2 2 0 0 0-3.4 0z" />
+		<path d="M12 10v4M12 17h.01" />
+	{:else if name === 'fullscreen'}
+		<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />
+	{:else if name === 'fullscreen-exit'}
+		<path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" />
 	{/if}
 </svg>

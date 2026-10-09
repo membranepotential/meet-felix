@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, SessionId, TrackName};
-use crate::protocol::{ClientMsg, LocalTrack, Rid, ServerMsg, TrackKind};
+use crate::protocol::{ClientMsg, LocalTrack, Rid, ServerMsg, SessionKind, TrackKind};
 
 /// Something that happened to the room.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,15 +35,6 @@ pub enum Event {
     AlarmFired,
 }
 
-/// Which of a participant's two SFU sessions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionKind {
-    /// Carries the participant's own tracks; the client sends offers.
-    Publish,
-    /// Carries other participants' tracks; the SFU sends offers.
-    Subscribe,
-}
-
 /// A track in an SFU session, as the SFU API names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteTrack {
@@ -62,20 +53,42 @@ pub struct OfferedTrack {
     pub track: RemoteTrack,
 }
 
-/// The SFU call that failed, named after the effect that requested it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The SFU call that failed, named after the effect that requested it, with the session it was
+/// made on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SfuCall {
     /// [`Effect::SfuNewSession`].
     NewSession(SessionKind),
     /// [`Effect::SfuPublish`].
-    Publish,
+    Publish {
+        /// The publish session.
+        session: SessionId,
+    },
     /// [`Effect::SfuSubscribe`].
-    Subscribe,
+    Subscribe {
+        /// The subscribe session.
+        session: SessionId,
+    },
     /// [`Effect::SfuRenegotiate`].
-    Renegotiate,
+    Renegotiate {
+        /// The subscribe session.
+        session: SessionId,
+    },
 }
 
-/// The outcome of an SFU call. Replies about participants who left meanwhile are ignored.
+/// Why an SFU call failed, as far as the room cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailureCause {
+    /// The SFU no longer serves the session the call was made on (it answered HTTP 410, or
+    /// with a `session_error`). Every later call on that session fails too, so the room
+    /// replaces the session instead of retrying.
+    SessionGone,
+    /// Anything else; the room retries later.
+    Transient,
+}
+
+/// The outcome of an SFU call. Replies about participants who left meanwhile, or about a session
+/// the room has replaced since, are ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SfuReply {
     /// Reply to [`Effect::SfuNewSession`].
@@ -91,6 +104,8 @@ pub enum SfuReply {
     Published {
         /// The publisher.
         who: ParticipantId,
+        /// Their publish session.
+        session: SessionId,
         /// The SFU's answer for the client.
         sdp_answer: Sdp,
     },
@@ -98,6 +113,8 @@ pub enum SfuReply {
     SubscribeOffer {
         /// The subscriber.
         who: ParticipantId,
+        /// Their subscribe session.
+        session: SessionId,
         /// The SFU's offer for the client.
         sdp_offer: Sdp,
         /// The tracks the offer adds.
@@ -107,6 +124,8 @@ pub enum SfuReply {
     Renegotiated {
         /// The subscriber.
         who: ParticipantId,
+        /// Their subscribe session.
+        session: SessionId,
     },
     /// The SFU no longer serves one of a participant's published tracks.
     TrackClosed {
@@ -121,6 +140,8 @@ pub enum SfuReply {
         who: ParticipantId,
         /// Which call.
         call: SfuCall,
+        /// Why it failed.
+        cause: FailureCause,
     },
 }
 
@@ -220,8 +241,9 @@ pub enum Effect {
     },
     /// Fire [`Event::AlarmFired`] at this time, replacing any earlier alarm. The room has one
     /// alarm, at the earliest time it must act: when an unused scheduled room expires, when an
-    /// empty live room ends, when a publish offer or a subscribe negotiation times out, or when a
-    /// failed subscription is retried. It emits this whenever
+    /// empty live room ends, when a publish offer or a subscribe negotiation times out, when a
+    /// failed subscription is retried, or when a failed request for a replacement session is
+    /// sent again. It emits this whenever
     /// that time changes and after every alarm; it never clears an alarm, because a spurious
     /// one is harmless.
     SetAlarm {

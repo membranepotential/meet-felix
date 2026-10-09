@@ -15,6 +15,7 @@
 	import ControlBar from './ControlBar.svelte';
 	import Stage from './Stage.svelte';
 	import type { TileModel } from './Tile.svelte';
+	import Toasts from './Toasts.svelte';
 
 	let { meeting, media, session }: { meeting: MeetingId; media: LocalMedia; session: Session } =
 		$props();
@@ -130,16 +131,6 @@
 	/** A shared screen gets the large tile. */
 	let featured = $derived(tiles.find((t) => t.source === 'screen') ?? null);
 
-	let noticeCount = $derived(session.knocking.length + session.toasts.items.length);
-
-	let connectionNote = $derived.by(() => {
-		const c = session.connection;
-		if (c.kind === 'connecting') return c.attempt > 1 ? 'Reconnecting…' : 'Connecting…';
-		if (c.kind === 'waiting')
-			return `Connection lost. Retrying in ${Math.ceil(c.retryInMs / 1000)} s`;
-		return null;
-	});
-
 	function modal(dialog: HTMLDialogElement) {
 		dialog.showModal();
 		return () => dialog.close();
@@ -161,7 +152,6 @@
 		{/if}
 		<p class="title">{meeting}</p>
 		{#if session.room?.locked}<p class="locked">Locked</p>{/if}
-		{#if connectionNote}<p class="connection" role="status">{connectionNote}</p>{/if}
 	</header>
 
 	<div class="stage-wrap">
@@ -172,35 +162,11 @@
 		<audio {@attach playAudio(stream)}></audio>
 	{/each}
 
-	<!-- In the layout flow above the bar, so notices never cover tiles or their buttons. -->
-	<div class={['notices', noticeCount > 0 && 'showing']} aria-live="polite">
-		{#each session.knocking as knock (knock.id)}
-			<div class="toast knock">
-				<p>{knock.name} wants to join</p>
-				<div class="knock-actions">
-					<button
-						class="button quiet"
-						type="button"
-						onclick={() => session.send({ type: 'kick', who: knock.id })}
-					>
-						Deny
-					</button>
-					<button
-						class="button primary"
-						type="button"
-						onclick={() => session.send({ type: 'admit', who: knock.id })}
-					>
-						Let in
-					</button>
-				</div>
-			</div>
-		{/each}
-		{#each session.toasts.items as toast (toast.id)}
-			<p class={['toast', toast.tone]}>{toast.text}</p>
-		{/each}
+	<!-- Notices hang above the bar, over the stage's lower edge, so the tiles never jump. -->
+	<div class="dock">
+		<Toasts {session} />
+		<ControlBar {media} {session} />
 	</div>
-
-	<ControlBar {media} {session} />
 </div>
 
 {#if removing}
@@ -225,7 +191,7 @@
 <style>
 	.meeting {
 		display: grid;
-		grid-template-rows: auto minmax(0, 1fr) auto auto;
+		grid-template-rows: auto minmax(0, 1fr) auto;
 		height: 100dvh;
 		overflow: hidden;
 	}
@@ -275,58 +241,12 @@
 		color: var(--lamp);
 	}
 
-	.connection {
-		margin-left: auto;
-		color: var(--lamp);
-	}
-
 	.stage-wrap {
 		min-height: 0;
 		padding: 0 var(--gutter);
 	}
 
-	.notices {
-		display: grid;
-		justify-items: center;
-		gap: 0.5rem;
-		padding: 0 var(--gutter);
-	}
-
-	.notices.showing {
-		padding-top: 0.75rem;
-	}
-
-	.notices > :global(*) {
-		width: min(26rem, 100%);
-	}
-
-	.toast {
-		padding: 0.75rem 1rem;
-		border-radius: var(--radius-s);
-		background: var(--water);
-		box-shadow: inset 0 0 0 1px var(--reed);
-	}
-
-	.toast.alert {
-		box-shadow:
-			inset 3px 0 0 var(--signal),
-			inset 0 0 0 1px var(--reed);
-	}
-
-	.knock {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-	}
-
-	.knock-actions {
-		display: flex;
-		gap: 0.5rem;
-	}
-
-	.knock .button {
-		min-height: 44px;
-		padding: 0 1rem;
+	.dock {
+		position: relative;
 	}
 </style>

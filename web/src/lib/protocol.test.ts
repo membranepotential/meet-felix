@@ -37,7 +37,13 @@ const room: RoomView = {
 };
 
 const SERVER_SAMPLES: Samples<ServerMsg> = {
-	welcome: { type: 'welcome', you: 1, state: room, resume: 'r1' },
+	welcome: {
+		type: 'welcome',
+		you: 1,
+		state: room,
+		resume: 'r1',
+		epochs: { publish: 0, subscribe: 2 }
+	},
 	state: { type: 'state', state: room },
 	waiting: { type: 'waiting' },
 	publishAnswer: { type: 'publishAnswer', sdp: 'v=0' },
@@ -46,6 +52,8 @@ const SERVER_SAMPLES: Samples<ServerMsg> = {
 		sdp: 'v=0',
 		tracks: [{ mid: '0', track: { owner: 2, kind: 'screen' } }]
 	},
+	publishReset: { type: 'publishReset', epoch: 1 },
+	subscribeReset: { type: 'subscribeReset', epoch: 3 },
 	knock: { type: 'knock', who: 3 },
 	consentRequired: { type: 'consentRequired' },
 	muted: { type: 'muted' },
@@ -65,6 +73,7 @@ const CLIENT_SAMPLES: Samples<ClientMsg> = {
 	unpublish: { type: 'unpublish', kind: 'video' },
 	subscribeAnswer: { type: 'subscribeAnswer', sdp: 'v=0' },
 	setLayer: { type: 'setLayer', track: { owner: 2, kind: 'video' }, rid: 'h' },
+	resetSession: { type: 'resetSession', kind: 'subscribe', epoch: 3 },
 	lock: { type: 'lock', on: true },
 	admit: { type: 'admit', who: 3 },
 	kick: { type: 'kick', who: 3 },

@@ -91,4 +91,15 @@ describe('LayerControl', () => {
 		vi.advanceTimersByTime(LAYER_DEBOUNCE_MS);
 		expect(sent).toEqual(['h', 'f']);
 	});
+
+	it('after a reset, asks for nothing until the track arrives again, then asks anew', () => {
+		const { control, sent } = setup();
+		control.reset();
+		control.report(track, 300);
+		vi.advanceTimersByTime(LAYER_DEBOUNCE_MS);
+		expect(sent).toEqual(['h']);
+		control.received([track]);
+		vi.advanceTimersByTime(LAYER_DEBOUNCE_MS);
+		expect(sent).toEqual(['h', 'h']);
+	});
 });

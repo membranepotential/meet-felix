@@ -181,6 +181,14 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   `NEGOTIATION_TIMEOUT_MS` (15 seconds), ends with `SfuCloseTracks` for the
   offered transceivers and `Error { SubscribeFailed }` to the client; its
   tracks are requested again after `SUBSCRIBE_RETRY_MS` (3 seconds).
+- A session the SFU declares gone (`SfuReply::Failed` with
+  `FailureCause::SessionGone`), or whose peer connection the client reports
+  failed (`ClientMsg::ResetSession`), is replaced, not retried
+  ([D33](../media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09)). A lost publish session takes its tracks
+  with it, for everyone. The client gets `SubscribeReset` or `PublishReset`
+  with the new session's epoch once the new session exists. Replies name
+  their session, and replies about a replaced session are ignored; a
+  `ResetSession` with an old epoch is ignored too.
 - One publish offer runs at a time; a second gets `NegotiationInProgress`.
   If the SFU does not answer within `NEGOTIATION_TIMEOUT_MS`, the room drops
   the offer and sends `Error { PublishFailed }`, so the client may offer again
@@ -206,6 +214,10 @@ for each candidate time:
 - `Subscribe(participant)`: that participant's subscribe negotiation times
   out, or, while no negotiation runs, their earliest wanted track is due for
   a retry.
+- `Replace(participant, kind)`: the request for that participant's
+  replacement session got no reply within `NEGOTIATION_TIMEOUT_MS` (it then
+  counts as failed), or failed and is due again (`SUBSCRIBE_RETRY_MS` after
+  the failure).
 
 `step` emits `SetAlarm` when this time changes, and after every
 `AlarmFired`, because the shell's alarm is used up once it fires. It never

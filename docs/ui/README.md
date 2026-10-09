@@ -179,11 +179,21 @@ words must say what the press means.
   the phone check uses another signal; which one is the implementer's choice.
 - **Recording badge:** in the header, top left (mockup question M2, option
   A). Why: it is the first thing people read, and nothing covers it.
-- **Toasts never cover tiles or tile buttons.** On 2026-10-09 the knock
+- **Toasts stay off the top of the tiles.** On 2026-10-09 the knock
   toast lay over the top row of tiles, including the host's mute and remove
   buttons. Where toasts go instead is the implementer's choice; the mockup
   offered two ways: push the tiles down while a toast shows, or dock toasts
   above the control bar.
+  Since 2026-10-09 toasts are compact pills (an icon per tone, at most
+  three, tap to dismiss) stacked bottom-centre just above the control bar,
+  together with knock requests and the connection note; they overlay the
+  stage's lower edge instead of pushing it, so the tiles never jump. Why: in
+  that day's real test the user found the strip of notices at the top of the
+  meeting distracting.
+- **A shared screen can go fullscreen.** Every screen tile but a chip has a round
+  fullscreen button in its corner: the Fullscreen API on the tile, or the
+  video's own player where only that exists (iPhone Safari). Why: on
+  2026-10-09 a screen share was unreadable on a phone.
 
 ## D29: A shared screen keeps people in a column on desktops and in round chips on phones (2026-10-09)
 

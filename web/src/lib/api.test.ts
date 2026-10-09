@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createMeeting, getMeeting, isOwner, listMeetings, login } from './api.ts';
+import {
+	createMeeting,
+	getIceServers,
+	getMeeting,
+	ICE_TIMEOUT_MS,
+	isOwner,
+	listMeetings,
+	login
+} from './api.ts';
 import { initSync } from './wasm/meeting_core.js';
 
 beforeAll(() => {
@@ -134,5 +142,31 @@ describe('listMeetings', () => {
 		expect(await listMeetings()).toEqual({ ok: false, error: { kind: 'malformed' } });
 		serve(200, { meetings: [{ meeting: 'abide-acid-acorn', createdAt: 1, phase: 'paused' }] });
 		expect(await listMeetings()).toEqual({ ok: false, error: { kind: 'malformed' } });
+	});
+});
+
+describe('getIceServers', () => {
+	it("asks for the meeting's servers and gives up after the timeout", async () => {
+		const servers = [{ urls: ['stun:stun.cloudflare.com:3478'] }];
+		const fetch = serve(200, { iceServers: servers });
+		expect(await getIceServers('abide-acid-acorn')).toEqual({ ok: true, value: servers });
+		const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+		expect(url).toBe('/api/ice?meeting=abide-acid-acorn');
+		expect(init.signal).toBeInstanceOf(AbortSignal);
+
+		vi.useFakeTimers();
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(
+				(_url: string, init: RequestInit) =>
+					new Promise((_, reject) =>
+						init.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+					)
+			)
+		);
+		const stalled = getIceServers('abide-acid-acorn');
+		await vi.advanceTimersByTimeAsync(ICE_TIMEOUT_MS);
+		expect(await stalled).toEqual({ ok: false, error: { kind: 'network' } });
+		vi.useRealTimers();
 	});
 });

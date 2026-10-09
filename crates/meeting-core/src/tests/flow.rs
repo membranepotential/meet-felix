@@ -32,6 +32,7 @@ fn complete_subscription(room: &mut Room, who: ParticipantId, owner: Participant
         .to_vec();
     let effects = room.sfu(SfuReply::SubscribeOffer {
         who,
+        session: session(who, SessionKind::Subscribe),
         sdp_offer: Sdp::new("sub-offer"),
         tracks,
     });
@@ -65,7 +66,13 @@ fn complete_subscription(room: &mut Room, who: ParticipantId, owner: Participant
             sdp_answer: Sdp::new("sub-answer")
         }]
     );
-    assert_eq!(room.sfu(SfuReply::Renegotiated { who }), []);
+    assert_eq!(
+        room.sfu(SfuReply::Renegotiated {
+            who,
+            session: session(who, SessionKind::Subscribe),
+        }),
+        []
+    );
 }
 
 /// Publishes audio and video for `who` and checks that `other` is asked to subscribe.
@@ -96,6 +103,7 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
     room.now = room.now.after(1_000);
     let effects = room.sfu(SfuReply::Published {
         who,
+        session: session(who, SessionKind::Publish),
         sdp_answer: Sdp::new("answer"),
     });
     let [

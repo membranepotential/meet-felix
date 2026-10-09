@@ -10,7 +10,7 @@ use crate::ids::{
 };
 use crate::protocol::{
     LocalTrack, ParticipantView, Phase, Presence, Recording, RecordingPolicy, Rid, Role, RoomView,
-    TrackKind, TrackRef,
+    SessionEpochs, SessionKind, TrackKind, TrackRef,
 };
 use crate::shell::{Effect, RemoteTrack};
 
@@ -26,7 +26,8 @@ pub const SCHEDULED_TTL_MS: u64 = 60 * 24 * 60 * 60 * 1000;
 /// client's answer, the SFU's confirmation).
 pub const NEGOTIATION_TIMEOUT_MS: u64 = 15 * 1000;
 
-/// How long the room waits before it requests tracks again after a subscription failed.
+/// How long the room waits before it requests tracks again after a subscription failed, and
+/// before it asks again for a replacement session after the SFU failed to create one.
 pub const SUBSCRIBE_RETRY_MS: u64 = 3 * 1000;
 
 /// Everything the room remembers. Serializable so the shell can persist it between events;
@@ -88,10 +89,33 @@ pub(crate) enum Connection {
         subscribe: Option<SessionId>,
     },
     Joined {
-        publish: PublishSession,
-        subscribe: SubscribeSession,
+        publish: SessionSlot<PublishSession>,
+        subscribe: SessionSlot<SubscribeSession>,
+        /// The epochs of the sessions in the slots, or of the lost ones while replacing.
+        epochs: SessionEpochs,
     },
     Left,
+}
+
+/// One of a joined participant's SFU sessions: in use, or being replaced because the SFU
+/// declared it gone or the client's peer connection for it failed (D33 in `docs/media`).
+/// Everything that works on a session skips a slot that is being replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SessionSlot<S> {
+    Ready(S),
+    Replacing(Replacement),
+}
+
+/// Where the request for a replacement session stands. A request that gets no reply within
+/// [`NEGOTIATION_TIMEOUT_MS`] counts as failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Replacement {
+    /// The first [`Effect::SfuNewSession`] is out since `since`.
+    Requested { since: Millis },
+    /// A request failed and the participant was told; the next one goes out at `retry_at`.
+    Failed { retry_at: Millis },
+    /// A later request is out since `since`; the participant was told about the first failure.
+    Retrying { since: Millis },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +203,9 @@ pub(crate) enum AlarmReason {
     Publish(ParticipantId),
     /// A participant's subscribe negotiation timed out, or a wanted track is due for a retry.
     Subscribe(ParticipantId),
+    /// The request for a participant's replacement session of this kind timed out, or is due to
+    /// be sent again.
+    Replace(ParticipantId, SessionKind),
 }
 
 impl RoomState {
@@ -228,7 +255,10 @@ impl RoomState {
             .filter_map(|(&id, p)| {
                 let presence = p.connection.presence()?;
                 let tracks = match &p.connection {
-                    Connection::Joined { publish, .. } => publish.kinds(),
+                    Connection::Joined {
+                        publish: SessionSlot::Ready(publish),
+                        ..
+                    } => publish.kinds(),
                     _ => Vec::new(),
                 };
                 Some(ParticipantView {
@@ -254,11 +284,19 @@ impl RoomState {
     /// Joined participants with their sessions.
     pub(crate) fn joined(
         &self,
-    ) -> impl Iterator<Item = (ParticipantId, &PublishSession, &SubscribeSession)> {
+    ) -> impl Iterator<
+        Item = (
+            ParticipantId,
+            &SessionSlot<PublishSession>,
+            &SessionSlot<SubscribeSession>,
+        ),
+    > {
         self.participants
             .iter()
             .filter_map(|(&id, p)| match &p.connection {
-                Connection::Joined { publish, subscribe } => Some((id, publish, subscribe)),
+                Connection::Joined {
+                    publish, subscribe, ..
+                } => Some((id, publish, subscribe)),
                 _ => None,
             })
     }
@@ -271,30 +309,81 @@ impl RoomState {
             .map(|(&id, _)| id)
     }
 
-    pub(crate) fn subscribe_session_mut(
+    /// Every track a joined participant publishes.
+    pub(crate) fn published_tracks(&self) -> impl Iterator<Item = TrackRef> {
+        self.joined().flat_map(|(owner, publish, _)| {
+            publish.ready().into_iter().flat_map(move |publish| {
+                publish
+                    .published
+                    .keys()
+                    .map(move |&kind| TrackRef { owner, kind })
+            })
+        })
+    }
+
+    pub(crate) fn subscribe_slot_mut(
         &mut self,
         who: ParticipantId,
-    ) -> Option<&mut SubscribeSession> {
+    ) -> Option<&mut SessionSlot<SubscribeSession>> {
         match &mut self.participants.get_mut(&who)?.connection {
             Connection::Joined { subscribe, .. } => Some(subscribe),
             _ => None,
         }
     }
 
-    pub(crate) fn publish_session_mut(
+    pub(crate) fn publish_slot_mut(
         &mut self,
         who: ParticipantId,
-    ) -> Option<&mut PublishSession> {
+    ) -> Option<&mut SessionSlot<PublishSession>> {
         match &mut self.participants.get_mut(&who)?.connection {
             Connection::Joined { publish, .. } => Some(publish),
             _ => None,
         }
     }
 
+    /// `who`'s subscribe session, if they are joined and it is not being replaced.
+    pub(crate) fn subscribe_session_mut(
+        &mut self,
+        who: ParticipantId,
+    ) -> Option<&mut SubscribeSession> {
+        self.subscribe_slot_mut(who)?.ready_mut()
+    }
+
+    /// `who`'s publish session, if they are joined and it is not being replaced.
+    pub(crate) fn publish_session_mut(
+        &mut self,
+        who: ParticipantId,
+    ) -> Option<&mut PublishSession> {
+        self.publish_slot_mut(who)?.ready_mut()
+    }
+
+    /// The epochs of `who`'s sessions, if they are joined.
+    pub(crate) fn epochs_mut(&mut self, who: ParticipantId) -> Option<&mut SessionEpochs> {
+        match &mut self.participants.get_mut(&who)?.connection {
+            Connection::Joined { epochs, .. } => Some(epochs),
+            _ => None,
+        }
+    }
+
+    /// Where the replacement of `who`'s session of `kind` stands, if it is being replaced.
+    pub(crate) fn replacement_mut(
+        &mut self,
+        who: ParticipantId,
+        kind: SessionKind,
+    ) -> Option<&mut Replacement> {
+        match kind {
+            SessionKind::Publish => self.publish_slot_mut(who)?.replacement_mut(),
+            SessionKind::Subscribe => self.subscribe_slot_mut(who)?.replacement_mut(),
+        }
+    }
+
     /// The SFU name of a published track, if its owner is joined and publishes it.
     pub(crate) fn resolve(&self, track: TrackRef) -> Option<RemoteTrack> {
         match &self.participants.get(&track.owner)?.connection {
-            Connection::Joined { publish, .. } => Some(RemoteTrack {
+            Connection::Joined {
+                publish: SessionSlot::Ready(publish),
+                ..
+            } => Some(RemoteTrack {
                 session: publish.id.clone(),
                 name: publish.published.get(&track.kind)?.name.clone(),
             }),
@@ -322,17 +411,27 @@ impl RoomState {
             } => Some((since.after(EMPTY_ROOM_TIMEOUT_MS), AlarmReason::EmptyRoom)),
             Lifecycle::Live { empty_since: None } | Lifecycle::Ended { .. } => None,
         };
-        let negotiations = self.joined().flat_map(|(who, publish, subscribe)| {
-            let publish = publish.negotiation.since().map(|since| {
-                (
-                    since.after(NEGOTIATION_TIMEOUT_MS),
-                    AlarmReason::Publish(who),
-                )
-            });
-            let subscribe = subscribe.due().map(|at| (at, AlarmReason::Subscribe(who)));
+        let sessions = self.joined().flat_map(|(who, publish, subscribe)| {
+            let replace = |kind, r: &Replacement| Some((r.due(), AlarmReason::Replace(who, kind)));
+
+            let publish = match publish {
+                SessionSlot::Ready(publish) => publish.negotiation.since().map(|since| {
+                    (
+                        since.after(NEGOTIATION_TIMEOUT_MS),
+                        AlarmReason::Publish(who),
+                    )
+                }),
+                SessionSlot::Replacing(r) => replace(SessionKind::Publish, r),
+            };
+            let subscribe = match subscribe {
+                SessionSlot::Ready(subscribe) => {
+                    subscribe.due().map(|at| (at, AlarmReason::Subscribe(who)))
+                }
+                SessionSlot::Replacing(r) => replace(SessionKind::Subscribe, r),
+            };
             publish.into_iter().chain(subscribe)
         });
-        end.into_iter().chain(negotiations)
+        end.into_iter().chain(sessions)
     }
 
     /// The time for [`Effect::SetAlarm`]: the earliest of [`RoomState::alarms`].
@@ -354,7 +453,53 @@ impl Lifecycle {
     }
 }
 
+impl<S> SessionSlot<S> {
+    /// The session, unless it is being replaced.
+    pub(crate) fn ready(&self) -> Option<&S> {
+        match self {
+            Self::Ready(session) => Some(session),
+            Self::Replacing(_) => None,
+        }
+    }
+
+    pub(crate) fn ready_mut(&mut self) -> Option<&mut S> {
+        match self {
+            Self::Ready(session) => Some(session),
+            Self::Replacing(_) => None,
+        }
+    }
+
+    pub(crate) fn replacement_mut(&mut self) -> Option<&mut Replacement> {
+        match self {
+            Self::Ready(_) => None,
+            Self::Replacing(replacement) => Some(replacement),
+        }
+    }
+}
+
+impl Replacement {
+    /// When the room must act: when the request that is out times out, or when the next one
+    /// goes out.
+    pub(crate) fn due(self) -> Millis {
+        match self {
+            Self::Requested { since } | Self::Retrying { since } => {
+                since.after(NEGOTIATION_TIMEOUT_MS)
+            }
+            Self::Failed { retry_at } => retry_at,
+        }
+    }
+}
+
 impl PublishSession {
+    /// A new session with nothing published.
+    pub(crate) fn new(id: SessionId) -> Self {
+        Self {
+            id,
+            published: BTreeMap::new(),
+            negotiation: PublishNegotiation::Idle,
+        }
+    }
+
     /// The kinds of the published tracks, sorted.
     pub(crate) fn kinds(&self) -> Vec<TrackKind> {
         self.published.keys().copied().collect()
@@ -372,6 +517,16 @@ impl PublishNegotiation {
 }
 
 impl SubscribeSession {
+    /// A new session that receives nothing yet and wants `wanted`.
+    pub(crate) fn new(id: SessionId, wanted: BTreeMap<TrackRef, Millis>) -> Self {
+        Self {
+            id,
+            receiving: BTreeMap::new(),
+            wanted,
+            negotiation: SubscribeNegotiation::Idle,
+        }
+    }
+
     /// When the running negotiation times out or, while idle, when the earliest wanted track
     /// may be requested.
     fn due(&self) -> Option<Millis> {

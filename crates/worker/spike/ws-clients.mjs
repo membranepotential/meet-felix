@@ -38,8 +38,10 @@ const withTimeout = (promise, what, ms = TIMEOUT_MS) =>
 // Mock SFU: just enough of the HTTPS API for the room's calls, a switch to fail them all, and a
 // delay for `tracks/close` that holds the room inside an SFU call. Like the live SFU when the
 // publisher is not connected yet (docs/spikes/02-first-call.md), the first pull of each track
-// fails with `not_found_track_error` and still returns an offer; later pulls succeed.
-const sfu = { down: false, closeDelayMs: 0, calls: [], nextMid: 0, pulled: new Set() };
+// fails with `not_found_track_error` and still returns an offer; later pulls succeed. With
+// `loseNextPull`, the next pull's session is lost: like the live SFU on 2026-10-09, it answers
+// that call and every later one on that session with HTTP 410 `session_error`.
+const sfu = { down: false, closeDelayMs: 0, calls: [], nextMid: 0, pulled: new Set(), loseNextPull: false, gone: new Set() };
 const pull = ({ sessionId, trackName }) => {
   const key = `${sessionId}/${trackName}`;
   if (sfu.pulled.has(key)) return { sessionId, trackName, mid: String(sfu.nextMid++) };
@@ -69,6 +71,16 @@ const sfuServer = createServer(async (req, res) => {
   }
   if (sfu.down) {
     return reply(503, { errorCode: "temporarily_unavailable_error", errorDescription: "mock SFU is down" });
+  }
+  if (sfu.loseNextPull && op === "tracks/new" && json.tracks[0].location === "remote") {
+    sfu.loseNextPull = false;
+    sfu.gone.add(session);
+  }
+  if (sfu.gone.has(session)) {
+    return reply(410, {
+      errorCode: "session_error",
+      errorDescription: "Session appears to be disconnected. Please check if the PeerConnection is connected.",
+    });
   }
   switch (`${req.method} ${op}`) {
     case "POST new":
@@ -293,8 +305,16 @@ async function main() {
   check("GET /api/meeting/{words} unknown -> 404", unknown.status === 404, `status ${unknown.status}`);
   const plain = await fetch(`${BASE}/ws/${meeting}`);
   check("GET /ws/{words} without upgrade -> 426", plain.status === 426, `status ${plain.status}`);
-  const ice = await (await fetch(`${BASE}/api/ice`)).json();
-  check("GET /api/ice returns Cloudflare STUN", ice.iceServers?.[0]?.urls?.[0] === "stun:stun.cloudflare.com:3478");
+  const ice = await (await fetch(`${BASE}/api/ice?meeting=${meeting}`)).json();
+  check(
+    "GET /api/ice?meeting= of a known meeting returns Cloudflare STUN (no TURN key set)",
+    ice.iceServers?.length === 1 && ice.iceServers[0].urls?.[0] === "stun:stun.cloudflare.com:3478",
+    JSON.stringify(ice),
+  );
+  const iceStatuses = await Promise.all(
+    ["/api/ice", "/api/ice?meeting=no-such-meeting"].map(async (path) => (await fetch(`${BASE}${path}`)).status),
+  );
+  check("GET /api/ice without a known meeting -> 404", iceStatuses.every((s) => s === 404), iceStatuses.join(","));
 
   // A guest joins the scheduled room first and waits; a client-sent owner header changes nothing
   const guest = await Client.open(meeting, { "x-meet-owner": "1" });
@@ -483,6 +503,58 @@ async function main() {
     neverJoined?.phase === "scheduled" && neverJoined.ended === false && neverJoined.transcript === undefined,
     JSON.stringify(neverJoined),
   );
+
+  // Session recovery (D33): the SFU loses the guest's subscribe session; the room replaces it
+  // instead of retrying, and replaces a session whose peer connection the client reports failed
+  const recovery = (await (await createMeeting({ recording: "hostDecides" })).json()).meeting;
+  const host2 = await Client.open(recovery, ownerCookie);
+  join(host2, { name: "Host" });
+  const host2Id = (await host2.take("welcome").catch(() => null))?.you;
+  const guest2 = await Client.open(recovery);
+  join(guest2, { name: "Guest" });
+  check("a guest joins the recovery meeting", await guest2.gets("welcome"));
+  sfu.loseNextPull = true;
+  const newSessionsBefore = sfu.calls.filter((c) => c.op === "new").length;
+  host2.send({ type: "publishOffer", sdp: "client-offer", tracks: [{ mid: "0", kind: "audio", name: "mic" }] });
+  check("the host of the recovery meeting publishes", await host2.gets("publishAnswer"));
+  check(
+    "a pull answered with 410 session_error makes the room send SubscribeReset with epoch 1",
+    await guest2.gets("subscribeReset", (m) => m.epoch === 1, 8000),
+  );
+  const [lost] = sfu.gone;
+  check(
+    "…after creating a new session",
+    sfu.calls.filter((c) => c.op === "new").length === newSessionsBefore + 1,
+    `${sfu.calls.filter((c) => c.op === "new").length - newSessionsBefore} new sessions`,
+  );
+  const recovered = await receive(guest2, host2Id);
+  check(
+    "the guest receives the host's audio on the new subscribe session",
+    recovered.offer !== null && recovered.session !== undefined && recovered.session !== lost,
+    `lost ${lost}, now ${recovered.session}`,
+  );
+  check(
+    "the room made no further call on the lost session",
+    sfu.calls.filter((c) => c.session === lost).length === 1,
+    `${sfu.calls.filter((c) => c.session === lost).length} calls`,
+  );
+  guest2.send({ type: "resetSession", kind: "subscribe", epoch: 0 });
+  check(
+    "a ResetSession for the replaced subscribe session (epoch 0) changes nothing",
+    !(await guest2.gets("subscribeReset", undefined, 1500)),
+  );
+  guest2.send({ type: "resetSession", kind: "publish", epoch: 0 });
+  check(
+    "ResetSession{publish} from the client is answered with PublishReset",
+    await guest2.gets("publishReset", (m) => m.epoch === 1),
+  );
+  host2.send({ type: "resetSession", kind: "subscribe", epoch: 0 });
+  check(
+    "ResetSession{subscribe} from the client is answered with SubscribeReset",
+    await host2.gets("subscribeReset", (m) => m.epoch === 1),
+  );
+  host2.send({ type: "end" });
+  await Promise.all([host2.closed, guest2.closed].map((p) => withTimeout(p, "recovery end").catch(() => null)));
 
   // SFU down: joining fails with SfuUnavailable and the socket closes
   sfu.down = true;

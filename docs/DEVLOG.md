@@ -3,6 +3,95 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — fullscreen screen share, notification pills, Opus storage
+
+From the second real test: the shared screen was hard to read on a phone,
+and the user disliked the notification strip above the stage.
+
+- **Fullscreen.** Every screen-share tile has a round button that puts the
+  tile fullscreen (`requestFullscreen`; on iPhone Safari the video's own
+  `webkitEnterFullscreen`, since the element API is missing there). The
+  featured tile is rendered once for both orientations, so rotating a phone
+  no longer recreates it and drops out of fullscreen. In portrait the shared
+  screen sits at the top, the face chips right below it.
+- **Notifications.** Toasts are compact pills with an icon per tone, three
+  at most, bottom-centre above the control bar on phones and in the
+  stage's bottom-left corner on wide screens, where shared content matters
+  least ([D28](ui/README.md#d28-the-meeting-screen-keeps-a-labelled-control-bar-the-recording-badge-top-left-and-toasts-off-the-tiles-2026-10-09)
+  updated). Knock cards and the connection note live in the same stack
+  (`Toasts.svelte`). Known cost: the wide-screen column covers the
+  bottom-left tile's name label.
+- **Compressed recordings.** The user asked for compressed storage; spike 3
+  ([spikes/03](spikes/03-whisper-input-and-opus.md)) showed Whisper on
+  Workers AI reads Ogg/Opus directly and the pure-Rust `opus-rs` encodes at
+  37× realtime inside wasm. D16 and D17 now say Ogg/Opus chunks from the
+  start; the post-processing copy is gone. The R2 bucket
+  `meet-felix-recordings` exists in the EU jurisdiction.
+
+Next: the recorder itself (phase 3).
+
+## 2026-10-09 — a dead SFU session is replaced, TURN from `/api/ice`
+
+The second real test (Firefox on a PC, a phone on mobile data) failed
+quietly: the phone's media never reached the PC, and the Worker log showed
+41 × `HTTP 410: session_error: Session appears to be disconnected` on
+subscribe retries. The room retried forever against a session the SFU had
+given up, and nothing told the browser.
+
+- **Decision [D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09):**
+  a dead session is replaced, not retried. `sfu-api` reports HTTP 410 or a
+  `session_error` as `FailureCause::SessionGone` (`SfuError::cause`); the
+  browser reports a peer connection whose `connectionState` became `failed`
+  with the new `ClientMsg::ResetSession { kind }`.
+- **Core.** `Connection::Joined` now holds a `SessionSlot` per kind: `Ready`
+  or `Replacing(Replacement)` (`Requested`, `Failed { retry_at }`,
+  `Retrying`), so everything that works on a session skips one being
+  replaced. A lost publish session takes its tracks with it (closed on every
+  subscriber, no longer recorded). The new session brings
+  `ServerMsg::SubscribeReset` or `PublishReset`; a failed request is sent
+  again through the alarm (`AlarmReason::Replace`), with one
+  `Error { SfuUnavailable }`. `Published`, `SubscribeOffer`, `Renegotiated`
+  and the session calls in `SfuCall` now carry their session id, so a late
+  reply about the old session is ignored (the "negotiation ids on SFU
+  replies" item, for sessions). Four rule tests; the property test also sends
+  `ResetSession` and `SessionGone` failures and checks that a reply about a
+  session no longer in use changes nothing.
+- **Worker.** A failed SFU call is logged with its call, participant and
+  session (`SFU Subscribe for ParticipantId(1) on session 444e… failed: HTTP
+  410 …`). `GET /api/ice` adds Cloudflare TURN servers with 24-hour
+  credentials when `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` are set, drops
+  port-53 URLs, and falls back to STUN only otherwise.
+- **Web.** The reducer turns the resets into `publish-reset` and
+  `subscribe-reset`; the session replaces only the affected peer connection
+  (the publisher republishes its current tracks). `Publisher` and
+  `Subscriber` report a failed connection once; `SessionResets` sends
+  `resetSession` at most once per kind until the reset arrives, again after
+  15 s, and the user sees a quiet "Reconnecting…" notice.
+- Checks after the review fixes: core 44 tests (46 with `wasm`), sfu-api 12,
+  worker 27, web 113, spike 73/73 (new: 410 → new session →
+  `SubscribeReset` with epoch 1 → track delivered; a stale `ResetSession`
+  gets no answer; `ResetSession` for both kinds; `/api/ice` 404 without a
+  known meeting).
+
+- **Review fixes.** A request for a replacement session times out after
+  `NEGOTIATION_TIMEOUT_MS` and counts as failed, so a lost reply no longer
+  leaves the participant replacing forever (`Replacement` carries `since`;
+  new property: no replacement outlives its deadline past an alarm).
+  Sessions have epochs (`SessionEpoch`): `Welcome` carries them, each reset
+  carries the new one, and `ResetSession` names the failed session's epoch,
+  so a late failure of a replaced connection cannot replace the new session;
+  a reconnecting client replaces connections whose epoch is behind.
+  `PublishOffer`, `Unpublish`, `SubscribeAnswer` and `SetLayer` about a
+  session being replaced are dropped silently instead of `NotJoined`.
+  `/api/ice` needs `?meeting=` of a known meeting (404 otherwise, as TURN is
+  billed); the Worker gives Cloudflare 3 s and the browser the route 4 s
+  before falling back to STUN. Toasts are announced through two permanent
+  live regions (polite, assertive). Broken D16 anchors fixed.
+
+Next: create the TURN key and upload its secrets, deploy, repeat the phone
+test. Rooms stored before this change do not deserialize (the `Joined` shape
+changed); a deploy during a live meeting breaks that meeting.
+
 ## 2026-10-09 — first real test: logs, truthful meeting list, centred pages
 
 The user's first test from a phone on mobile data and a laptop found three

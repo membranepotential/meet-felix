@@ -21,23 +21,19 @@
 </script>
 
 <div class="stage" bind:clientWidth={width} bind:clientHeight={height}>
-	{#if featured && landscape}
-		<div class="spotlight beside">
-			<div class="featured"><Tile tile={featured} {layers} /></div>
-			{#if rest.length > 0}
+	{#if featured}
+		<!-- One featured tile for both orientations: rotating a phone keeps it, and its fullscreen. -->
+		<div class={['spotlight', landscape ? 'beside' : 'below']}>
+			<div class="featured">
+				<div class="screen-box"><Tile tile={featured} {layers} /></div>
+			</div>
+			{#if rest.length > 0 && landscape}
 				<ul class="strip" aria-label="Other participants">
 					{#each rest as tile (tile.key)}
 						<li><Tile {tile} {layers} variant="strip" /></li>
 					{/each}
 				</ul>
-			{/if}
-		</div>
-	{:else if featured}
-		<div class="spotlight below">
-			<div class="featured">
-				<div class="screen-box"><Tile tile={featured} {layers} /></div>
-			</div>
-			{#if rest.length > 0}
+			{:else if rest.length > 0}
 				<ul class="chips" aria-label="Other participants">
 					{#each rest as tile (tile.key)}
 						<li><Tile {tile} {layers} variant="chip" /></li>
@@ -107,18 +103,21 @@
 		aspect-ratio: 16 / 9;
 	}
 
-	/* Portrait (phones): the screen as wide as the stage, faces as round chips below it. */
+	/*
+	 * Portrait (phones): the screen as wide as the stage at its top, faces as round chips right
+	 * below it. The free space stays at the bottom, where the notices appear.
+	 */
 	.spotlight.below {
-		grid-template-rows: minmax(0, 1fr) auto;
+		grid-template-rows: minmax(0, max-content) auto;
+		align-content: start;
 	}
 
-	.spotlight.below .featured {
-		display: grid;
-		align-items: center;
+	.beside .screen-box {
+		height: 100%;
 	}
 
 	/* A 16:9 box, so the shared screen is not a thin band inside a tall tile. */
-	.screen-box {
+	.below .screen-box {
 		width: 100%;
 		max-height: 100%;
 		aspect-ratio: 16 / 9;

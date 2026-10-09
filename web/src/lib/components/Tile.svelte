@@ -1,4 +1,6 @@
 <script lang="ts" module>
+	import { on } from 'svelte/events';
+	import { createSubscriber } from 'svelte/reactivity';
 	import type { TrackRef } from '../protocol.ts';
 
 	/** What a tile shows. */
@@ -32,6 +34,41 @@
 	 * face below a shared screen on a phone; the name is for screen readers only.
 	 */
 	export type TileVariant = 'tile' | 'strip' | 'chip';
+
+	/** iPhone Safari's own fullscreen player; not in the DOM typings. */
+	type WebKitVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+
+	/**
+	 * How this browser can show a shared screen fullscreen: the whole tile through the Fullscreen
+	 * API, only the video in the system player (iPhone Safari has no Fullscreen API for other
+	 * elements), or not at all.
+	 */
+	const fullscreenWay: 'element' | 'video' | null = document.fullscreenEnabled
+		? 'element'
+		: 'webkitEnterFullscreen' in HTMLVideoElement.prototype
+			? 'video'
+			: null;
+
+	const subscribeFullscreen = createSubscriber((update) =>
+		on(document, 'fullscreenchange', update)
+	);
+
+	/** `document.fullscreenElement`, re-read when the browser enters or leaves fullscreen. */
+	function fullscreenElement(): Element | null {
+		subscribeFullscreen();
+		return document.fullscreenElement;
+	}
+
+	/**
+	 * Shows `video` in the system player. iOS pauses the video when the player closes, so it is
+	 * started again then.
+	 */
+	function enterVideoFullscreen(video: WebKitVideo): void {
+		video.addEventListener('webkitendfullscreen', () => video.play().catch(() => {}), {
+			once: true
+		});
+		video.webkitEnterFullscreen?.();
+	}
 </script>
 
 <script lang="ts">
@@ -50,6 +87,29 @@
 	let speaking = $derived(isSpeaking(level));
 	let bars = $derived(levelBars(level));
 	let label = $derived(tile.self ? `${tile.name} (you)` : tile.name);
+
+	let figure: HTMLElement | undefined = $state();
+	let video: HTMLVideoElement | undefined = $state();
+	let fullscreen = $derived(figure !== undefined && fullscreenElement() === figure);
+	/** Chips are too small for the button; a screen is a chip only while a second one is shared. */
+	let canFullscreen = $derived(
+		tile.source === 'screen' && tile.stream !== null && variant !== 'chip' && fullscreenWay !== null
+	);
+
+	/** The whole tile, so the name stays visible; the video alone where only that works. */
+	function toggleFullscreen() {
+		if (fullscreen) {
+			document.exitFullscreen().catch(() => {});
+			return;
+		}
+		if (!video) return;
+		const target = video;
+		if (fullscreenWay === 'element' && figure) {
+			figure.requestFullscreen().catch(() => enterVideoFullscreen(target));
+		} else {
+			enterVideoFullscreen(target);
+		}
+	}
 
 	let initials = $derived(
 		tile.name
@@ -73,12 +133,14 @@
 </script>
 
 <figure
+	bind:this={figure}
 	class={['tile', variant, speaking && 'speaking']}
 	title={variant === 'chip' ? label : undefined}
 	{@attach tile.layerTrack && reportWidth(tile.layerTrack)}
 >
 	{#if tile.stream}
 		<video
+			bind:this={video}
 			{@attach showStream(tile.stream)}
 			class={[tile.source === 'screen' ? 'screen' : 'camera', tile.self && 'mirror']}
 		></video>
@@ -98,6 +160,17 @@
 				<span class="visually-hidden">Remove {tile.name}</span>
 			</button>
 		</div>
+	{/if}
+	{#if canFullscreen}
+		<button
+			type="button"
+			class="fullscreen"
+			title={fullscreen ? 'Exit fullscreen' : 'Show fullscreen'}
+			aria-label={fullscreen ? 'Exit fullscreen' : 'Show fullscreen'}
+			onclick={toggleFullscreen}
+		>
+			<Icon name={fullscreen ? 'fullscreen-exit' : 'fullscreen'} size={22} />
+		</button>
 	{/if}
 	<figcaption class={[variant === 'chip' && 'visually-hidden']}>
 		{#if !tile.micOn}<span class="muted"><Icon name="mic-off" size={16} /></span>{/if}
@@ -168,6 +241,24 @@
 		background: #08100f;
 	}
 
+	/* Fullscreen: the screen on black, every pixel visible, no rounded frame. */
+	.tile:fullscreen {
+		border-radius: 0;
+		background: #000;
+	}
+
+	.tile:fullscreen::after {
+		display: none;
+	}
+
+	.tile:fullscreen .screen {
+		background: #000;
+	}
+
+	.tile::backdrop {
+		background: #000;
+	}
+
 	.mirror {
 		transform: scaleX(-1);
 	}
@@ -209,6 +300,11 @@
 		font-size: 0.8125rem;
 	}
 
+	/* Leaves room for the fullscreen button in the other corner. */
+	.fullscreen ~ figcaption {
+		max-width: calc(100% - 4.5rem);
+	}
+
 	.name {
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -234,7 +330,30 @@
 		color: var(--fog);
 	}
 
-	.actions button:hover {
+	.fullscreen {
+		position: absolute;
+		right: 0.5rem;
+		bottom: 0.5rem;
+		display: grid;
+		place-items: center;
+		width: 48px;
+		height: 48px;
+		border: 0;
+		border-radius: 50%;
+		background: rgb(14 28 34 / 0.62);
+		color: var(--fog);
+		transition: background-color 120ms ease;
+	}
+
+	.strip .fullscreen {
+		right: 0.25rem;
+		bottom: 0.25rem;
+		width: 44px;
+		height: 44px;
+	}
+
+	.actions button:hover,
+	.fullscreen:hover {
 		background: var(--reed);
 	}
 

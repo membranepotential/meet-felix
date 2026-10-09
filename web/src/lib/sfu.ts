@@ -9,6 +9,10 @@
  *
  * The SFU is ICE-lite and returns its candidates in the SDP, so the client sends its offer
  * right after `setLocalDescription` without waiting for ICE gathering.
+ *
+ * A peer connection whose `connectionState` becomes `failed` does not recover by itself: both
+ * classes report it once, and the session asks the room for a new SFU session (D33,
+ * `ClientMsg::ResetSession`), after which it replaces the whole class.
  */
 import {
 	trackKey,
@@ -24,6 +28,16 @@ import {
 
 export const peerConnection = (iceServers: RTCIceServer[]): RTCPeerConnection =>
 	new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' });
+
+/** Calls `onFailed` once, when `pc.connectionState` first becomes `failed`. */
+function watchFailure(pc: RTCPeerConnection, onFailed: () => void): void {
+	const check = () => {
+		if (pc.connectionState !== 'failed') return;
+		pc.removeEventListener('connectionstatechange', check);
+		onFailed();
+	};
+	pc.addEventListener('connectionstatechange', check);
+}
 
 /**
  * Camera simulcast: quarter, half and full resolution, named by the core's `Rid`s. Each
@@ -121,14 +135,20 @@ export class Publisher {
 	#closed = false;
 	#pendingAnswer: { resolve: (sdp: Sdp) => void; reject: (e: PublishError) => void } | null = null;
 
+	/**
+	 * `onFailed` hears about publish offers that did not go through; `onConnectionFailed` hears
+	 * once that the peer connection failed.
+	 */
 	constructor(
 		pc: RTCPeerConnection,
 		send: (msg: ClientMsg) => boolean,
-		onFailed: (kinds: TrackKind[], reason: PublishFailure) => void
+		onFailed: (kinds: TrackKind[], reason: PublishFailure) => void,
+		onConnectionFailed: () => void
 	) {
 		this.#pc = pc;
 		this.#send = send;
 		this.#onFailed = onFailed;
+		watchFailure(pc, onConnectionFailed);
 	}
 
 	sync(desired: Outgoing): void {
@@ -307,14 +327,17 @@ export class Subscriber {
 	#tracks = new Map<string, RemoteTrack>();
 	#queue: Promise<void> = Promise.resolve();
 
+	/** `onConnectionFailed` hears once that the peer connection failed. */
 	constructor(
 		pc: RTCPeerConnection,
 		sendAnswer: (sdp: Sdp) => void,
-		onTracks: (tracks: RemoteTracks, delivered: TrackRef[]) => void
+		onTracks: (tracks: RemoteTracks, delivered: TrackRef[]) => void,
+		onConnectionFailed: () => void
 	) {
 		this.#pc = pc;
 		this.#sendAnswer = sendAnswer;
 		this.#onTracks = onTracks;
+		watchFailure(pc, onConnectionFailed);
 	}
 
 	offer(sdp: Sdp, incoming: IncomingTrack[]): void {

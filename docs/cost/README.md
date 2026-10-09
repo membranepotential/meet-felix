@@ -26,7 +26,8 @@ Research: [01 §2, §6 — Workers pricing, bandwidth per meeting-hour](../resea
 - Recording adds adapter egress: each speaker's audio leaves the SFU once, as
   48 kHz stereo PCM, at 0.69 GB per speaker-hour, billed like media.
 - SFU, TURN and adapter egress share one pool: 1,000 GB free per month, then
-  $0.05/GB.
+  $0.05/GB. TURN is in use since 2026-10-09 (`GET /api/ice`, for known meetings only); traffic between
+  TURN and the SFU is free, so relayed calls add little.
 
 ## Fixed cost
 

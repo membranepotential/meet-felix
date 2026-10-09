@@ -150,6 +150,7 @@ impl Room {
         );
         self.sfu(SfuReply::Published {
             who,
+            session: session(who, SessionKind::Publish),
             sdp_answer: Sdp::new("answer"),
         })
     }

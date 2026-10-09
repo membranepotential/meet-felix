@@ -208,11 +208,20 @@ const isIceServer = (value: unknown): value is RTCIceServer => {
 	);
 };
 
-/** STUN and TURN servers with short-lived TURN credentials. */
-export function getIceServers(): Promise<ApiResult<RTCIceServer[]>> {
+/**
+ * How long to wait for the ICE servers. The peer connections wait for them, so a stalled
+ * request must not hold up the call; the caller falls back to STUN.
+ */
+export const ICE_TIMEOUT_MS = 4_000;
+
+/**
+ * STUN and TURN servers with short-lived TURN credentials, for a participant of `meeting`
+ * (the Worker hands TURN credentials only to known meetings). Fails after `ICE_TIMEOUT_MS`.
+ */
+export function getIceServers(meeting: MeetingId): Promise<ApiResult<RTCIceServer[]>> {
 	return request(
-		'/api/ice',
-		{},
+		`/api/ice?meeting=${encodeURIComponent(meeting)}`,
+		{ signal: AbortSignal.timeout(ICE_TIMEOUT_MS) },
 		json((body) =>
 			isObject(body) && Array.isArray(body.iceServers) && body.iceServers.every(isIceServer)
 				? body.iceServers

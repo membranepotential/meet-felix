@@ -11,6 +11,8 @@ import type {
 	RoomView,
 	Sdp,
 	ServerMsg,
+	SessionEpoch,
+	SessionEpochs,
 	TranscriptRef
 } from './protocol.ts';
 import type { ToastTone } from './toasts.svelte.ts';
@@ -51,11 +53,18 @@ export type Command =
 	| { kind: 'toast'; text: string; tone: ToastTone }
 	/** Harmless for the user, but worth a line in the console. */
 	| { kind: 'warn'; text: string }
-	/** We are in. `fresh` means a new participant: open new SFU peer connections. */
-	| { kind: 'welcomed'; fresh: boolean }
+	/**
+	 * We are in. `fresh` means a new participant: open new SFU peer connections. `epochs` names
+	 * the room's current sessions; a connection made for an older one must be replaced.
+	 */
+	| { kind: 'welcomed'; fresh: boolean; epochs: SessionEpochs }
 	| { kind: 'publish-answer'; sdp: Sdp }
 	| { kind: 'publish-rejected' }
 	| { kind: 'subscribe-offer'; sdp: Sdp; tracks: IncomingTrack[] }
+	/** The room replaced our publish session: publish everything again on a new connection. */
+	| { kind: 'publish-reset'; epoch: SessionEpoch }
+	/** The room replaced our subscribe session: receive on a new connection. */
+	| { kind: 'subscribe-reset'; epoch: SessionEpoch }
 	/**
 	 * A subscribe failed and the room retries it. Often the first pull only raced the
 	 * publisher's connection, so the session shows `notice` only if no `subscribe-offer`
@@ -91,7 +100,7 @@ export function describeError(code: ErrorCode): string | null {
 		case 'publishFailed':
 			return 'Your camera, microphone or screen could not be shared. Turn it off and on to try again.';
 		case 'sfuUnavailable':
-			return 'The media server is not reachable right now. Leave and join again in a minute.';
+			return 'The media server is not reachable right now. The meeting keeps trying on its own.';
 		case 'subscribeFailed':
 			return 'Some video or audio did not arrive. The meeting retries on its own.';
 		case 'notPublished':
@@ -115,7 +124,7 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			const fresh = stage.kind !== 'in' || stage.you !== msg.you;
 			return [
 				{ ...state, stage: { kind: 'in', you: msg.you, room: msg.state }, resume: msg.resume },
-				[{ kind: 'welcomed', fresh }]
+				[{ kind: 'welcomed', fresh, epochs: msg.epochs }]
 			];
 		}
 		case 'state': {
@@ -138,6 +147,10 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			return [state, [{ kind: 'publish-answer', sdp: msg.sdp }]];
 		case 'subscribeOffer':
 			return [state, [{ kind: 'subscribe-offer', sdp: msg.sdp, tracks: msg.tracks }]];
+		case 'publishReset':
+			return [state, [{ kind: 'publish-reset', epoch: msg.epoch }]];
+		case 'subscribeReset':
+			return [state, [{ kind: 'subscribe-reset', epoch: msg.epoch }]];
 		case 'knock':
 			// Hosts see the knocking guest, with Admit and Deny, from the room view's `presence`;
 			// the `State` broadcast that lists them arrives just before this message.
