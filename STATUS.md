@@ -4,10 +4,10 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- redeploy — `wrangler deploy` retrying after a Cloudflare API 504 — background — next: production probe (login, scheduled join), call test run 5
-- deployed-check — user tests https://meet.example.com from phone + laptop — waiting
+- deployed-check — user tests https://meet.example.com from phone + laptop (two networks, 10 min) — waiting
 
 ## Done
+- 2026-10-09 Redeployed (version 7f62b3e0); production probe of the owner flow through meet.example.com green; call test run 5 (owner session, scheduled meeting, join as host) 70/70 locally.
 - 2026-10-09 D32 one owner; owner session cookie (worker 23 tests, spike 62/62); scheduled lifecycle in the core (37 tests); login-first web with join-as-host (93 tests); UI decisions D22–D31 implemented. Commits 626bf6a…b4c8b15.
 - 2026-10-09 https://meet.example.com live: Pages front door `meet-felix-edge` (edge/dist/_worker.js, service binding) + external CNAME; HTTPS, API and a real WebSocket join verified (Welcome in 626 ms). Research in docs/research/10.
 - 2026-10-09 UI decisions D22–D31 recorded (docs/ui). User added: login-first index page with a session cookie, scheduled meetings (link valid until used), join-as-host fallback.
@@ -23,6 +23,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
+- Small UX fixes from run 5: make the first subscribe retry quiet (toast only if it persists > 10 s) or pull later; `/meetings` must show Scheduled vs Live (index needs a liveAt mark); 'Join as host' inside a live meeting.
 - Core later: reply for an SFU offer on the publish session; replace a subscribe session after 410; partial publish carries accepted tracks; grace period before a dropped socket counts as Leave; negotiation ids on SFU replies; cleanup of ended-room storage.
 - Web later: active speaker, remote mute state, peer-connection failure recovery, waiting-for-consent list for hosts.
 - Observe hibernation and egress on the dashboard after real use; decide Free vs Paid plan.

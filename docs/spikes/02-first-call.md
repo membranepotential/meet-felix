@@ -217,3 +217,148 @@ The criterion "two browsers on different networks hold a 10-minute call" cannot 
 2. The guest's first frame of the host came 4.1 s after its subscribe answer, against 0.5 s for the host and the third participant. Unexplained; check with `getStats()` sampled every 200 ms after the answer (`framesReceived`, `pliCount`, `keyFramesDecoded`).
 3. A `not_found_track_error` on a connected session costs 3 s (`SUBSCRIBE_RETRY_MS`) before the publisher's tracks arrive. A publisher-connected signal, or a shorter first retry, would bring "admit → seen by everyone" from ≈5 s to ≈1.5 s.
 4. Items 2–7 of "Open issues" above still stand (camera-off signalling is now solved by the room view; `setLayer` retry exists but was not exercised live; script not in the repo; `web/build` prerequisite; TURN, screen share, resume, >3 participants, deployed Worker untested).
+
+## Run 5 (owner session, scheduled meeting)
+
+*2026-10-09, main checkout at `122319f` (after f9dbbd7 "Scheduled meetings and the owner session" and b4c8b15 "Web: login-first index, past meetings behind the session, join as host"). Same setup as run 4: `wrangler dev --port 8787` with `.dev.vars`, Vite on 5174, headless Chromium contexts with fake media, one context per participant so the session cookie stays in the owner's context. Everything is driven through the UI, not the API. Script `…/scratchpad/run5/call5.mjs` (derived from `call4.mjs`), outputs in `…/scratchpad/run5/` (`logs/run5.log`, `logs/ws-*.log`, `logs/console-*.log`, `logs/stats-*.json`, `logs/results.json`, `logs/wrangler.log`, `shots/`).*
+
+**Accepted locally.** Meeting `net-ruby-nibble`, 70/70 checks in 36 s. The owner-session flow works end to end: login on `/` with the error on a wrong password, a scheduled meeting whose first guest waits in the lobby and is let in the moment the owner's socket joins, a guest who joins the live room directly, "Join as host" on the pre-join with the password, host controls only for the two owner sessions, camera off and on, end for everyone with the transcript link, the past-meetings list and log out. Media flowed between every pair through the real SFU as in run 4.
+
+Two earlier attempts of the same script (meetings `papaya-unpaid-tribe` and `amiss-zebra-outer`) stopped on script bugs, not app bugs: `getByRole('button', { name: /^Join/ })` now also matches the "Join as host" button, and `.meeting` matches the pre-join's `<h1 class="meeting">` and the lobby's `<p class="meeting">` as well as the in-meeting `<div class="meeting">`, so "in the meeting" resolved at once (4–8 ms "timings" and two false FAILs on D). The run reported here uses `form button.join` and `div.meeting`.
+
+### Checks
+
+```
+PASS  / shows the login form to a browser without a session
+PASS  a wrong password shows "That password is wrong."
+PASS  after the wrong password the page still shows the login form
+PASS  the right password shows the owner area (New meeting)  (179 ms after Log in)
+PASS  "Record and transcribe" is on by default
+PASS  the owner area has a Log out button and a Past meetings link
+PASS  owner created a meeting from the owner area  (net-ruby-nibble)
+PASS  GET /api/meeting reports phase "scheduled" and recording fromStart
+PASS  guest pre-join shows the recording notice
+PASS  guest pre-join shows no password field
+PASS  guest pre-join shows the quiet "Join as host" link
+PASS  guest pre-join says the meeting has not started yet (scheduled)
+PASS  guest pre-join offers "Join and accept recording"
+PASS  guest lands in the lobby with "Waiting for the host"  (92 ms after Join)
+PASS  lobby offers "Join as host" to the waiting guest
+PASS  host pre-join says "You join as host"
+PASS  host pre-join shows no "Join as host" link and no password field
+PASS  host reaches the in-meeting view  (798 ms after Join)
+PASS  waiting guest is admitted automatically when the host joins  (803 ms after the host clicked Join)
+PASS  both pages show two tiles
+PASS  no consent dialog on the guest after joining with consent
+PASS  B: first frame of the host within 10 s of the host's Join  (2189 ms)
+PASS  A: first frame of the guest within 10 s of the host's Join  (5256 ms)
+PASS  host sees the host controls; guest does not
+PASS  room shows Recording on host and guest
+PASS  A: inbound video bytesReceived grows over 5 s  (+140951 bytes, 226 kbit/s)
+PASS  A: inbound audio bytesReceived grows over 5 s  (+15765 bytes, 25 kbit/s)
+PASS  A: outbound video has three simulcast encodings (f, h, q)  (1280x720, 640x360, 320x180, H264)
+PASS  A: both peer connections have a selected candidate pair  (srflx->host, srflx->host)
+PASS  B: inbound video bytesReceived grows over 5 s  (+141797 bytes, 227 kbit/s)
+PASS  B: inbound audio bytesReceived grows over 5 s  (+15121 bytes, 24 kbit/s)
+PASS  B: outbound video has three simulcast encodings (f, h, q)
+PASS  B: both peer connections have a selected candidate pair  (srflx->host, srflx->host)
+PASS  A: remote <video> plays  (Guest 640x360, !paused, readyState 4)
+PASS  B: remote <video> plays  (Host 640x360, !paused, readyState 4)
+PASS  GET /api/meeting reports phase "live" after the host joined
+PASS  C pre-join (live room) shows no "not started yet" note
+PASS  C joins the live room directly (no lobby)  (786 ms after Join)
+PASS  A, B and C each show three tiles
+PASS  C: frames from Host and Guest within 10 s of C's Join  (Host 1152 ms, Guest 1153 ms)
+PASS  A and B: frames from Third within 10 s of C's Join  (A 4317 ms, B 4318 ms)
+PASS  A: two remote videos play with three in the room
+PASS  B: two remote videos play with three in the room
+PASS  C: two remote videos play with three in the room
+PASS  "Join as host" opens the password form on the pre-join
+PASS  "Join as host" with a wrong password shows the error and does not join
+PASS  after the login D joins the meeting without another click  (781 ms after Log in)
+PASS  D shows the host controls
+PASS  A, B, C and D each show four tiles
+PASS  D sees the host's video and the host sees D's  (D sees Host 1151 ms, A sees Fourth 5796 ms after D's Log in)
+PASS  A's tile for Fourth is marked (host); Guest and Third are not
+PASS  guest shows host initials after camera off within 1 s  (after 31 ms)
+PASS  guest shows host video again after camera on  (after 1229 ms)
+PASS  a new publish offer was sent and answered for the new camera track  (publishOffer 1 -> 2, publishAnswer 1 -> 2)
+PASS  A: subscribeFailed count 2, each followed by a subscribeOffer within 5 s  ([3184, 4069])
+PASS  B: subscribeFailed count 2, each followed by a subscribeOffer within 5 s  ([3184, 4072])
+PASS  C: subscribeFailed count 1, each followed by a subscribeOffer within 5 s  ([4069])
+PASS  D: subscribeFailed count 0
+PASS  A: reaches the ended page with a transcript link  (309 ms after End meeting)
+PASS  B: reaches the ended page with a transcript link  (373 ms)
+PASS  C: reaches the ended page with a transcript link  (436 ms)
+PASS  D: reaches the ended page with a transcript link  (501 ms)
+PASS  /meetings lists the meeting as Ended with a Transcript link
+PASS  after Log out, / shows the login form again
+PASS  after Log out, /api/me answers 401 from that browser
+PASS  a fresh join attempt gets the ended/unknown page  (This meeting does not exist)
+PASS  A: no console errors besides the expected 401 responses  (3 expected 401 lines)
+PASS  B: no console errors besides the expected 401 responses  (1)
+PASS  C: no console errors besides the expected 401 responses  (1)
+PASS  D: no console errors besides the expected 401 responses  (2)
+```
+
+### The flow, step by step
+
+1. **Login (A).** `/` shows "Log in" with one password field (`01-A-login-form.png`). A wrong password: `POST /api/login` 401, the form stays and shows "That password is wrong." (`01b-A-wrong-password.png`). The right password: 204 with the `owner` cookie, and the owner area ("New meeting", the "Record and transcribe" switch on, "Log out", "Past meetings") appears 179 ms after the click (`02-A-owner-area.png`). The script never prints the password; it reads `CREATE_SECRET` from `.dev.vars` and types it into the field.
+2. **Create.** "New meeting" → the words on one line, the link, Copy link, Join now (`02b-A-created.png`). `GET /api/meeting/net-ruby-nibble` answers `{"recordingPolicy":"fromStart","phase":"scheduled","ended":false}`.
+3. **Guest B first.** The pre-join shows the recording notice, "The meeting has not started yet. You wait until the host arrives.", the button "Join and accept recording", no password field, and the quiet "Join as host" link under the button (`03-B-guest-prejoin.png`). Join → `waiting` 12 ms after the `join` frame; the lobby says "Waiting for the host" with Leave and "Join as host" (`04-B-lobby.png`), 92 ms after the click.
+4. **Owner opens the link (A).** The session check (`GET /api/me` 204) makes the pre-join say "You join as host" in place of the link; no password field (`05-A-host-prejoin.png`). Join → A's `welcome` at 18:55:33.453 (0.39 s after `join`), B's `welcome` at 33.641, so the waiting guest was admitted 0.19 s after the host, 803 ms after the host's click; the room is `live` and recording from the start (`StartRecording` in the wrangler log at that step). B sees the host's video 2.19 s after A's click; A sees the guest's video 5.26 s after it (A's first `subscribeOffer` 0.3 s after its `publishAnswer` carried the guest's audio, the video came with the second offer 3.17 s later, as in run 4; no error was logged for this partial pull). Only A has the Host group in the control bar (Lock, Stop recording, End for all).
+5. **Guest C joins live.** The pre-join no longer shows the "not started yet" note. Join → in the meeting 786 ms after the click, no lobby. C sees Host and Guest after 1.15 s (its first subscribe offer came before its own `publishAnswer`); A and B see Third after 4.32 s: one `subscribeFailed` each at 18:55:47.111 (0.28 s after C's `publishAnswer`), retried with an offer 3.18 s later (`06-A-three.png`, `06-B-three.png`, `06-C-three.png`).
+6. **"Join as host" (D).** D fills a name, clicks the link; the password form "Join as host" opens under the join bar (`07-D-join-as-host-form.png`). A wrong password: the error, still on the pre-join. The right one: `POST /api/login` 204, and the pre-join joins at once (`loggedIn()` → `onjoin`): `welcome` with `you: 3` and role host 0.33 s after `join`, in the meeting 781 ms after the Log in click, with the host controls (`07b-D-in-meeting-as-host.png`). Everyone shows four tiles; A's captions read "Host (you) (host)", "Guest", "Third", "Fourth (host)" (`07b-A-four.png`). D sees the host 1.15 s after its login, the host sees Fourth after 5.80 s (`subscribeFailed` on A, B and C at 18:55:53.604, 0.42 s after D's `publishAnswer`; retry offers 4.07 s later). D had no failure of its own.
+7. **Camera off and on (A).** `unpublish` → B shows "H" after 31 ms (`08-B-host-camera-off.png`); Start video → `publishOffer` +1.75 s after the stop (the script waits 1.5 s), `publishAnswer` 189 ms later, `subscribeOffer` to B, C and D 309 ms after that (all three pulls succeeded at once, no `not_found`), B shows video 1.23 s after the click (`08b-B-host-camera-on-again.png`).
+8. **End (A).** "End for all" → "End meeting": `ended` with the transcript token on all four sockets 0.29 s after `end`, sockets closed with 1000; every page shows "The meeting has ended" with the transcript link, Copy link and Start page (`09-A-ended.png` … `09-D-ended.png`) within 0.5 s. A fifth context opening the link gets "This meeting does not exist" (`GET /api/meeting` 404).
+9. **Past meetings (A).** `/meetings` (`GET /api/me` 204, `GET /api/meetings` 200) lists `net-ruby-nibble` first, "Ended", with a "Transcript" link to the same token as the ended page (`10-A-meetings.png`).
+10. **Log out (A).** "Log out" on `/` → `POST /api/logout` 204, the login form is back, and `/api/me` from that browser answers 401 (`11-A-logged-out.png`).
+
+### Timings
+
+| Step | Time |
+|---|---|
+| Login (right password) → owner area | 179 ms (80 ms in the second attempt) |
+| Guest B: Join click → lobby ("Waiting for the host") | 92 ms (`waiting` 12 ms after `join`) |
+| Owner A: Join click → in-meeting view | 798 ms (`welcome` 0.39 s after `join`) |
+| A's Join click → B admitted (B's `welcome`, in-meeting view) | 803 ms (0.19 s after A's `welcome`) |
+| A's Join click → B sees A's first frame | 2.19 s |
+| A's Join click → A sees B's first frame | 5.26 s (video on A's second subscribe offer, 3.17 s after the first) |
+| Guest C: Join click → in-meeting view | 786 ms |
+| C's Join click → C sees Host and Guest | 1.15 s |
+| C's Join click → A and B see Third | 4.32 s (one `subscribeFailed` each, retry after 3.18 s) |
+| D: Log in click → in-meeting view as host | 781 ms |
+| D's Log in → D sees Host / A sees Fourth | 1.15 s / 5.80 s (`subscribeFailed` on A, B, C; retry after 4.07 s) |
+| Camera off → initials on B | 31 ms |
+| Camera on → video on B | 1.23 s |
+| End → `ended` on all four sockets → ended pages | 0.29 s → 0.31–0.50 s |
+
+### Numbers (two in the room, 5 s window)
+
+A: inbound video +140,951 bytes (226 kbit/s), audio +15,765 (25 kbit/s); outbound video +483,412 bytes (773 kbit/s over three layers), audio +15,121 (24 kbit/s). B: inbound video +141,797 (227 kbit/s), audio +15,121 (24 kbit/s); outbound video +482,755 (772 kbit/s), audio +15,768 (25 kbit/s). Both decode 640x360 (`h`). Every peer connection of A, B, C and D: `connected`, selected pair `srflx (udp) → host 141.101.90.0:1473`, `currentRoundTripTime` 10–14 ms, `packetsLost` 0. With four in the room every page decoded three remote videos, 640x360 except the newest one still at 320x180 (`q`) while its `setLayer` took effect. Frames per page: A sent `join` 1, `publishOffer` 2, `subscribeAnswer` 4, `setLayer` 3, `unpublish` 1, `end` 1; received `welcome` 1, `state` 11, `publishAnswer` 2, `subscribeOffer` 4, `error:subscribeFailed` 2, `ended` 1. B received `waiting` 1 before its `welcome`. D received no error.
+
+### Wrangler log
+
+For this meeting: `StartRecording` when the owner's socket joined, four `RecordTrack` (`mic-1`, one per participant), `StopRecording` at the end, five `SFU call failed: track: not_found_track_error …` (C's two tracks pulled into A's and B's sessions, D's into A's, B's and C's, 0.3–0.4 s after the publisher's `publishAnswer`; each retried after `SUBSCRIBE_RETRY_MS`) and, new, **two `SFU call failed: HTTP 410: session_error: Session appears to be disconnected`** logged after the end. No 406, no panic. Most likely cause (unverified): B, C and D each sent `setLayer` for the host's re-published camera at 18:56:01.03–01.05, A's `end` followed at 01.54 and the browsers closed their peer connections at 01.88 on `ended`; two of the three `SfuUpdateLayer` calls were still in flight and the SFU answered them for sessions that had just disconnected. The core ignores replies after `Ended` (`room.rs`: "nothing listens any more"), so this is noise, not a fault, but a `tracks/update` on a session the room is about to drop could be skipped.
+
+The stale DO records from run 4's `.wrangler/state/v3/do` did not throw this time (no `Uncaught`, no JSON error), so the state was left in place.
+
+### Other findings
+
+- **The retry toast is now user-visible.** Each transient `not_found` shows "Some video or audio did not arrive. The meeting retries on its own." on the host's and the guests' screens (visible in `06-A-three.png`) for the 3–4 s until the retry offer arrives; it appeared on A twice and on B and C once in this short meeting. With the pull-before-connected race still open (run 4, open issue 3), every new publisher triggers it on every other participant. Either the retry becomes quiet (the first `not_found` after a publish is expected, not an error), or the race is fixed.
+- **`/meetings` labels scheduled meetings "Live".** `PastMeeting` carries only `ended: boolean`, so `papaya-unpaid-tribe` (created in the first attempt, never joined, phase `scheduled`) and two meetings from earlier sessions appear as "Live" (`10-A-meetings.png`). The list needs the phase (scheduled / live / ended), or a different word for "not ended".
+- **Chromium logs every 401 as a console error** ("Failed to load resource: the server responded with a status of 401"): the session check `GET /api/me` of a browser without a cookie, and the deliberate wrong passwords. The app handles them (login form, "That password is wrong."); the check in the script counts them separately. A 401 for the routine session check is the designed answer, so the noise is cosmetic.
+- **Promotion from the lobby is not exercised.** B's lobby shows the "Join as host" link, but B was admitted before anyone clicked it; the script tests the pre-join path with D instead (`PreJoin` → `LoginForm` → `onjoin`). The lobby path (`session.reconnect()` with the cookie and the resume token) is covered by the Worker spike script with the mock SFU only.
+- The `host` session cookie worked on `http://localhost` through Vite's proxy for both the fetches and the WebSocket upgrade (`Secure` cookies are accepted on localhost by Chromium), so the local setup needs no HTTPS.
+
+### Verdict
+
+The owner-session flow (D24–D26, D32, core "Phases") passes through the UI against the real SFU: login first, scheduled meeting, lobby until the owner arrives, automatic admission, direct join into a live room, "Join as host" with the password, host-only controls on both owner sessions, end with the transcript link, the past-meetings list, log out. Media behaves as in run 4. Phase 1 stays accepted locally; the deployed, different-networks, 10-minute check still stands.
+
+### Open issues after run 5
+
+1. The "did not arrive" toast on every transient `not_found` (above); tied to run 4's open issue 3 (pull before the publisher is connected).
+2. `/meetings` shows scheduled meetings as "Live" (above).
+3. Two HTTP 410s from `SfuUpdateLayer` after the end (above); harmless, cause not confirmed.
+4. Lobby promotion ("Join as host" while waiting) untested in the browser.
+5. Runs 1–4's remaining items: script not in the repo, `web/build` prerequisite, TURN, screen share, resume, >4 participants, deployed Worker.
