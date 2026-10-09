@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "wrangler dev --var ROOM_JURISDICTION:",
     "build": "pnpm --filter web build:core && pnpm --filter web build",
-    "deploy": "pnpm build && wrangler deploy"
+    "release": "pnpm build && wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^4.147.0"
