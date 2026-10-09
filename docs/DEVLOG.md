@@ -3,6 +3,34 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — phase 3 live: recorder, transcript page, Playwright e2e
+
+Deployed as version 24f9bf24 (commit 8c4a918) after a code review with
+eight findings, all fixed (lost `/end` now retried and names/consents sent
+early; restarted sequence counters count as a hole; transcript link without
+expiry; narrower quota classification with a 7-day cap; the job no longer
+polls dead streams; empty chunks skipped; orphaned adapters closed;
+withdrawn consent kept with its time).
+
+Production proof the same night, with headless Chromium through the real
+SFU: the adapter reached `/rec/…`, three Ogg/Opus chunks of about 33 KB per
+30 s landed in the EU bucket, and the transcript was ready 10–12 s after
+the meeting ended. With spike 3's synthesized speech as the fake
+microphone, the transcript holds the German and English sentences
+correctly, labelled "Felix Peppert (host)" with Berlin wall-clock times,
+and the consent record carries the join time and notice version 1.
+Measured on the way: the real adapter's chunks compress to about 9 kbps
+for a tone and the job needs one alarm step per four chunks.
+
+The Playwright system (`pnpm test:e2e`: 38 protocol, 10 Chromium and
+9 Firefox tests against the mock SFU; `test:e2e:real` for a 3-party call)
+replaces the spike script. It found one product question: against the real
+SFU the decoded layer went back to full about 12 s after `setLayer h`.
+
+Next: the owner records a real meeting with a guest; TURN key; fold the
+recorder e2e into the Playwright suite; per-speaker audio on the transcript
+page within the 48 hours; delete button on past meetings.
+
 ## 2026-10-09 — research 11, simulcast fallback, retention, three tracks started
 
 The user asked whether other pitfalls like the missing TURN had been missed.

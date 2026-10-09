@@ -4,12 +4,11 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- e2e-framework — built: web/e2e with Playwright Test, 56 local tests (protocol 38, Chromium 10, Firefox 9) + the @real 3-party call; spike script deleted; `pnpm test:e2e` / `test:e2e:real` — waiting for the recorder fix round, then commit with it
-- recorder + web-fixes + D34 cards — built (core 53, worker 52, sfu-api 15, web 129 tests; recorder e2e 22/22 incl. a real Whisper call) — code-reviewer-high running — then deploy (lifecycle rule, no live meeting), record a test meeting
 - turn-key — user creates a TURN key (Realtime → TURN) and uploads `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` — waiting
-- test-meeting — record a real test meeting once the recorder is deployed — waiting on recorder
+- test-meeting — user records a real meeting with a guest on https://meet.example.com and reads the transcript page — waiting
 
 ## Done
+- 2026-10-10 Phase 3 live: version 24f9bf24, commit 8c4a918. Production proof with headless Chromium through the real SFU: adapter connected, 3 Opus chunks (≈33 KB per 30 s) in the EU bucket, transcript ready 10–12 s after the end; with synthesized speech as the microphone the transcript has the German and English sentences correctly, labelled "Felix Peppert (host)" with wall-clock times, consent recorded. Playwright e2e: 56 local tests + @real call. R2 lifecycle rule audio/ 3 days added.
 - 2026-10-09 Deployed version 7aafb17d, commit 64a56aa: D33 session replacement with epochs and timeouts, TURN via `/api/ice?meeting=`, simulcast fallback, fullscreen share, notification pills, device dedupe. Review by code-reviewer-high, all findings fixed; core 44, sfu-api 12, worker 27, web 113 tests, spike 73/73.
 - 2026-10-09 Research 11 (docs/research/11-gotchas-on-cloudflare.md): 8 changes to make now (simulcast priorityOrdering, stored-record versioning, audio unlock after a session reset, iOS mic recovery control, consent record, retention, transcript-link hygiene, recorder checklist), 18 to watch; Workers Paid is required for the recorder.
 - 2026-10-09 Second real test (Firefox + phone on mobile data): no server error; the phone's audio and video never reached the PC, log shows 41 × `HTTP 410 session_error` on subscribe retries against a dead session → session-recovery above. No recording existed yet (phase 3).
