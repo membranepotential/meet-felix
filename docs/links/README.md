@@ -107,6 +107,12 @@ enforces this ([core/](../core/README.md)).
 
 Why: without a check anyone could run meetings on the owner's SFU bill.
 
+The owner-only pages, the start page that creates meetings and the
+past-meetings page, use the same password: the creation secret. The UI
+labels the field "Password", and the browser does not store it
+([D24](../ui/README.md#d24-the-owners-password-is-never-stored-on-the-device-the-password-manager-fills-it-every-time-2026-10-09),
+[D26](../ui/README.md#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09)).
+
 Changed on 2026-10-09 from "behind Cloudflare Access": the Worker has no
 custom domain yet, and a bearer secret works the same on `workers.dev` and in
 local `wrangler dev`, where no Access login runs in front of the Worker. Once
@@ -142,7 +148,9 @@ The transcript and the recording of a meeting are reached at `/t/{token}`,
 where the token is 128 random bits. The room shows this link to everyone at
 the end of the meeting
 ([D19](../recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09)),
-and the host's browser lists it.
+and the owner's past-meetings page lists it
+([D26](../ui/README.md#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09);
+changed on 2026-10-09 from "the host's browser lists it").
 
 Why a different scheme than meeting ids: transcripts live long
 ([D18](../recording/README.md#d18-keep-recordings-and-transcripts-indefinitely-for-now-2026-10-09)),

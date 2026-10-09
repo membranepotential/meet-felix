@@ -11,7 +11,7 @@ is tested, and what changed when.
 
 | Document | Read it for |
 |---|---|
-| [Design decisions](#design-decisions) | The decision records, D1–D21, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
+| [Design decisions](#design-decisions) | The decision records, D1–D31, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
 | [architecture/](architecture/README.md) | The cross-cutting decisions: platform, core and shells, browser stack, backend, EU location; plus goal, non-goals, component map, phases and risks. |
 | [cost/](cost/README.md) | What it costs per month and per meeting-hour, against Google Workspace. |
 | [DEVLOG.md](DEVLOG.md) | The running log, newest first: what changed, why, what's next. |
@@ -51,6 +51,16 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D19](recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09) | Show the transcript link to everyone at the end | [recording/](recording/README.md) |
 | [D20](core/README.md#d20-core-first-2026-10-09) | Core first | [core/](core/README.md) |
 | [D21](cost/README.md#d21-build-and-measure-no-further-price-analysis-2026-10-09) | Build and measure; no further price analysis | [cost/](cost/README.md) |
+| [D22](ui/README.md#d22-phones-and-tablets-are-fully-supported-and-the-start-and-pre-join-pages-are-laid-out-for-phones-first-2026-10-09) | Phones and tablets are fully supported, and the start and pre-join pages are laid out for phones first | [ui/](ui/README.md) |
+| [D23](ui/README.md#d23-dark-theme-only-2026-10-09) | Dark theme only | [ui/](ui/README.md) |
+| [D24](ui/README.md#d24-the-owners-password-is-never-stored-on-the-device-the-password-manager-fills-it-every-time-2026-10-09) | The owner's password is never stored on the device; the password manager fills it every time | [ui/](ui/README.md) |
+| [D25](ui/README.md#d25-the-start-page-has-one-recording-switch-shows-the-words-on-one-line-and-ends-in-join-now-2026-10-09) | The start page has one recording switch, shows the words on one line, and ends in Join now | [ui/](ui/README.md) |
+| [D26](ui/README.md#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09) | Past meetings and transcripts are on a separate owner-only page behind the same password | [ui/](ui/README.md) |
+| [D27](ui/README.md#d27-the-guest-pre-join-remembers-the-name-and-does-not-show-who-is-in-the-room-2026-10-09) | The guest pre-join remembers the name and does not show who is in the room | [ui/](ui/README.md) |
+| [D28](ui/README.md#d28-the-meeting-screen-keeps-a-labelled-control-bar-the-recording-badge-top-left-and-toasts-off-the-tiles-2026-10-09) | The meeting screen keeps a labelled control bar, the recording badge top left, and toasts off the tiles | [ui/](ui/README.md) |
+| [D29](ui/README.md#d29-a-shared-screen-keeps-people-in-a-column-on-desktops-and-in-round-chips-on-phones-2026-10-09) | A shared screen keeps people in a column on desktops and in round chips on phones | [ui/](ui/README.md) |
+| [D30](ui/README.md#d30-the-active-speaker-gets-a-fog-ring-and-level-bars-never-the-lamp-colour-2026-10-09) | The active speaker gets a fog ring and level bars, never the lamp colour | [ui/](ui/README.md) |
+| [D31](ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09) | The transcript page shows speaker-labelled paragraphs with wall-clock times | [ui/](ui/README.md) |
 
 ## Features with their own docs
 
@@ -58,9 +68,10 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 |---|---|---|
 | [links/](links/README.md) | Three-word meeting ids, who creates meetings, how a meeting ends, transcript links | [D6](links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)–[D9](links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09) |
 | [media/](media/README.md) | SFU sessions, simulcast, codecs, browser capabilities, iOS handling | [D10](media/README.md#d10-each-participant-has-separate-publish-and-subscribe-sessions-2026-10-09)–[D14](media/README.md#d14-calls-work-in-a-plain-browser-tab-and-ios-gets-defensive-handling-2026-10-09) |
-| [recording/](recording/README.md) | Consent, per-speaker capture, chunks in R2, the post-meeting transcript, retention, sharing | [D15](recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)–[D19](recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09) |
+| [recording/](recording/README.md) | Consent, per-speaker capture, chunks in R2, the post-meeting transcript, compressed copies of the audio, retention, sharing | [D15](recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)–[D19](recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09) |
 | [core/](core/README.md) | The functional core: state, events, effects, invariants | [D20](core/README.md#d20-core-first-2026-10-09) |
 | [cost/](cost/README.md) | The cost model and the Google Workspace baseline | [D21](cost/README.md#d21-build-and-measure-no-further-price-analysis-2026-10-09) |
+| [ui/](ui/README.md) | Phone-first pages, dark theme, the owner's password and past-meetings page, the guest pre-join, the meeting screen, the transcript page | [D22](ui/README.md#d22-phones-and-tablets-are-fully-supported-and-the-start-and-pre-join-pages-are-laid-out-for-phones-first-2026-10-09)–[D31](ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09) |
 
 ## Research
 

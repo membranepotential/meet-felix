@@ -3,6 +3,36 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — UI decisions from the mockup review (D22–D31)
+
+The user reviewed a mockup of every screen (screenshots of the app as it
+runs, next to proposals) and answered its questions. The answers are now
+decisions D22–D31 in the new [ui/](ui/README.md) page.
+
+- Phones and tablets are fully supported; the start page and the guest
+  pre-join are laid out for phones first (D22). Dark theme only (D23).
+- Start page: a "Password" field with `autocomplete="current-password"`,
+  filled by the password manager every time and never stored in the browser
+  (D24); one "Record and transcribe" switch, on by default; the words on one
+  line with hyphens; "Copy link", "Share…" and "Join now" (D25).
+- A separate owner-only page behind the same password lists past meetings
+  and transcripts (D26); D7, D9 and D19 now point to it.
+- Pre-join: the guest's name is remembered, the button stays "Join and
+  accept recording", and the page does not show who is in the room (D27).
+- Meeting: labelled control bar, no "Share screen" on phones, recording
+  badge top left, toasts never over tiles (D28); shared screen in a column
+  layout on desktops and with round chips on phones (D29); the active
+  speaker gets a fog ring and level bars, never the lamp colour (D30).
+- Transcript page: speaker-labelled paragraphs with wall-clock times (D31).
+  [D17](recording/README.md#d17-transcribe-after-the-meeting-with-whisper-large-v3-turbo-behind-a-transcriber-trait-2026-10-09)
+  gains a post-processing step that makes a compressed copy of each
+  speaker's audio; a raw WAV is about 115 MB per speaker-hour.
+
+Open: whether the password field goes away once Cloudflare Access protects
+`/new`, and why the phone grid leaves the bottom third of the screen empty
+([ui/ open questions](ui/README.md#open-questions)). Next: change the web
+app to match; the codec for the compressed copy is not chosen.
+
 ## 2026-10-09 — phase 1 wired end to end; first real call through the SFU
 
 The three shells now run the real protocol, and two browsers held a call

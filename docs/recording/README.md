@@ -34,7 +34,10 @@ Research: [09 — post-meeting transcription and recording](../research/09-post-
   point) starts recording when the first host joins; `HostDecides` starts it
   only when a host sends `SetRecording`. The policy is part of `RoomView`; the
   Worker is to serve it at `GET /api/meeting/{words}` for the pre-join screen
-  (not built on 2026-10-09).
+  (not built on 2026-10-09). The start page shows the policy as one switch,
+  "Record and transcribe", on by default (`FromStart`); off means
+  `HostDecides`
+  ([D25](../ui/README.md#d25-the-start-page-has-one-recording-switch-shows-the-words-on-one-line-and-ends-in-join-now-2026-10-09)).
 - The pre-join screen shows the recording notice. In a recorded meeting the
   join button reads **"Join and accept recording"**; pressing it is explicit
   consent (decision 2 of 2026-10-09).
@@ -48,8 +51,9 @@ Research: [09 — post-meeting transcription and recording](../research/09-post-
 - The recording state lives in `RoomState` (the plan sketched it as
   `Option<Recording { since, by }>`; the code has a `RecordingStatus`: never
   started, on, or stopped) and is part of every state broadcast. The UI shows
-  a persistent red "Recording" badge and a banner when recording starts, and
-  plays a chime.
+  a persistent red "Recording" badge in the header, top left
+  ([D28](../ui/README.md#d28-the-meeting-screen-keeps-a-labelled-control-bar-the-recording-badge-top-left-and-toasts-off-the-tiles-2026-10-09)),
+  and a banner when recording starts, and plays a chime.
 - Only hosts start or stop recording (`ClientMsg::SetRecording`).
 - When recording starts during the meeting, everyone in the room without
   consent gets `ConsentRequired` (the consent dialog) and `Muted`, and the
@@ -135,6 +139,10 @@ alarm loop:
   transcript, stored in R2 as `transcript.md` and `transcript.json`.
 - It stitches the chunks into one WAV per speaker with R2 multipart, and
   optionally one mixed WAV.
+- A post-processing step then makes a compressed copy of each speaker's
+  audio. The transcript page offers this copy, not the raw WAV
+  ([D31](../ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09);
+  added on 2026-10-09).
 - Workers AI allows 720 speech requests per minute. Four speakers × 1 hour
   are about 480 chunks, which is a few alarm runs.
 
@@ -149,6 +157,11 @@ available behind the same trait if German quality disappoints.
 Why an alarm loop: Cloudflare Workflows have no Rust API
 ([09 §3](../research/09-post-meeting-transcription-recording.md)).
 
+Why a compressed copy: a 16 kHz mono 16-bit WAV holds 32,000 bytes per
+second, about 115 MB per speaker-hour (a 46-minute speaker is about 90 MB).
+That is too much to stream or download on a phone. Not chosen yet: the codec,
+and where the encoding runs.
+
 Target (phase 3): a recorded 4-person meeting yields a correctly attributed
 German/English transcript within 15 minutes of its end.
 
@@ -158,7 +171,8 @@ and confirms the chunk size.
 
 ## D18: Keep recordings and transcripts indefinitely for now (2026-10-09)
 
-Audio chunks, stitched WAVs and transcripts stay in R2 until deleted by hand.
+Audio chunks, stitched WAVs, their compressed copies and transcripts stay in
+R2 until deleted by hand.
 A cleanup job comes later (phase 5). This replaces the plan v2 draft of
 "recordings 30 days, transcripts until deleted" (decision 4 of 2026-10-09).
 
@@ -170,7 +184,11 @@ meeting-hour and $0.02 for a 10-person one ([cost/](../cost/README.md)).
 In v1 the room shows the transcript link
 ([D9](../links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09))
 to everyone in the room when the meeting ends (`ServerMsg::Ended`), so guests
-can save it. The host's browser also lists it.
+can save it. The owner's past-meetings page also lists it
+([D26](../ui/README.md#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09);
+changed on 2026-10-09 from "the host's browser also lists it"). The
+transcript page itself is described in
+[D31](../ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09).
 
 Later (a phase 5 candidate): guests enter an email address at the end and
 receive the transcript by mail. That needs a mail provider (decision 5 of
