@@ -26,6 +26,7 @@ Decisions on this page:
 - [D29: A shared screen keeps people in a column on desktops and in round chips on phones (2026-10-09)](#d29-a-shared-screen-keeps-people-in-a-column-on-desktops-and-in-round-chips-on-phones-2026-10-09)
 - [D30: The active speaker gets a fog ring and level bars, never the lamp colour (2026-10-09)](#d30-the-active-speaker-gets-a-fog-ring-and-level-bars-never-the-lamp-colour-2026-10-09)
 - [D31: The transcript page shows speaker-labelled paragraphs with wall-clock times (2026-10-09)](#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09)
+- [D34: Cards have no coloured bar on their left edge (2026-10-09)](#d34-cards-have-no-coloured-bar-on-their-left-edge-2026-10-09)
 
 Code: [`web/src/routes/+page.svelte`](../../web/src/routes/+page.svelte)
 (start page), [`web/src/lib/components/PreJoin.svelte`](../../web/src/lib/components/PreJoin.svelte),
@@ -237,6 +238,18 @@ work; this decision covers only how it looks.
   Later, they may enter an email address to receive it; that needs a mail
   provider
   ([D19](../recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09)).
+
+## D34: Cards have no coloured bar on their left edge (2026-10-09)
+
+Notices, errors and status cards are plain rounded boxes on `--water`
+with the thin `--reed` outline, like the notification pills. Tone comes from
+an icon at the start of the text (`alert` in `--signal` for errors,
+`record` for the recording notice, `info` otherwise), never from a thick
+coloured left border or an inset left bar.
+
+Why: the owner called the left bar an "annoying AI-slop pattern" on
+2026-10-09, after seeing it on the transcript placeholder's status card.
+It was also inconsistent: the pills had already moved to icons.
 
 ## Open questions
 

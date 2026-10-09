@@ -4,7 +4,9 @@
 //! [`SfuClient`] has one method per operation the room needs (`sessions/new`, `tracks/new` to
 //! publish and to subscribe, `renegotiate`, `tracks/close`, `tracks/update`) and
 //! [`SfuClient::perform`], which carries out one of `meeting-core`'s `Sfu*` effects and returns
-//! the `SfuReply` to feed back into the core. The HTTP layer is the [`SfuTransport`] trait, so
+//! the `SfuReply` to feed back into the core. [`SfuClient::create_adapters`] and
+//! [`SfuClient::close_adapters`] drive the WebSocket adapters that stream recorded audio to the
+//! `RecorderObject`. The HTTP layer is the [`SfuTransport`] trait, so
 //! this crate has no dependency on the Workers runtime and its tests run natively.
 
 mod client;

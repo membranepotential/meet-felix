@@ -1,8 +1,9 @@
 /**
  * One stay in a meeting: the signaling socket, the client state from `client-state.ts`, the
- * two SFU peer connections, notices and the screen wake lock. Created when the user presses
- * Join, disposed when the stay is over.
+ * two SFU peer connections, the others' voices, notices and the screen wake lock. Created
+ * inside the Join tap, disposed when the stay is over.
  */
+import { untrack } from 'svelte';
 import { getIceServers, getMeeting } from './api.ts';
 import {
 	INITIAL,
@@ -14,6 +15,7 @@ import {
 import { GraceNotice } from './grace.ts';
 import { LayerControl } from './layers.ts';
 import type { LocalMedia } from './local-media.svelte.ts';
+import { RemoteAudio } from './media/remote-audio.svelte.ts';
 import { holdWakeLock } from './media/wakelock.ts';
 import type {
 	ClientMsg,
@@ -63,11 +65,16 @@ const RECONNECTING: Record<SessionKind, string> = {
 	subscribe: 'Reconnecting to the others…'
 };
 
+/** Shown once each time the mic stalls (`LocalMedia.micStalled`); the button then restarts it. */
+const MIC_STALLED = 'Microphone was interrupted. Tap the microphone button to turn it on again.';
+
 /** Participants who get a tile: admitted, not waiting outside. */
 const isInRoom = (p: ParticipantView) => p.presence === 'joined' || p.presence === 'connecting';
 
 export class Session {
 	readonly toasts = new Toasts();
+	/** The others' voices and the `AudioContext` for the level meters. */
+	readonly audio: RemoteAudio;
 	connection: ConnectionStatus = $state.raw({ kind: 'connecting', attempt: 1 });
 	state: ClientState = $state.raw(INITIAL);
 	/** Received tracks by `trackKey`. */
@@ -109,7 +116,9 @@ export class Session {
 	#disposed = false;
 	#checkingMeeting = false;
 
+	/** Call inside the Join tap, before any `await`: it unlocks sound for the stay. */
 	constructor(meeting: MeetingId, join: JoinRequest, media: LocalMedia) {
+		this.audio = new RemoteAudio();
 		this.#meeting = meeting;
 		this.#join = join;
 		this.#media = media;
@@ -137,6 +146,9 @@ export class Session {
 			$effect(() => {
 				const outgoing = this.#media.outgoing;
 				void this.#publisher?.then((publisher) => publisher.sync(outgoing));
+			});
+			$effect(() => {
+				if (this.#media.micStalled) untrack(() => this.toasts.show(MIC_STALLED, 'alert'));
 			});
 		});
 	}
@@ -190,6 +202,7 @@ export class Session {
 		this.#resets.cancel();
 		this.#subscribeNotice.cancel();
 		this.layers.dispose();
+		this.audio.dispose();
 		this.#releaseWakeLock();
 	}
 

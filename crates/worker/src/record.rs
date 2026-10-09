@@ -1,11 +1,67 @@
 //! What a `RoomObject` keeps across hibernation: one storage record and one attachment per
 //! socket. Pure, so the rules are tested natively.
 //!
-//! Both are JSON without a version. Records and attachments stored before the core's phases and
-//! the owner session (2026-10-09) do not deserialize; nothing with real users was deployed then.
+//! The record is stored with a version ([`RECORD_VERSION`], research 11 item 2), so a change of
+//! its shape cannot make a room fail every request: a record of an older version loads as an
+//! ended meeting ([`decode`]). New fields with an obvious default carry `#[serde(default)]`, so
+//! adding one needs no new version.
 
 use meeting_core::{Effect, Event, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, step};
 use serde::{Deserialize, Serialize};
+
+use crate::internal::FinishRecording;
+
+/// The version of the stored record's shape. 1 was the unversioned record before 2026-10-09;
+/// 2 added the consent record to the core's participants and the recorder id.
+pub const RECORD_VERSION: u32 = 2;
+
+/// A stored record with its version.
+#[derive(Serialize, Deserialize)]
+struct Stored<R> {
+    version: u32,
+    record: R,
+}
+
+/// What [`decode`] found in storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decoded {
+    /// A record of the current version.
+    Current(Record),
+    /// A record of an older version, which this code no longer reads. The room counts as
+    /// ended; the meeting is lost, which beats a room that fails every request forever.
+    Outdated { version: u32 },
+}
+
+/// The stored JSON of `record`.
+pub fn encode(record: &Record) -> serde_json::Result<String> {
+    serde_json::to_string(&Stored {
+        version: RECORD_VERSION,
+        record,
+    })
+}
+
+/// Reads a stored record. A record from a newer version is an error, not an outdated one: an
+/// older Worker may run for minutes after a deploy, and must not end rooms a newer one stored.
+pub fn decode(json: &str) -> Result<Decoded, String> {
+    #[derive(Deserialize)]
+    struct Version {
+        #[serde(default = "unversioned")]
+        version: u32,
+    }
+    fn unversioned() -> u32 {
+        1
+    }
+    let Version { version } = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    match version {
+        RECORD_VERSION => serde_json::from_str::<Stored<Record>>(json)
+            .map(|stored| Decoded::Current(stored.record))
+            .map_err(|e| e.to_string()),
+        older if older < RECORD_VERSION => Ok(Decoded::Outdated { version: older }),
+        newer => Err(format!(
+            "the record has version {newer}, newer than this code's {RECORD_VERSION}"
+        )),
+    }
+}
 
 /// How long a socket may go without an auto-response ping before the room closes it, and how
 /// often the room checks while sockets are open.
@@ -23,8 +79,24 @@ pub enum Record {
     Open(OpenRoom),
     /// The meeting is over; the object refuses new sockets for good. Holds no secrets.
     #[serde(rename_all = "camelCase")]
-    Ended { recording_policy: RecordingPolicy },
+    Ended {
+        recording_policy: RecordingPolicy,
+        /// The recorder's `/end` that failed, which the room's alarm sends once more.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_finish: Option<PendingFinish>,
+    },
 }
+
+/// A [`FinishRecording`] the recorder did not take, with the recorder's id (hex).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingFinish {
+    pub recorder: String,
+    pub finish: FinishRecording,
+}
+
+/// How long the room waits before it sends a failed `/end` to the recorder again.
+pub const FINISH_RETRY_MS: u64 = 30 * 1000;
 
 impl Record {
     /// The storage key. On a SQLite-backed object, key plus value may take up to 2 MB, far more
@@ -37,6 +109,7 @@ impl Record {
             room,
             alarm: None,
             next_participant: 0,
+            recorder: None,
         }
         .settle(effects)
     }
@@ -52,7 +125,40 @@ impl Record {
     pub fn recording_policy(&self) -> RecordingPolicy {
         match self {
             Self::Open(open) => open.room.view().recording_policy,
-            Self::Ended { recording_policy } => *recording_policy,
+            Self::Ended {
+                recording_policy, ..
+            } => *recording_policy,
+        }
+    }
+
+    /// An ended record that keeps `pending` to send again; any other record unchanged.
+    #[must_use]
+    pub fn with_pending_finish(self, pending: PendingFinish) -> Self {
+        match self {
+            Self::Ended {
+                recording_policy, ..
+            } => Self::Ended {
+                recording_policy,
+                pending_finish: Some(pending),
+            },
+            open @ Self::Open(_) => open,
+        }
+    }
+
+    /// The record without its pending finish, and the finish, which is sent at most once more.
+    pub fn take_pending_finish(self) -> (Self, Option<PendingFinish>) {
+        match self {
+            Self::Ended {
+                recording_policy,
+                pending_finish,
+            } => (
+                Self::Ended {
+                    recording_policy,
+                    pending_finish: None,
+                },
+                pending_finish,
+            ),
+            open @ Self::Open(_) => (open, None),
         }
     }
 }
@@ -67,6 +173,9 @@ pub struct OpenRoom {
     pub alarm: Option<Millis>,
     /// The id the next socket gets; ids are never reused within a room.
     pub next_participant: u32,
+    /// The id (hex) of the meeting's `RecorderObject`, once recording started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder: Option<String>,
 }
 
 impl OpenRoom {
@@ -109,6 +218,7 @@ impl OpenRoom {
         if effects.contains(&Effect::EndMeeting) {
             return Record::Ended {
                 recording_policy: self.room.view().recording_policy,
+                pending_finish: None,
             };
         }
         let alarm = effects
@@ -276,9 +386,34 @@ mod tests {
         assert_eq!(
             record,
             Record::Ended {
-                recording_policy: RecordingPolicy::HostDecides
+                recording_policy: RecordingPolicy::HostDecides,
+                pending_finish: None
             }
         );
+    }
+
+    #[test]
+    fn a_failed_finish_is_kept_once_and_old_ended_records_load() {
+        let ended = Record::Ended {
+            recording_policy: RecordingPolicy::FromStart,
+            pending_finish: None,
+        };
+        let pending = PendingFinish {
+            recorder: "abc".into(),
+            finish: FinishRecording {
+                roster: Vec::new(),
+                consents: Vec::new(),
+            },
+        };
+        let waiting = ended.clone().with_pending_finish(pending.clone());
+        let json = encode(&waiting).unwrap();
+        assert_eq!(decode(&json), Ok(Decoded::Current(waiting.clone())));
+        assert_eq!(
+            waiting.take_pending_finish(),
+            (ended.clone(), Some(pending))
+        );
+        let without = r#"{"version":2,"record":{"ended":{"recordingPolicy":"fromStart"}}}"#;
+        assert_eq!(decode(without), Ok(Decoded::Current(ended)));
     }
 
     #[test]
@@ -286,6 +421,32 @@ mod tests {
         let record = Record::Open(room_with_host());
         let json = serde_json::to_string(&record).unwrap();
         assert_eq!(serde_json::from_str::<Record>(&json).unwrap(), record);
+    }
+
+    #[test]
+    fn records_are_stored_with_their_version() {
+        let record = Record::Open(room_with_host());
+        let json = encode(&record).unwrap();
+        assert!(
+            json.starts_with(r#"{"version":2,"record":{"open":"#),
+            "{json}"
+        );
+        assert_eq!(decode(&json), Ok(Decoded::Current(record)));
+    }
+
+    #[test]
+    fn an_unversioned_record_loads_as_outdated_and_a_newer_one_fails() {
+        // The shape stored before versioning: the record itself, and participants without the
+        // consent record.
+        let old = r#"{"open":{"room":{"meeting":"abide-acid-acorn","participants":{"0":
+            {"name":"Ada","consent_recording":true}}},"alarm":null,"nextParticipant":1}}"#;
+        assert_eq!(decode(old), Ok(Decoded::Outdated { version: 1 }));
+        assert_eq!(
+            decode(r#"{"ended":{"recordingPolicy":"fromStart"}}"#),
+            Ok(Decoded::Outdated { version: 1 })
+        );
+        assert!(decode(r#"{"version":3,"record":{}}"#).is_err());
+        assert!(decode("not json").is_err());
     }
 
     #[test]

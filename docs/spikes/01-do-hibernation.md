@@ -36,6 +36,8 @@ Since 2026-10-09 the script drives the real room (`meeting_core::step`) and star
    Wait until it prints `Ready on http://localhost:8787`. Add `--port <port>` if 8787 is taken.
 3. In a second terminal, run `node crates/worker/spike/ws-clients.mjs` (optional argument: base URL, such as `http://localhost:8797` for `--port 8797`; `SPIKE_IDLE_MS` sets the idle phase, default 15000; `SPIKE_KEEPALIVE=1` adds the keepalive check, about two more minutes). It prints one PASS/FAIL line per check, then a summary, and exits 0 on success.
 
+   The script was replaced on 2026-10-09 by the protocol tests in `web/e2e/protocol/` (`pnpm test:e2e`; see [TESTING.md](../TESTING.md#end-to-end-tests-playwright)) and is in the git history.
+
 Local storage from older runs persists under `.wrangler/state`. Rooms stored by the first spike script (a record with a `status` field) fail to load when their alarm fires (`unknown variant status, expected open or ended`); the errors do not affect new rooms.
 
 ## Output of the spike script after the worker review (2026-10-09, `--port 8797`)

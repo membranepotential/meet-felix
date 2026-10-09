@@ -2,6 +2,8 @@
 
 *2026-10-09. Run locally: the Worker under `wrangler dev` with the real SFU credentials from `.dev.vars`, the web app under Vite, three headless Chromium contexts driven by Playwright. Nothing was deployed.*
 
+The throwaway call scripts of this spike are replaced by the Playwright tests in `web/e2e/` (`pnpm test:e2e`, and `pnpm test:e2e:real` for the real SFU); see [TESTING.md](../TESTING.md#end-to-end-tests-playwright).
+
 ## Result
 
 **Not accepted yet.** Audio and video flow through the real SFU, but only one way per pair: a participant receives the tracks that already existed when they joined, and never (or only after a retry) the tracks published after that. In a two-person call the host sees the guest as initials for the whole meeting while the guest sees and hears the host. The cause is in the room's SFU handling, not in the browser code: the room pulls a freshly published track into the other participants' subscribe sessions in the same step that returns the publisher's answer, before the publisher's peer connection is connected. The SFU rejects every track of that pull (`not_found_track_error`), but still returns an SDP offer that the `sfu-api` client drops. A subscribe session whose first pull fails this way then waits for an answer the room never sends, and every retry on it fails with HTTP 406 and then HTTP 410 until the meeting ends. See "Diagnosis".

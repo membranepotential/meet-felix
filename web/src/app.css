@@ -134,6 +134,27 @@ button {
 	color: var(--signal-ink);
 }
 
+/*
+ * Errors and notices are plain cards; the icon at the start carries the tone. No accent bar on
+ * the left edge (D34).
+ */
+.error {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.625rem;
+	padding: 0.875rem 1rem;
+	border-radius: var(--radius-s);
+	background: var(--water);
+	box-shadow: inset 0 0 0 1px var(--reed);
+	line-height: 1.5;
+}
+
+.error > svg {
+	flex: none;
+	margin-top: 0.15em;
+	color: var(--signal);
+}
+
 /* Modal dialogs: confirmations and the recording consent. */
 .dialog {
 	max-width: min(28rem, calc(100vw - 32px));

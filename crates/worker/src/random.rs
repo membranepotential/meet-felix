@@ -14,7 +14,12 @@ pub fn resume_token() -> Result<ResumeToken> {
 
 /// 128 random bits, hex-encoded (D9 in `docs/links`).
 pub fn transcript_ref() -> Result<TranscriptRef> {
-    Ok(TranscriptRef::new(hex(&bytes::<16>()?)))
+    Ok(TranscriptRef::new(secret()?))
+}
+
+/// 128 random bits as 32 lowercase hex digits.
+pub fn secret() -> Result<String> {
+    Ok(hex(&bytes::<16>()?))
 }
 
 fn u32() -> Result<u32> {

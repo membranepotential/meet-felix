@@ -8,11 +8,13 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
-		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && tsc -p e2e/tsconfig.json",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"build:core": "wasm-pack build ../crates/meeting-core --target web --out-dir ../../web/src/lib/wasm --release --no-pack -- --features wasm",
-		"test": "vitest run"
+		"test": "vitest run",
+		"test:e2e": "playwright test --project=protocol --project=chromium --project=firefox",
+		"test:e2e:real": "playwright test --project=real"
 	},
 	"imports": {
 		"#lib/*": "./src/lib/*"
@@ -20,6 +22,7 @@
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
 		"@fontsource-variable/atkinson-hyperlegible-next": "^5.3.0",
+		"@playwright/test": "1.63.0",
 		"@sveltejs/adapter-static": "^4.0.0",
 		"@sveltejs/kit": "^3.0.0",
 		"@sveltejs/vite-plugin-svelte": "^7.3.1",

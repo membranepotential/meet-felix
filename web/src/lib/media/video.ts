@@ -4,7 +4,7 @@
  *
  * iOS Safari needs `playsinline` or it opens video full screen, and it only autoplays
  * muted video without a user gesture. Local previews are always muted to avoid echo;
- * remote audio plays through separate `<audio>` elements.
+ * remote audio plays through `RemoteAudio`'s `<audio>` elements.
  */
 export function showStream(stream: MediaStream | null) {
 	return (video: HTMLVideoElement): (() => void) => {
@@ -16,21 +16,6 @@ export function showStream(stream: MediaStream | null) {
 		if (stream) video.play().catch(() => {});
 		return () => {
 			video.srcObject = null;
-		};
-	};
-}
-
-/**
- * Plays a remote participant's audio. Usable as a Svelte attachment on `<audio>`. Browsers
- * allow it because the user pressed Join, which counts as a gesture on the page.
- */
-export function playAudio(stream: MediaStream) {
-	return (audio: HTMLAudioElement): (() => void) => {
-		audio.autoplay = true;
-		audio.srcObject = stream;
-		audio.play().catch(() => {});
-		return () => {
-			audio.srcObject = null;
 		};
 	};
 }

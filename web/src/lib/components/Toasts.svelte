@@ -21,6 +21,9 @@
 		return null;
 	});
 
+	/** The browser holds back the others' voices until a tap; the pill below is that tap. */
+	const HEAR_OTHERS = 'Tap to hear the others';
+
 	/** A notice for screen readers; `key` keeps each one in its live region while it lasts. */
 	interface Announcement {
 		key: string;
@@ -39,6 +42,9 @@
 				text: `${k.name} wants to join`,
 				tone: 'info' as const
 			})),
+			...(session.audio.blocked
+				? [{ key: 'audio', text: HEAR_OTHERS, tone: 'alert' as const }]
+				: []),
 			...(connection
 				? [
 						{
@@ -69,8 +75,8 @@
 <!--
 	Hangs above its positioned parent, the dock around the control bar, so a notice never moves
 	the stage: centred on phones, in the stage's bottom-left corner on wide screens. Newest
-	toasts sit lowest; knock requests and the connection note stay put below them while they
-	apply.
+	toasts sit lowest; knock requests, the "Tap to hear the others" button and the connection
+	note stay put below them while they apply.
 -->
 <!--
 	Screen readers announce text added to a live region that is already in the page, not one
@@ -127,6 +133,16 @@
 			</div>
 		</div>
 	{/each}
+	{#if session.audio.blocked}
+		<button
+			type="button"
+			class="pill"
+			transition:fade={{ duration: motion }}
+			onclick={() => session.audio.resume()}
+		>
+			{@render face('alert', HEAR_OTHERS)}
+		</button>
+	{/if}
 	{#if connection}
 		<p class="pill" transition:fade={{ duration: motion }}>
 			{@render face(connection.tone, connection.text)}

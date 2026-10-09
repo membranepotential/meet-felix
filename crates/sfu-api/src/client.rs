@@ -7,9 +7,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::wire::{
-    CLOSE_TRACK_ERROR, CloseTrackObject, CloseTracksRequest, ErrorFields, LayerFallback,
-    NewSessionResponse, RenegotiateRequest, SESSION_ERROR, SdpType, SessionDescription, Simulcast,
-    TrackObject, TrackResult, TracksRequest, TracksResponse, UpdateTracksRequest,
+    ALL_ADAPTERS_FAILED, AdapterId, AdapterRef, AdapterResult, AdapterTrack, AdaptersResponse,
+    CLOSE_TRACK_ERROR, CloseAdaptersRequest, CloseTrackObject, CloseTracksRequest, ErrorFields,
+    LayerFallback, MAX_ADAPTERS_PER_REQUEST, NewAdaptersRequest, NewSessionResponse,
+    RenegotiateRequest, SESSION_ERROR, SdpType, SessionDescription, Simulcast, TrackObject,
+    TrackResult, TracksRequest, TracksResponse, UpdateTracksRequest,
 };
 
 /// The API's base URL.
@@ -346,6 +348,72 @@ impl<T: SfuTransport> SfuClient<T> {
         }
     }
 
+    /// `POST adapters/websocket/new`: one WebSocket adapter per entry, each streaming a
+    /// published track to its endpoint. Returns one result per entry, in request order: an
+    /// entry can fail while others succeed (HTTP 200), and HTTP 503 means all failed. Retrying
+    /// a batch would duplicate its successful adapters, so the caller must store every id
+    /// before retrying anything.
+    ///
+    /// # Panics
+    /// If `tracks` is empty or longer than [`MAX_ADAPTERS_PER_REQUEST`].
+    pub async fn create_adapters(
+        &self,
+        tracks: Vec<AdapterTrack>,
+    ) -> Result<Vec<Result<AdapterId, SfuError>>, SfuError> {
+        assert!(
+            (1..=MAX_ADAPTERS_PER_REQUEST).contains(&tracks.len()),
+            "1 to {MAX_ADAPTERS_PER_REQUEST} adapters per request"
+        );
+        let count = tracks.len();
+        let response = self
+            .send(
+                Method::Post,
+                "adapters/websocket/new",
+                Some(&NewAdaptersRequest { tracks }),
+            )
+            .await?;
+        let results: AdaptersResponse = match response.status {
+            // The body of an all-failed batch carries the per-entry errors, which say why.
+            ALL_ADAPTERS_FAILED => serde_json::from_str(&response.body)
+                .ok()
+                .filter(|r: &AdaptersResponse| !r.tracks.is_empty())
+                .map_or_else(|| decode(&response), Ok)?,
+            _ => decode(&response)?,
+        };
+        if results.tracks.len() != count {
+            return Err(SfuError::Decode(format!(
+                "{} adapter results for {count} tracks",
+                results.tracks.len()
+            )));
+        }
+        Ok(results.tracks.into_iter().map(adapter_result).collect())
+    }
+
+    /// `POST adapters/websocket/close` for up to [`MAX_ADAPTERS_PER_REQUEST`] adapters. Closing
+    /// is idempotent, so an adapter that is already closed counts as closed; any other entry
+    /// error fails the call.
+    pub async fn close_adapters(&self, adapters: &[AdapterId]) -> Result<(), SfuError> {
+        let request = CloseAdaptersRequest {
+            tracks: adapters
+                .iter()
+                .map(|id| AdapterRef {
+                    adapter_id: id.clone(),
+                })
+                .collect(),
+        };
+        let response: AdaptersResponse = self
+            .call(Method::Post, "adapters/websocket/close", Some(&request))
+            .await?;
+        match response
+            .tracks
+            .into_iter()
+            .find_map(|r| adapter_result(r).err())
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// Sends one request and decodes the response, turning API errors into [`SfuError`].
     async fn call<B: Serialize, R: DeserializeOwned>(
         &self,
@@ -353,6 +421,16 @@ impl<T: SfuTransport> SfuClient<T> {
         path: &str,
         body: Option<&B>,
     ) -> Result<R, SfuError> {
+        decode(&self.send(method, path, body).await?)
+    }
+
+    /// Sends one request and returns the raw response.
+    async fn send<B: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<HttpResponse, SfuError> {
         let body = body
             .map(serde_json::to_string)
             .transpose()
@@ -363,12 +441,10 @@ impl<T: SfuTransport> SfuClient<T> {
             authorization: format!("Bearer {}", self.secret.0),
             body,
         };
-        let response = self
-            .transport
+        self.transport
             .send(request)
             .await
-            .map_err(|e| SfuError::Transport(e.to_string()))?;
-        decode(&response)
+            .map_err(|e| SfuError::Transport(e.to_string()))
     }
 }
 
@@ -406,6 +482,25 @@ fn track_error(result: &TrackResult) -> Option<SfuError> {
         code: code.clone(),
         description: result.error_description.clone().unwrap_or_default(),
     })
+}
+
+/// An adapter entry's id, or its error.
+fn adapter_result(result: AdapterResult) -> Result<AdapterId, SfuError> {
+    match result {
+        AdapterResult {
+            error_code: Some(code),
+            error_description,
+            ..
+        } => Err(SfuError::Track {
+            code,
+            description: error_description.unwrap_or_default(),
+        }),
+        AdapterResult {
+            adapter_id: Some(id),
+            ..
+        } => Ok(id),
+        AdapterResult { .. } => Err(SfuError::Decode("adapter result without id".into())),
+    }
 }
 
 /// A successful remote-track result as the core names it.

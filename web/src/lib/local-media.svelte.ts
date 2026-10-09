@@ -10,7 +10,7 @@ import {
 	type DeviceChoice
 } from './media/capture.ts';
 import { listDevices, watchDevices, type DeviceLists } from './media/devices.ts';
-import { guardTracks, type TrackGuard } from './media/resilience.ts';
+import { guardTracks, isStalled, type TrackGuard } from './media/resilience.ts';
 import type { Outgoing } from './sfu.ts';
 import {
 	NO_TRACKS,
@@ -33,6 +33,11 @@ export class LocalMedia {
 	error = $state.raw<CaptureError | null>(null);
 	starting = $state(false);
 
+	/**
+	 * The mic is on but has delivered no sound for `MUTE_GRACE_MS`: the system muted it or it
+	 * ended. On iOS this lasts after a phone call until `restartMic()` runs inside a tap.
+	 */
+	micStalled = $derived(this.micOn && this.tracks.audio !== null && isStalled(this.tracks.audio));
 	/** Camera on = a live video track exists; turning it off releases the camera. */
 	camOn = $derived(this.tracks.video !== null);
 	cameraStream = $derived(streamOf(this.tracks.video));
@@ -105,8 +110,18 @@ export class LocalMedia {
 
 	async selectMicrophone(id: string): Promise<void> {
 		this.choice.microphone = id;
+		await this.restartMic();
+	}
+
+	/**
+	 * Captures the chosen mic again and puts the new track in place of the old one, also on the
+	 * publisher's sender. Call it inside a tap: WebKit captures only after a user action.
+	 * Returns `false` if capturing failed (`error` says why).
+	 */
+	async restartMic(): Promise<boolean> {
 		const track = await this.#capture('audio');
 		if (track) this.#install(track);
+		return track !== null;
 	}
 
 	async selectCamera(id: string): Promise<void> {

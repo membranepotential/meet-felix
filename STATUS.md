@@ -4,11 +4,13 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- session-recovery + meeting-ui — implemented (core 41 tests, worker 27, web 112, spike 71/71; fullscreen share, toast pills) — code-reviewer-high running — then deploy when no meeting runs (stored open rooms do not load after the RoomState change)
-- turn-key — user creates a TURN key in the Cloudflare dashboard (Realtime → TURN) and uploads `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` as Worker secrets — waiting
-- phase-3 — recorder DO, SFU WebSocket adapters, R2 chunks, Whisper job, transcript page — design next, after the two above
+- e2e-framework — built: web/e2e with Playwright Test, 56 local tests (protocol 38, Chromium 10, Firefox 9) + the @real 3-party call; spike script deleted; `pnpm test:e2e` / `test:e2e:real` — waiting for the recorder fix round, then commit with it
+- recorder + web-fixes + D34 cards — built (core 53, worker 52, sfu-api 15, web 129 tests; recorder e2e 22/22 incl. a real Whisper call) — code-reviewer-high running — then deploy (lifecycle rule, no live meeting), record a test meeting
+- turn-key — user creates a TURN key (Realtime → TURN) and uploads `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` — waiting
+- test-meeting — record a real test meeting once the recorder is deployed — waiting on recorder
 
 ## Done
+- 2026-10-09 Deployed version 7aafb17d, commit 64a56aa: D33 session replacement with epochs and timeouts, TURN via `/api/ice?meeting=`, simulcast fallback, fullscreen share, notification pills, device dedupe. Review by code-reviewer-high, all findings fixed; core 44, sfu-api 12, worker 27, web 113 tests, spike 73/73.
 - 2026-10-09 Research 11 (docs/research/11-gotchas-on-cloudflare.md): 8 changes to make now (simulcast priorityOrdering, stored-record versioning, audio unlock after a session reset, iOS mic recovery control, consent record, retention, transcript-link hygiene, recorder checklist), 18 to watch; Workers Paid is required for the recorder.
 - 2026-10-09 Second real test (Firefox + phone on mobile data): no server error; the phone's audio and video never reached the PC, log shows 41 × `HTTP 410 session_error` on subscribe retries against a dead session → session-recovery above. No recording existed yet (phase 3).
 - 2026-10-09 First real test fixes, version b5cfcaa4: Workers Logs on; meeting list asks unsettled rooms for their phase and settles ended ones in the index (no more lost marks); owner's name prefilled; device lists deduplicated (Svelte `each_key_duplicate` seen in Firefox); start, meetings, lobby and end pages centred on desktop. Review by code-reviewer-high, findings fixed; worker 24 tests, spike 63/63, web 99 tests.
@@ -29,15 +31,17 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
+- Against the real SFU the decoded layer went back to full ~12 s after `setLayer h` without a new SetLayer (e2e @real flake): check whether the preference is lost when a track is pulled again.
+- Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs adapters/websocket/new); add data-testids the e2e agent asked for (tiles, pills, meeting view, transcript link).
 - 'Join as host' inside a live meeting; shorten the first-pull retry (3 s) or pull after the publisher connects.
 - Core later: reply for an SFU offer on the publish session; replace a subscribe session after 410; partial publish carries accepted tracks; grace period before a dropped socket counts as Leave; negotiation ids on SFU replies; cleanup of ended-room storage.
 - Web later: active speaker, remote mute state, peer-connection failure recovery, waiting-for-consent list for hosts.
-- Observe hibernation and egress on the dashboard after real use; decide Free vs Paid plan.
+- Observe hibernation, egress and neurons on the dashboard after real use; switch to Paid if transcripts must arrive the same day for larger meetings.
 - Phase 2 remaining: TURN credentials, screen share end-to-end test, >3 participants, 'Join as host' inside a live meeting, device checklist on real phones.
 - Phase 3: RecorderObject, adapters, R2 chunks, Whisper job, transcript page.
 
 ## Open questions
-- Do the Realtime SFU and Workers AI speech models work on the Workers Free plan? (unverified)
+- Workers Free is the plan for now (owner, 2026-10-09): Workers AI gives 10,000 neurons/day ≈ 214 speaker-minutes of Whisper, calls beyond that fail; the transcript job retries after the daily reset. Realtime SFU/TURN bill separately (1,000 GB free). 10 ms CPU per invocation applies.
 - Max audio size per Workers AI speech request? (undocumented; Cloudflare's tutorial uses 1 MB chunks)
 - What does an adapter do when its source track ends? (undocumented)
 - Does `SfuCloseTracks` need a renegotiation on the Cloudflare SFU? (core assumes not)

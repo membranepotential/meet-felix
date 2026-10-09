@@ -3,6 +3,35 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-09 — research 11, simulcast fallback, retention, three tracks started
+
+The user asked whether other pitfalls like the missing TURN had been missed.
+Three researchers and a report writer answered
+([research 11](research/11-gotchas-on-cloudflare.md)); the user approved
+all eight "change now" items.
+
+- **Done at once.** `priorityOrdering` on subscriptions is `asciibetical`
+  like `ridNotAvailable`; with `none` the SFU never dropped to a smaller
+  layer on a weak link ([D11](media/README.md#d11-cameras-send-simulcast-and-each-subscriber-picks-a-layer-2026-10-09)
+  still describes the layer names; the fallback note is in the code).
+  [D18](recording/README.md#d18-keep-the-audio-48-hours-keep-transcripts-until-the-owner-deletes-them-2026-10-09)
+  now keeps audio for 48 hours after the meeting and transcripts until the
+  owner deletes them. The recording notice stays short by the owner's
+  decision (see D15). Workers Paid is required; the Free plan's daily caps
+  fail hard.
+- **No accent bars ([D34](ui/README.md#d34-cards-have-no-coloured-bar-on-their-left-edge-2026-10-09)).**
+  The owner called the thick left border on notice and error cards an
+  "annoying AI-slop pattern". Errors are now one shared `.error` card in
+  `app.css` with the `alert` icon at the start of the text; the recording
+  notice keeps its red tint without the bar; the transcript page follows
+  when it lands.
+- **Started in parallel (STATUS "Now").** A Playwright Test system
+  (protocol layer with the mock SFU, browser layer with fake media) replaces
+  the spike script; the recorder (phase 3) with record versioning, consent
+  record, link headers and the 48-hour deletion; the browser fixes for audio
+  playback across session resets and the iPhone microphone after a phone
+  call.
+
 ## 2026-10-09 — fullscreen screen share, notification pills, Opus storage
 
 From the second real test: the shared screen was hard to read on a phone,

@@ -19,9 +19,17 @@ Decisions on this page:
 Code: [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
 (`Recording`, `RecordingPolicy`, `ClientMsg::SetRecording`, `ClientMsg::SetConsent`,
 `ServerMsg::ConsentRequired`), [`crates/meeting-core/src/shell.rs`](../../crates/meeting-core/src/shell.rs)
-(`StartRecording`, `RecordTrack`, `StopRecordingTrack`, `StopRecording`),
-[`crates/meeting-core/src/step.rs`](../../crates/meeting-core/src/step.rs).
-The `RecorderObject` and the `Transcriber` trait are not started (phase 3).
+(`StartRecording`, `RecordTrack`, `StopRecordingTrack`, `StopRecording`,
+`FinishRecording`), [`crates/meeting-core/src/step.rs`](../../crates/meeting-core/src/step.rs),
+[`recording.rs`](../../crates/meeting-core/src/recording.rs) (roster, consent
+record, speaker labels, silence gate, chunk cuts, holes) and
+[`transcript.rs`](../../crates/meeting-core/src/transcript.rs) (merge,
+`transcript.json`, `transcript.md`); the `RecorderObject` in
+[`crates/worker/src/recorder/`](../../crates/worker/src/recorder/mod.rs)
+(phase 3, built 2026-10-09); the adapter calls in
+[`crates/sfu-api/src/client.rs`](../../crates/sfu-api/src/client.rs); the
+transcript page in [`web/src/routes/t/[token]/+page.svelte`](../../web/src/routes/t/[token]/+page.svelte)
+and [`web/src/lib/transcript.ts`](../../web/src/lib/transcript.ts).
 Research: [09 — post-meeting transcription and recording](../research/09-post-meeting-transcription-recording.md),
 [02 §3–4 — adapters and Workers AI speech](../research/02-cloudflare-deep-dive.md),
 [07 — live transcription](../research/07-live-transcription.md),
@@ -76,6 +84,20 @@ that bypasses `RoomState`.
 Why consent is not optional: in Germany, §201 StGB makes recording privately
 spoken words without consent a crime.
 
+The consent record (2026-10-09, research 11 item 5): each participant's
+consent keeps the time it was first given and the version of the notice
+shown (`NOTICE_VERSION` in the core, 1 for the current pre-join text; raise it
+when the text changes in substance). Withdrawing consent records the time of
+the withdrawal instead of forgetting the consent; giving it again clears the
+withdrawal and keeps the first time. Recording requires a consent that is not
+withdrawn. `transcript.json` lists everyone who ever consented under
+`consents`, with `at`, `noticeVersion` and, if withdrawn, `withdrawnAt`. The
+room sends each speaker's name and consent with every `/track` and the
+current consent with every `/untrack`, so the recorder holds them even if the
+final `/end` (`Effect::FinishRecording`, the whole roster and consent record)
+never arrives; a failed `/end` is kept in the room's ended record and sent
+once more by the room's alarm 30 s later.
+
 What the notice says (owner's decision, 2026-10-09): that the meeting is
 recorded, that voices become a transcript everyone in the meeting gets, and
 that video is not recorded. It does not list Cloudflare's subprocessors or
@@ -107,10 +129,11 @@ The pipeline, per meeting:
    hard at 30 seconds, and at a gap in the stream. A chunk is an Ogg/Opus
    file of about 40–90 KB.
 6. It writes each chunk with one R2 `put` to
-   `rec/{recorder}/{speaker}/{n}.ogg`, with the chunk's wall-clock start and
-   a silent flag in the object's custom metadata. There is no multipart upload
-   during the meeting, so hibernation can lose at most the current partial
-   chunk.
+   `audio/{recorder}/{speaker}/{generation}-{n}.ogg` (changed 2026-10-09 from
+   `rec/…`, so audio and transcripts have separate prefixes), with the
+   chunk's wall-clock start and a silent flag in the object's custom
+   metadata. There is no multipart upload during the meeting; the open
+   chunk's packets are spooled to SQLite, so an eviction loses at most 1.5 s.
 7. It records chunks that are entirely silent but flags them, so the
    transcript job skips them.
 
@@ -123,7 +146,8 @@ fallback is WAV chunks again.
 
 Load at 10 speakers: about 1.9 MB/s in messages of at most 32 KB, about 60
 messages per second, billed 20:1 as about 3 requests per second. That is
-within plan limits; the CPU work per message is one downmix and one resample.
+within plan limits; the CPU work per message is one downmix, one resample and,
+per 20 ms of audio, one Opus encode (about 0.5 ms in wasm, spike 3).
 
 Reconnects: after a dropped connection the adapter retries its endpoint for
 15 seconds and may drop old audio frames meanwhile; after 15 seconds it
@@ -139,6 +163,53 @@ attribution without separating speakers from a mix.
 
 Cost: each speaker's audio leaves the SFU once more, at 0.69 GB per
 speaker-hour, billed like media ([cost/](../cost/README.md)).
+
+As built (2026-10-09):
+
+- The room creates the `RecorderObject` (a SQLite Durable Object in the
+  rooms' jurisdiction) at the first `StartRecording` and keeps its id in the
+  room's record. Each adapter streams to
+  `{RECORDER_ORIGIN}/rec/{recorder}/{secret}/{who}/{generation}`, where
+  `RECORDER_ORIGIN` is the `workers.dev` host, so the media stream skips the
+  Pages front door (research 11), and the secret is 128 random bits the
+  recorder checks on every upgrade. A speaker's new track (a republish, or a
+  session replaced under D33) closes the old adapter and opens the next
+  generation. The recorder stores each adapter before and its id right after
+  the SFU call, and creates one adapter per call, so a retry never duplicates
+  one.
+- A message whose `sequenceNumber` is not newer than the last, by at most
+  1,000, is a duplicate and dropped; a step back of more than 1,000 means the
+  counter restarted (a new connection, or a 16-bit RTP counter wrapping inside
+  the u32 after about 22 minutes) and counts as a hole. A forward jump in the
+  sequence number, a timestamp off by more than 20 ms from the
+  step the stream showed so far, or more than 1 s between messages ends the
+  chunk, and the next starts with a fresh wall-clock time. Times inside a
+  chunk come from its sample count.
+- Silence: a 20 ms frame below −50 dBFS RMS is quiet; the stream counts as
+  silent after 300 ms of quiet frames. A chunk with less than 300 ms of loud
+  frames is flagged silent and skipped by the job.
+- Every chunk is its own Ogg stream with its own encoder, so it decodes
+  without its predecessor; pre-skip 312 (the encoder's 6.5 ms lookahead, at
+  48 kHz), 960 granule units per packet. `opus-rs` 0.1.37 takes its SILK
+  bitrate from the output buffer's size, not from `bitrate_bps`, so the
+  recorder caps packets at 61 bytes: 17.9 kbps on spike 3's speech clip.
+- Encoded packets are appended to SQLite at least every 1.5 s, so an
+  eviction or deploy loses at most that much; a chunk an eviction left open is
+  closed from its spool the next time the recorder runs. A closed chunk goes
+  to R2 in the background (at most two uploads at a time), and its spool rows
+  are deleted after the `put` succeeds. A failed upload is retried after 2 s,
+  10 s, then 60 s; after five failures the chunk is lost and shows as missing
+  audio. A chunk with nothing in its spool (evicted within 1.5 s of its start)
+  is skipped, never uploaded or transcribed. Once the meeting ended, the
+  recorder refuses further adapter messages and closes their sockets.
+- R2 layout: audio under `audio/{recorder}/{who}/{generation}-{index}.ogg`
+  with custom metadata `startMs`, `durationMs`, `silent`, `who`, `n`;
+  transcripts under `transcripts/{recorder}/transcript.json|md`. The two
+  prefixes are separate so the lifecycle rule of D18 can expire audio only.
+- Gaps in the transcript are derived from the chunk list: a hole of at least
+  1 s between consecutive chunks of one adapter stream, chunks that never
+  reached R2 ("missing"), and chunks the speech model gave up on ("not
+  transcribed").
 
 Rejected: R2 multipart upload during the meeting
 ([09 §2](../research/09-post-meeting-transcription-recording.md)). It needs
@@ -186,6 +257,24 @@ Durable Object and that Whisper reads the result.
 Target (phase 3): a recorded 4-person meeting yields a correctly attributed
 German/English transcript within 15 minutes of its end.
 
+As built (2026-10-09; the account stays on Workers Free, which allows 10 ms
+of CPU per invocation): the alarm runs one small step per invocation and
+re-arms itself at once while work remains. A step uploads what an eviction
+left behind, transcribes up to four stored chunks in parallel, or merges up to
+300 segments into paragraphs; the last step writes both files. Requests use
+`vad_filter: true`, `beam_size: 2` and an `initial_prompt` naming the
+participants, and segments with `no_speech_prob` above 0.6 are dropped. An
+error whose text names a quota, the daily allowance or neurons waits until
+00:05 UTC, and one that says 429, "rate limit" or "too many requests" waits an
+hour; the status shows `retryAt`, and the transcript never fails for that.
+After seven days of such waiting without any chunk going through, the waiting
+chunks are given up like other failures. Bare words such as "limit" do not
+count, since an input size limit would otherwise retry forever. Before the
+first transcription step the job closes every stream still in memory. Any other error
+counts against the chunk, which after three attempts appears as a gap ("not
+transcribed"); a failing merge or write fails the transcript after six tries
+in a row. `WhisperTurbo` is the only `Transcriber`; `Nova3Http` is not built.
+
 Open: the maximum audio size per Workers AI speech request is undocumented;
 a 30 s Opus chunk is under 100 KB, far from any plausible limit. Spike 3
 checked Whisper only; Nova-3 stays an option behind the trait.
@@ -213,10 +302,27 @@ it replaces "keep both indefinitely"
 file for the transcript page (D17, later) is available only within those
 48 hours.
 
+As built (2026-10-09): once the transcript is written, the recorder's alarm
+fires at the meeting's end plus 48 hours (at once if the transcript took
+longer) and deletes everything under `audio/{recorder}/`. The backstop rule
+expires `audio/` after 3 days; it is set once with
+`pnpm exec wrangler r2 bucket lifecycle add meet-felix-recordings audio-3-days audio/ --expire-days 3 --jurisdiction eu`
+(wrangler 4.147, flags checked with `--help`). Transcripts live under
+`transcripts/`, untouched by it. The link itself is a KV entry
+(`transcript:<token>`) without expiry; the delete button will remove it.
+
 Context: R2 storage costs less than $0.01 per month for a recorded 4-person
 meeting-hour of Opus audio ([cost/](../cost/README.md)).
 
 ## D19: Show the transcript link to everyone at the end (2026-10-09)
+
+Accepted on 2026-10-09: the transcript token appears in the URL of the
+transcript page and of its API calls, and the adapter secret appears in the
+adapter endpoint URL, so both end up in Workers Logs' invocation records,
+which only the owner can read. The code itself never logs them. Turning the
+invocation logs off would hide the request-level view the owner asked for
+after the first test; the owner already holds every transcript, so the
+logs add no new reader.
 
 In v1 the room shows the transcript link
 ([D9](../links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09))

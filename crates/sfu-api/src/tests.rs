@@ -14,9 +14,10 @@ use meeting_core::{
 use serde_json::{Value, json};
 
 use crate::wire::{
-    CloseTrackObject, CloseTracksRequest, LayerFallback, NewSessionResponse, RenegotiateRequest,
-    SdpType, SessionDescription, Simulcast, TrackObject, TracksRequest, TracksResponse,
-    UpdateTracksRequest,
+    AdapterId, AdapterRef, AdapterTrack, CloseAdaptersRequest, CloseTrackObject,
+    CloseTracksRequest, LayerFallback, NewAdaptersRequest, NewSessionResponse, OutputCodec,
+    RenegotiateRequest, SdpType, SessionDescription, Simulcast, TrackObject, TracksRequest,
+    TracksResponse, UpdateTracksRequest,
 };
 use crate::{
     AppId, AppSecret, Failure, HttpRequest, HttpResponse, Method, SfuClient, SfuError, SfuTransport,
@@ -561,4 +562,99 @@ fn a_session_the_sfu_declares_gone_is_reported_as_such() {
     ] {
         assert_eq!(error.cause(), cause, "{error}");
     }
+}
+
+fn adapter_track(name: &str) -> AdapterTrack {
+    AdapterTrack::Remote {
+        session_id: SessionId::new(PUBLISHER),
+        track_name: TrackName::new(name),
+        endpoint: format!("wss://example.com/rec/{name}"),
+        output_codec: OutputCodec::Pcm,
+    }
+}
+
+#[test]
+fn adapter_request_matches_the_websocket_adapter_docs() {
+    let request = NewAdaptersRequest {
+        tracks: vec![adapter_track("mic")],
+    };
+    assert_eq!(
+        to_json(&request),
+        json!({ "tracks": [{
+            "location": "remote",
+            "sessionId": PUBLISHER,
+            "trackName": "mic",
+            "endpoint": "wss://example.com/rec/mic",
+            "outputCodec": "pcm"
+        }]})
+    );
+    let close = CloseAdaptersRequest {
+        tracks: vec![AdapterRef {
+            adapter_id: AdapterId::new("a1"),
+        }],
+    };
+    assert_eq!(
+        to_json(&close),
+        json!({ "tracks": [{ "adapterId": "a1" }] })
+    );
+}
+
+#[test]
+fn adapter_creation_reports_each_entry_in_order() {
+    let partial = Canned::new([(
+        200,
+        json!({ "tracks": [
+            { "trackName": "a", "adapterId": "id-a", "endpoint": "wss://example.com/rec/a" },
+            { "trackName": "b", "errorCode": "websocket_handshake_failed",
+              "errorDescription": "handshake failed" },
+        ]}),
+    )]);
+    let results =
+        ready(client(&partial).create_adapters(vec![adapter_track("a"), adapter_track("b")]))
+            .unwrap();
+    assert_eq!(results[0], Ok(AdapterId::new("id-a")));
+    assert!(
+        matches!(&results[1], Err(SfuError::Track { code, .. }) if code == "websocket_handshake_failed")
+    );
+    let sent = partial.sent.borrow();
+    assert_eq!(
+        sent[0].1,
+        "https://rtc.live.cloudflare.com/v1/apps/app/adapters/websocket/new"
+    );
+
+    // HTTP 503 when every entry failed still names the reason per entry.
+    let all_failed = Canned::new([(
+        503,
+        json!({ "tracks": [{ "trackName": "a", "errorCode": "websocket_handshake_failed",
+            "errorDescription": "no" }] }),
+    )]);
+    let results = ready(client(&all_failed).create_adapters(vec![adapter_track("a")])).unwrap();
+    assert!(matches!(&results[0], Err(SfuError::Track { .. })));
+
+    let down = Canned::new([(503, json!({}))]);
+    assert_eq!(
+        ready(client(&down).create_adapters(vec![adapter_track("a")])),
+        Err(SfuError::Status { status: 503 })
+    );
+}
+
+#[test]
+fn closing_adapters_is_idempotent_and_reports_entry_errors() {
+    let ok = Canned::new([(
+        200,
+        json!({ "tracks": [{ "adapterId": "a1", "bytesProcessed": 9 }] }),
+    )]);
+    assert_eq!(
+        ready(client(&ok).close_adapters(&[AdapterId::new("a1")])),
+        Ok(())
+    );
+    assert_eq!(
+        ok.sent.borrow()[0].1,
+        "https://rtc.live.cloudflare.com/v1/apps/app/adapters/websocket/close"
+    );
+    let failed = Canned::new([(
+        200,
+        json!({ "tracks": [{ "adapterId": "a1", "errorCode": "internal", "errorDescription": "x" }] }),
+    )]);
+    assert!(ready(client(&failed).close_adapters(&[AdapterId::new("a1")])).is_err());
 }

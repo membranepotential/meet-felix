@@ -125,6 +125,7 @@
 
 			{#if media.error}
 				<div class="error" role="alert">
+					<Icon name="alert" size={18} />
 					<p>{describe(media.error)}</p>
 					{#if media.error !== 'insecure'}
 						<button class="button quiet" type="button" onclick={() => media.start()}
@@ -179,6 +180,7 @@
 
 			{#if lookup.kind === 'failed'}
 				<div class="error" role="alert">
+					<Icon name="alert" size={18} />
 					<p>The meeting could not be reached. Check your connection, then try again.</p>
 					<button class="button quiet" type="button" onclick={onretry}>Try again</button>
 				</div>
@@ -433,7 +435,6 @@
 		padding: 1rem 1.125rem;
 		border-radius: var(--radius-s);
 		background: rgb(229 72 77 / 0.1);
-		box-shadow: inset 3px 0 0 var(--signal);
 		font-size: var(--step--1);
 		line-height: 1.5;
 	}
@@ -457,13 +458,17 @@
 		line-height: 1.5;
 	}
 
+	/* The shared card, with the retry button under the text. */
 	.error {
-		display: grid;
-		gap: 0.75rem;
-		justify-items: start;
-		padding: 0.875rem 1rem;
-		border-left: 3px solid var(--signal);
-		background: var(--water);
+		flex-wrap: wrap;
+	}
+
+	.error > p {
+		flex: 1 1 12rem;
+	}
+
+	.error > .button {
+		margin-left: calc(18px + 0.625rem);
 	}
 
 	.join {

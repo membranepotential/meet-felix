@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import type { LocalMedia } from '../local-media.svelte.ts';
 	import { AudioLevels } from '../media/audio-levels.svelte.ts';
 	import { isLive, streamFor } from '../media/remote.ts';
-	import { playAudio } from '../media/video.ts';
+	import type { Voices } from '../media/remote-audio.svelte.ts';
 	import {
 		trackKey,
 		type MeetingId,
@@ -22,7 +22,8 @@
 
 	/** Voice levels for the speaking ring, keyed like the camera tiles. */
 	const SELF = 'self';
-	const levels = new AudioLevels();
+	// A meeting screen belongs to one session for its whole life, so its context never changes.
+	const levels = new AudioLevels(untrack(() => session.audio.context));
 	const levelOf = (key: string) => levels.levels[key] ?? 0;
 
 	/** The participant a host is about to remove; the confirmation dialog is open while set. */
@@ -107,19 +108,21 @@
 		return [...self, ...others];
 	});
 
-	let audio = $derived(
-		session.others.flatMap((p) => {
-			const stream = remoteStream(p, 'audio');
-			return stream ? [{ key: p.id, stream }] : [];
-		})
+	/**
+	 * What each other participant says. Everyone in the room keeps an entry, `null` while their
+	 * audio is not received, so their `<audio>` element outlasts a session reset (D33).
+	 */
+	let heard: Voices = $derived(
+		new Map(session.others.map((p) => [p.id, remoteStream(p, 'audio')]))
 	);
+	$effect(() => session.audio.sync(heard));
 
 	/** Every voice to measure: our microphone and each received audio track. */
 	let voices: ReadonlyMap<string, MediaStreamTrack> = $derived(
 		new Map([
 			...(media.tracks.audio ? [[SELF, media.tracks.audio] as const] : []),
-			...audio.flatMap(({ key, stream }) =>
-				stream.getAudioTracks().map((track) => [String(key), track] as const)
+			...[...heard].flatMap(([id, stream]) =>
+				(stream?.getAudioTracks() ?? []).map((track) => [String(id), track] as const)
 			)
 		])
 	);
@@ -157,10 +160,6 @@
 	<div class="stage-wrap">
 		<Stage {tiles} {featured} layers={session.layers} />
 	</div>
-
-	{#each audio as { key, stream } (key)}
-		<audio {@attach playAudio(stream)}></audio>
-	{/each}
 
 	<!-- Notices hang above the bar, over the stage's lower edge, so the tiles never jump. -->
 	<div class="dock">

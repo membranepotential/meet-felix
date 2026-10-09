@@ -10,9 +10,10 @@ use crate::protocol::{
 };
 use crate::shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 use crate::state::{
-    AlarmReason, Connection, Lifecycle, NEGOTIATION_TIMEOUT_MS, Offered, Participant,
-    PublishNegotiation, PublishSession, PublishedTrack, Receiving, RecordingStatus, Replacement,
-    RoomState, SUBSCRIBE_RETRY_MS, SessionSlot, SubscribeNegotiation, SubscribeSession,
+    AlarmReason, Connection, Consent, Lifecycle, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, Offered,
+    Participant, PublishNegotiation, PublishSession, PublishedTrack, Receiving, RecordingStatus,
+    Replacement, RoomState, SUBSCRIBE_RETRY_MS, SessionSlot, SubscribeNegotiation,
+    SubscribeSession,
 };
 
 /// Applies one event and returns the new state and what the shell must do, in order.
@@ -171,7 +172,11 @@ impl RoomState {
                         Participant {
                             name,
                             role,
-                            consent_recording: consent,
+                            consent: consent.then_some(Consent {
+                                at: now,
+                                notice_version: NOTICE_VERSION,
+                                withdrawn_at: None,
+                            }),
                             resume: fresh_token,
                             connection: Connection::Knocking,
                         },
@@ -203,7 +208,7 @@ impl RoomState {
                 Ok(())
             }
             ClientMsg::SetConsent { consent } => {
-                self.set_consent(from, consent, fx);
+                self.set_consent(now, from, consent, fx);
                 Ok(())
             }
             ClientMsg::PublishOffer { sdp, tracks } => {
@@ -435,14 +440,25 @@ impl RoomState {
         }
     }
 
-    fn set_consent(&mut self, who: ParticipantId, consent: bool, fx: &mut Effects) {
+    fn set_consent(&mut self, now: Millis, who: ParticipantId, consent: bool, fx: &mut Effects) {
         let Some(p) = self.participants.get_mut(&who) else {
             return;
         };
-        if p.consent_recording == consent {
+        if p.consents() == consent {
             return;
         }
-        p.consent_recording = consent;
+        // The first consent's time stays; a withdrawal is recorded, and consenting again clears it.
+        p.consent = Some(match p.consent {
+            Some(given) => Consent {
+                withdrawn_at: (!consent).then_some(now),
+                ..given
+            },
+            None => Consent {
+                at: now,
+                notice_version: NOTICE_VERSION,
+                withdrawn_at: None,
+            },
+        });
         let (awaiting, admitted) = (
             p.connection == Connection::AwaitingConsent,
             p.connection.is_admitted(),
@@ -623,7 +639,7 @@ impl RoomState {
         let consented = self
             .participants
             .get(&who)
-            .is_some_and(|p| p.consent_recording);
+            .is_some_and(Participant::consents);
         (self.recording.current().is_some() && consented)
             .then(|| self.resolve(audio(who)))
             .flatten()
@@ -1314,6 +1330,12 @@ impl RoomState {
         if self.recording.current().is_some() {
             self.recording = RecordingStatus::Stopped;
             fx.push(Effect::StopRecording);
+        }
+        if self.recording != RecordingStatus::NeverStarted {
+            fx.push(Effect::FinishRecording {
+                roster: self.roster(),
+                consents: self.consents(),
+            });
         }
         self.lifecycle = Lifecycle::Ended { at: now };
         fx.push(Effect::ReleaseMeetingId {

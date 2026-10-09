@@ -823,7 +823,7 @@ impl Sim {
                 }
                 // Only a recording room keeps a guest waiting for consent.
                 Connection::AwaitingConsent => {
-                    prop_assert!(recording && p.role == Role::Guest && !p.consent_recording)
+                    prop_assert!(recording && p.role == Role::Guest && !p.consents())
                 }
                 Connection::Connecting { .. } | Connection::Left => {}
             }
@@ -831,13 +831,11 @@ impl Sim {
             let newly_admitted =
                 p.connection.is_admitted() && !was.is_some_and(|w| w.connection.is_admitted());
             if newly_admitted && p.role == Role::Guest {
-                prop_assert!(!recording || p.consent_recording, "{who:?} admitted");
+                prop_assert!(!recording || p.consents(), "{who:?} admitted");
             }
             // Whoever is in a recording room without consent was asked for it and muted.
             let unconsented = |r: &RoomState, p: &crate::state::Participant| {
-                r.recording.current().is_some()
-                    && p.connection.is_admitted()
-                    && !p.consent_recording
+                r.recording.current().is_some() && p.connection.is_admitted() && !p.consents()
             };
             if unconsented(after, p) && !was.is_some_and(|w| unconsented(before, w)) {
                 for asked in [ServerMsg::ConsentRequired, ServerMsg::Muted] {
@@ -984,7 +982,7 @@ impl Sim {
         }
         let expected: BTreeSet<_> = state
             .joined()
-            .filter(|(who, ..)| state.participants[who].consent_recording)
+            .filter(|(who, ..)| state.participants[who].consents())
             .filter_map(|(owner, ..)| {
                 state.resolve(TrackRef {
                     owner,

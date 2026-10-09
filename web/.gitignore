@@ -4,3 +4,5 @@ node_modules
 # wasm-pack output of meeting-core, built locally
 /src/lib/wasm
 vite.config.ts.timestamp-*
+# Playwright e2e: results, traces, the Worker bundle and the stacks' state and logs
+/e2e/.artifacts

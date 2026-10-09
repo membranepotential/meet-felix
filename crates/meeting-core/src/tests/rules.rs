@@ -1,11 +1,12 @@
 //! One test per room rule.
 
 use super::support::{Room, T0, name, session, track_name, transcript};
+use crate::recording::{ConsentRecord, RosterEntry};
 use crate::{
     ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FailureCause, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Phase, Presence, RecordingPolicy,
-    RemoteTrack, Role, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg,
-    SessionEpoch, SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind,
+    NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, OfferedTrack, ParticipantId, Phase, Presence,
+    RecordingPolicy, RemoteTrack, Role, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp,
+    ServerMsg, SessionEpoch, SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -522,6 +523,14 @@ fn kicked_participants_are_told_and_disconnected() {
 fn ending_tells_everyone_and_releases_the_link() {
     let mut room = meeting_room();
     room.client(HOST, ClientMsg::SetRecording { on: true });
+    // The guest withdraws consent, gives it again, and withdraws it for good: the record keeps
+    // the first consent and the last withdrawal.
+    let withdrawn = room.now.after(9_000);
+    room.client(GUEST, ClientMsg::SetConsent { consent: false });
+    room.now = room.now.after(5_000);
+    room.client(GUEST, ClientMsg::SetConsent { consent: true });
+    room.now = withdrawn;
+    room.client(GUEST, ClientMsg::SetConsent { consent: false });
     let effects = room.client(HOST, ClientMsg::End);
     assert_eq!(
         effects,
@@ -535,6 +544,36 @@ fn ending_tells_everyone_and_releases_the_link() {
             Effect::CloseSocket { who: HOST },
             Effect::CloseSocket { who: GUEST },
             Effect::StopRecording,
+            Effect::FinishRecording {
+                roster: vec![
+                    RosterEntry {
+                        id: HOST,
+                        name: name("P1"),
+                        role: Role::Host
+                    },
+                    RosterEntry {
+                        id: GUEST,
+                        name: name("P2"),
+                        role: Role::Guest
+                    },
+                ],
+                consents: vec![
+                    ConsentRecord {
+                        who: HOST,
+                        name: name("P1"),
+                        at: T0,
+                        notice_version: NOTICE_VERSION,
+                        withdrawn_at: None
+                    },
+                    ConsentRecord {
+                        who: GUEST,
+                        name: name("P2"),
+                        at: T0,
+                        notice_version: NOTICE_VERSION,
+                        withdrawn_at: Some(withdrawn)
+                    },
+                ],
+            },
             Effect::ReleaseMeetingId {
                 meeting: room.state.meeting().clone()
             },
@@ -1341,4 +1380,20 @@ fn messages_about_a_session_being_replaced_are_dropped_without_an_error() {
         assert_eq!(room.client(GUEST, msg.clone()), [], "{msg:?}");
         assert_eq!(room.state, before, "{msg:?}");
     }
+}
+
+#[test]
+fn the_roster_keeps_everyone_who_left_and_the_consents_only_standing_ones() {
+    let mut room = meeting_room();
+    let third = ParticipantId(3);
+    room.join(third, false, false);
+    room.client(GUEST, ClientMsg::Leave);
+    let ids: Vec<_> = room.state.roster().iter().map(|e| e.id).collect();
+    assert_eq!(ids, [HOST, GUEST, third], "the guest who left stays named");
+    let consented: Vec<_> = room.state.consents().iter().map(|c| c.who).collect();
+    assert_eq!(
+        consented,
+        [HOST, GUEST],
+        "joined without consent: no record"
+    );
 }

@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { createMeeting, type ApiError } from '#lib/api.ts';
 	import CopyButton from '#lib/components/CopyButton.svelte';
+	import Icon from '#lib/components/Icon.svelte';
 	import LoginForm from '#lib/components/LoginForm.svelte';
 	import ShareButton from '#lib/components/ShareButton.svelte';
 	import { OwnerSession } from '#lib/owner-session.svelte.ts';
@@ -80,7 +81,9 @@
 	</header>
 
 	{#if owner.state.kind === 'signed-in' && owner.state.logout.kind === 'failed'}
-		<p class="error" role="alert">You are still logged in: the server could not be reached.</p>
+		<p class="error" role="alert">
+			<Icon name="alert" size={18} />You are still logged in: the server could not be reached.
+		</p>
 	{/if}
 
 	{#if owner.state.kind === 'checking'}
@@ -124,7 +127,7 @@
 				<input type="checkbox" role="switch" bind:checked={record} />
 			</label>
 			{#if hostState.kind === 'failed'}
-				<p class="error" role="alert">{describe(hostState.error)}</p>
+				<p class="error" role="alert"><Icon name="alert" size={18} />{describe(hostState.error)}</p>
 			{/if}
 			<div class="spacer"></div>
 			<button class="button primary big" type="submit" disabled={hostState.kind === 'creating'}>
@@ -310,12 +313,6 @@
 	.switch input:checked::after {
 		translate: 20px 0;
 		background: var(--lamp-ink);
-	}
-
-	.error {
-		padding: 0.875rem 1rem;
-		border-left: 3px solid var(--signal);
-		background: var(--water);
 	}
 
 	.past {

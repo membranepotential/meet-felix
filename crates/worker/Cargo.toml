@@ -14,7 +14,7 @@ meeting-core = { path = "../meeting-core" }
 sfu-api = { path = "../sfu-api" }
 worker = "0.8.7"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 # `#[durable_object]` expands to code that names the `wasm_bindgen` crate directly.
 wasm-bindgen = "0.2.129"
 # The `wasm_js` backend reads `crypto.getRandomValues`, which Workers provide.
@@ -23,3 +23,8 @@ getrandom = { version = "0.4.3", features = ["wasm_js"] }
 hmac = "0.13.0"
 sha2 = "0.11.0"
 futures-util = { version = "0.3", default-features = false }
+# The recorder: Opus encoding in pure Rust (spike 3 in docs/spikes), the Ogg container, and
+# base64 for Workers AI's `audio` input.
+opus-rs = "0.1.37"
+ogg = "0.9.2"
+base64 = "0.22.1"

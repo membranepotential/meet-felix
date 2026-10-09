@@ -14,15 +14,28 @@ watch_dir = "crates/worker/src"
 name = "ROOMS"
 class_name = "RoomObject"
 
+[[durable_objects.bindings]]
+name = "RECORDERS"
+class_name = "RecorderObject"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomObject"]
+
+# One RecorderObject per recorded meeting (D16 in docs/recording).
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RecorderObject"]
 
 [vars]
 # Pins each new Room DO to the EU. Local workerd implements no jurisdictions, so run
 # `wrangler dev --var ROOM_JURISDICTION:` to create rooms without one. Any value other than
 # "", "eu", "us" or "fedramp" makes every request fail with 500.
 ROOM_JURISDICTION = "eu"
+# Where the SFU's WebSocket adapters deliver recorded audio (`/rec/...`). The workers.dev host,
+# not meet.example.com: the media stream skips the Pages front door and its double billing
+# (research 11). For a local test, `--var RECORDER_ORIGIN:http://localhost:<port>`.
+RECORDER_ORIGIN = "https://meet-felix.example.workers.dev"
 # Optional SFU_API_URL replaces https://rtc.live.cloudflare.com/v1, for the spike's mock SFU only.
 
 # Secrets (`pnpm exec wrangler secret put NAME`; locally in the git-ignored `.dev.vars`):
@@ -37,12 +50,26 @@ ROOM_JURISDICTION = "eu"
 binding = "MEETINGS"
 id = "${MEETINGS_KV_ID}"
 
+# Recorded audio chunks (audio/<recorder>/...) and transcripts (transcripts/<recorder>/...).
+# The bucket lives in the EU jurisdiction, which the binding must name. An R2 lifecycle rule
+# deletes audio/ objects after 3 days as the backstop for D18 (set with wrangler, see
+# docs/recording). `wrangler dev` simulates the bucket locally.
+[[r2_buckets]]
+binding = "RECORDINGS"
+bucket_name = "meet-felix-recordings"
+jurisdiction = "eu"
+
+# Workers AI for the transcript job (Whisper). In `wrangler dev` it runs remotely and is billed.
+[ai]
+binding = "AI"
+
 # The built SvelteKit app (web/build) is served as static assets; unknown paths fall back to
-# index.html for the SPA router. /api/* and /ws/* always reach the Worker first.
+# index.html for the SPA router. /api/*, /ws/* and the recorder's /rec/* always reach the
+# Worker first. web/static/_headers keeps /t/* (transcript links) out of referrers and indexes.
 [assets]
 directory = "web/build"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/ws/*"]
+run_worker_first = ["/api/*", "/ws/*", "/rec/*"]
 
 # Workers Logs: every invocation, console output and exception of the Worker and its Durable
 # Objects, kept 7 days (Paid) or 3 days (Free) under Workers & Pages → meet-felix → Observability.

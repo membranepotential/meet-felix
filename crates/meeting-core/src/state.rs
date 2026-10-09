@@ -12,6 +12,7 @@ use crate::protocol::{
     LocalTrack, ParticipantView, Phase, Presence, Recording, RecordingPolicy, Rid, Role, RoomView,
     SessionEpochs, SessionKind, TrackKind, TrackRef,
 };
+use crate::recording::{ConsentRecord, RosterEntry};
 use crate::shell::{Effect, RemoteTrack};
 
 /// How long a live room may have no admitted participant before it ends.
@@ -29,6 +30,10 @@ pub const NEGOTIATION_TIMEOUT_MS: u64 = 15 * 1000;
 /// How long the room waits before it requests tracks again after a subscription failed, and
 /// before it asks again for a replacement session after the SFU failed to create one.
 pub const SUBSCRIBE_RETRY_MS: u64 = 3 * 1000;
+
+/// The version of the recording notice the pre-join screen shows; a consent records it. Raise it
+/// whenever the notice's text changes in substance.
+pub const NOTICE_VERSION: u32 = 1;
 
 /// Everything the room remembers. Serializable so the shell can persist it between events;
 /// change it only through [`crate::step`].
@@ -69,10 +74,29 @@ pub(crate) enum RecordingStatus {
 pub(crate) struct Participant {
     pub(crate) name: DisplayName,
     pub(crate) role: Role,
-    pub(crate) consent_recording: bool,
+    /// The participant's consent to recording, once given; withdrawing it sets its
+    /// `withdrawn_at` instead of forgetting it, so the consent record keeps both times.
+    pub(crate) consent: Option<Consent>,
     /// Lets the participant's client take this place again from a new socket.
     pub(crate) resume: ResumeToken,
     pub(crate) connection: Connection,
+}
+
+/// A participant's consent to recording: when they first gave it, which notice they saw, and
+/// when they withdrew it, if they did and have not given it again. It goes into the transcript as
+/// the consent record (research 11, item 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Consent {
+    pub(crate) at: Millis,
+    pub(crate) notice_version: u32,
+    pub(crate) withdrawn_at: Option<Millis>,
+}
+
+impl Participant {
+    /// Whether the participant consents to recording right now.
+    pub(crate) fn consents(&self) -> bool {
+        self.consent.is_some_and(|c| c.withdrawn_at.is_none())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +271,42 @@ impl RoomState {
         }
     }
 
+    /// The transcript link token.
+    pub fn transcript(&self) -> &TranscriptRef {
+        &self.transcript
+    }
+
+    /// Everyone who ever joined the room, including those who left, ordered by id. Names stay
+    /// in the state after a participant leaves, so the transcript can name every speaker.
+    pub fn roster(&self) -> Vec<RosterEntry> {
+        self.participants
+            .iter()
+            .map(|(&id, p)| RosterEntry {
+                id,
+                name: p.name.clone(),
+                role: p.role,
+            })
+            .collect()
+    }
+
+    /// The consent record for the transcript: everyone who ever consented to recording, with
+    /// when they gave it, the notice they saw and when they withdrew it, ordered by id.
+    pub fn consents(&self) -> Vec<ConsentRecord> {
+        self.participants
+            .iter()
+            .filter_map(|(&who, p)| {
+                let consent = p.consent?;
+                Some(ConsentRecord {
+                    who,
+                    name: p.name.clone(),
+                    at: consent.at,
+                    notice_version: consent.notice_version,
+                    withdrawn_at: consent.withdrawn_at,
+                })
+            })
+            .collect()
+    }
+
     /// The public snapshot every client sees.
     pub fn view(&self) -> RoomView {
         let participants = self
@@ -265,7 +325,7 @@ impl RoomState {
                     id,
                     name: p.name.clone(),
                     role: p.role,
-                    consent_recording: p.consent_recording,
+                    consent_recording: p.consents(),
                     presence,
                     tracks,
                 })
@@ -394,10 +454,7 @@ impl RoomState {
     /// Whether the room records and `who` has not consented.
     pub(crate) fn lacks_consent(&self, who: ParticipantId) -> bool {
         self.recording.current().is_some()
-            && self
-                .participants
-                .get(&who)
-                .is_some_and(|p| !p.consent_recording)
+            && self.participants.get(&who).is_some_and(|p| !p.consents())
     }
 
     /// When the room must act next, and why. Times may lie in the past.

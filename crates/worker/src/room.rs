@@ -8,25 +8,40 @@
 //! call) is in flight; the core is built for that (replies about participants who left are
 //! ignored), and [`RoomObject::execute_step`] carries out the socket effects of a step before its
 //! SFU calls, so no socket the step closes or rebinds can slip an event into that gap.
+//!
+//! The recording effects go to the meeting's `RecorderObject` (`crate::recorder`), which the
+//! room creates at the first `StartRecording` and remembers in its record; they are carried out
+//! with the SFU calls, after the socket effects.
 
 use std::collections::VecDeque;
 
+use meeting_core::recording::{ConsentRecord, RosterEntry};
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId, RoomState,
-    ServerMsg, SfuReply,
+    ClientMsg, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
+    RecordingPolicy, RoomState, ServerMsg, SfuReply, TranscriptRef,
 };
+use serde::Serialize;
 use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
 use worker::wasm_bindgen::JsCast;
 use worker::{
-    DurableObject, Env, Method, Request, Response, Result, State, WebSocket,
+    DurableObject, Env, Method, Request, RequestInit, Response, Result, State, WebSocket,
     WebSocketIncomingMessage, WebSocketPair, WebSocketRequestResponsePair, console_error,
-    console_log, console_warn, durable_object,
+    console_warn, durable_object,
 };
 
-use crate::internal::{INFO, INIT, InitRoom, OWNER_HEADER, OWNER_YES, RoomInfo};
-use crate::record::{Attachment, OpenSocket, Record, alarm_time, is_stale};
-use crate::{MEETINGS, is_websocket_upgrade, now, random, sfu};
+use crate::internal::{
+    FinishRecording, INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES, RECORDER_END,
+    RECORDER_START, RECORDER_STOP, RECORDER_TRACK, RECORDER_UNTRACK, RoomInfo, StartRecording,
+    TrackRecording, UntrackRecording,
+};
+use crate::record::{
+    Attachment, Decoded, FINISH_RETRY_MS, OpenSocket, PendingFinish, Record, alarm_time, is_stale,
+};
+use crate::{
+    Jurisdiction, MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu,
+    transcript_key,
+};
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
 /// (`setWebSocketAutoResponse` matches the raw string). Clients send it at least every
@@ -143,8 +158,10 @@ impl DurableObject for RoomObject {
             .chain(stale)
             .collect();
         self.run(inputs).await?;
-        if let Some(Record::Open(open)) = self.load().await? {
-            self.arm(open.alarm).await?;
+        match self.load().await? {
+            Some(Record::Open(open)) => self.arm(open.alarm).await?,
+            Some(ended @ Record::Ended { .. }) => self.finish_again(ended).await?,
+            None => {}
         }
         Response::empty()
     }
@@ -158,7 +175,7 @@ impl RoomObject {
         let (room, effects) =
             RoomState::new(init.meeting, init.transcript, init.recording_policy, now());
         self.store(&Record::created(room, &effects)).await?;
-        let replies = self.execute_step(effects, &mut 0).await?;
+        let replies = self.execute_step(effects, None, &mut 0).await?;
         self.handle(replies.into_iter().map(Event::Sfu)).await?;
         Response::empty()
     }
@@ -225,12 +242,20 @@ impl RoomObject {
                 return Ok(());
             };
             let now = now();
-            let (record, effects) = open.step(now, event);
+            let before = (
+                open.recorder.clone(),
+                open.room.meeting().clone(),
+                open.room.transcript().clone(),
+            );
+            let (mut record, effects) = open.step(now, event);
+            let recorder = self.recorder_link(before, &mut record, &effects);
             self.store(&record).await?;
             if let Some(ws) = close_stale {
                 close(&ws, CLOSE_STALE, "no ping");
             }
-            let replies = self.execute_step(effects, &mut sfu_calls).await?;
+            let replies = self
+                .execute_step(effects, recorder.as_ref(), &mut sfu_calls)
+                .await?;
             queue.extend(
                 replies
                     .into_iter()
@@ -240,9 +265,69 @@ impl RoomObject {
         Ok(())
     }
 
+    /// What the room needs to carry out a step's recording effects, or `None` if it has none.
+    /// Creates the recorder's id at the first `StartRecording` and keeps it in the record;
+    /// `before` is the recorder id, meeting and transcript token before the step, which an
+    /// ending step's record no longer holds.
+    fn recorder_link(
+        &self,
+        (id, meeting, transcript): (Option<String>, MeetingId, TranscriptRef),
+        record: &mut Record,
+        effects: &[Effect],
+    ) -> Option<RecorderLink> {
+        if !effects.iter().any(is_recording) {
+            return None;
+        }
+        let id = match id {
+            Some(id) => id,
+            None if effects
+                .iter()
+                .any(|e| matches!(e, Effect::StartRecording { .. })) =>
+            {
+                match self.new_recorder() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        console_error!("creating the recorder failed: {e}");
+                        return None;
+                    }
+                }
+            }
+            None => {
+                console_error!("a recording effect without a recorder");
+                return None;
+            }
+        };
+        let (roster, consents) = match record {
+            Record::Open(open) => {
+                open.recorder = Some(id.clone());
+                (open.room.roster(), open.room.consents())
+            }
+            Record::Ended { .. } => (Vec::new(), Vec::new()),
+        };
+        Some(RecorderLink {
+            id,
+            meeting,
+            transcript,
+            roster,
+            consents,
+        })
+    }
+
+    /// A new `RecorderObject` id in the rooms' jurisdiction.
+    fn new_recorder(&self) -> Result<String> {
+        let jurisdiction = Jurisdiction::from_var(&self.env.var(ROOM_JURISDICTION)?.to_string())
+            .map_err(worker::Error::RustError)?;
+        let recorders = self.env.durable_object(RECORDERS)?;
+        let id = match jurisdiction {
+            None => recorders.unique_id()?,
+            Some(jurisdiction) => recorders.unique_id_with_jurisdiction(jurisdiction.as_str())?,
+        };
+        Ok(id.to_string())
+    }
+
     /// Carries out one step's effects and returns the SFU replies to feed back.
     ///
-    /// The socket, alarm, recording and lifecycle effects run first, in order, then the SFU
+    /// The socket, alarm and lifecycle effects run first, in order, then the SFU and recorder
     /// calls, in order. Each SFU call awaits a fetch with the input gate open, so other events
     /// arrive meanwhile: a `CloseSocket` or `Rebind` behind an SFU call would let a kicked or
     /// replaced socket send a `Join` first and come back as a participant whose close is never
@@ -251,18 +336,25 @@ impl RoomObject {
     async fn execute_step(
         &self,
         effects: Vec<Effect>,
+        recorder: Option<&RecorderLink>,
         sfu_calls: &mut usize,
     ) -> Result<Vec<SfuReply>> {
-        let (sfu, local): (Vec<Effect>, Vec<Effect>) = effects.into_iter().partition(is_sfu_call);
+        let (remote, local): (Vec<Effect>, Vec<Effect>) =
+            effects.into_iter().partition(is_remote_call);
         let mut replies = Vec::new();
-        for effect in local.into_iter().chain(sfu) {
-            replies.extend(self.execute(effect, sfu_calls).await?);
+        for effect in local.into_iter().chain(remote) {
+            replies.extend(self.execute(effect, recorder, sfu_calls).await?);
         }
         Ok(replies)
     }
 
     /// Carries out one effect; returns the SFU reply to feed back, if any.
-    async fn execute(&self, effect: Effect, sfu_calls: &mut usize) -> Result<Option<SfuReply>> {
+    async fn execute(
+        &self,
+        effect: Effect,
+        recorder: Option<&RecorderLink>,
+        sfu_calls: &mut usize,
+    ) -> Result<Option<SfuReply>> {
         match effect {
             Effect::Send { to, msg } => self.send_to(&[to], &msg)?,
             Effect::Broadcast { to, msg } => self.send_to(&to, &msg)?,
@@ -287,10 +379,11 @@ impl RoomObject {
             Effect::StartRecording { .. }
             | Effect::RecordTrack { .. }
             | Effect::StopRecordingTrack { .. }
-            | Effect::StopRecording => {
-                // The RecorderObject comes in phase 3.
-                console_log!("recording not implemented yet: {effect:?}");
-            }
+            | Effect::StopRecording
+            | Effect::FinishRecording { .. } => match recorder {
+                Some(recorder) => self.tell_recorder(recorder, effect).await,
+                None => console_error!("no recorder for a recording effect"),
+            },
             Effect::ReleaseMeetingId { meeting } => {
                 // Logged, not returned: `EndMeeting` must still close the sockets. The KV entry
                 // expires with its TTL, and the room answers "ended" until then.
@@ -312,6 +405,140 @@ impl RoomObject {
             | Effect::SfuUpdateLayer { .. } => return Ok(self.call_sfu(&effect, sfu_calls).await),
         }
         Ok(None)
+    }
+
+    /// Carries out a recording effect at the recorder. Failures are logged, not returned: the
+    /// meeting goes on without its recording rather than failing.
+    async fn tell_recorder(&self, recorder: &RecorderLink, effect: Effect) {
+        let told = match effect {
+            Effect::StartRecording { since } => {
+                // The link works from now on, showing "recording" until the meeting ends.
+                self.link_transcript(recorder).await;
+                let start = StartRecording {
+                    meeting: recorder.meeting.clone(),
+                    since,
+                };
+                self.post_recorder(&recorder.id, RECORDER_START, &start)
+                    .await
+            }
+            Effect::RecordTrack { who, track } => {
+                let entry = recorder.roster.iter().find(|e| e.id == who);
+                let consent = recorder.consents.iter().find(|c| c.who == who);
+                let (Some(entry), Some(consent)) = (entry, consent) else {
+                    console_error!("recording {who:?}, who has no name or consent on record");
+                    return;
+                };
+                let body = TrackRecording {
+                    who,
+                    name: entry.name.clone(),
+                    role: entry.role,
+                    consent: consent.clone(),
+                    session: track.session,
+                    track_name: track.name,
+                };
+                self.post_recorder(&recorder.id, RECORDER_TRACK, &body)
+                    .await
+            }
+            Effect::StopRecordingTrack { who, track } => {
+                let body = UntrackRecording {
+                    who,
+                    session: track.session,
+                    track_name: track.name,
+                    consent: recorder.consents.iter().find(|c| c.who == who).cloned(),
+                };
+                self.post_recorder(&recorder.id, RECORDER_UNTRACK, &body)
+                    .await
+            }
+            Effect::StopRecording => self.post_recorder(&recorder.id, RECORDER_STOP, &()).await,
+            Effect::FinishRecording { roster, consents } => {
+                let finish = FinishRecording { roster, consents };
+                let finished = self
+                    .post_recorder(&recorder.id, RECORDER_END, &finish)
+                    .await;
+                if finished.is_err() {
+                    let pending = PendingFinish {
+                        recorder: recorder.id.clone(),
+                        finish,
+                    };
+                    if let Err(e) = self.finish_later(pending).await {
+                        console_error!("keeping the recorder's end for later failed: {e}");
+                    }
+                }
+                finished
+            }
+            _ => return,
+        };
+        if let Err(e) = told {
+            console_error!("the recorder failed: {e}");
+        }
+    }
+
+    /// Keeps a failed `/end` in the ended record and arms the alarm to send it once more.
+    async fn finish_later(&self, pending: PendingFinish) -> Result<()> {
+        let Some(record) = self.load().await? else {
+            return Ok(());
+        };
+        self.store(&record.with_pending_finish(pending)).await?;
+        self.state
+            .storage()
+            .set_alarm(i64::try_from(FINISH_RETRY_MS).unwrap_or(i64::MAX))
+            .await
+    }
+
+    /// Sends a pending `/end` once more, then forgets it either way: the recorder ends itself
+    /// after hours without audio, with the names and consents its `/track`s carried.
+    async fn finish_again(&self, ended: Record) -> Result<()> {
+        let (record, pending) = ended.take_pending_finish();
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        self.store(&record).await?;
+        if let Err(e) = self
+            .post_recorder(&pending.recorder, RECORDER_END, &pending.finish)
+            .await
+        {
+            console_error!("the recorder's end failed again: {e}");
+        }
+        Ok(())
+    }
+
+    async fn post_recorder(&self, recorder: &str, path: &str, body: &impl Serialize) -> Result<()> {
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_body(Some(serde_json::to_string(body)?.into()));
+        let response = self
+            .env
+            .durable_object(RECORDERS)?
+            .id_from_string(recorder)?
+            .get_stub()?
+            .fetch_with_request(Request::new_with_init(&format!("{ORIGIN}{path}"), &init)?)
+            .await?;
+        match response.status_code() {
+            200..300 => Ok(()),
+            status => Err(worker::Error::RustError(format!(
+                "{path} answered {status}"
+            ))),
+        }
+    }
+
+    /// Maps the transcript token to the recorder in KV, for `GET /api/transcript/:token`. The
+    /// entry has no expiry: transcripts stay until the owner deletes them (D18). Logged on failure
+    /// without the token, which is the link's only secret.
+    async fn link_transcript(&self, recorder: &RecorderLink) {
+        let linked = async {
+            self.env
+                .kv(MEETINGS)?
+                .put(&transcript_key(&recorder.transcript), &recorder.id)?
+                .execute()
+                .await?;
+            Ok::<(), worker::Error>(())
+        };
+        if let Err(e) = linked.await {
+            console_error!(
+                "linking the transcript of {:?} failed: {e}",
+                recorder.meeting
+            );
+        }
     }
 
     /// Makes the SFU call for `effect`; returns the reply to feed back, if the core expects one.
@@ -387,16 +614,34 @@ impl RoomObject {
             })
     }
 
+    /// The stored record. A record of an older version is logged and replaced by an ended
+    /// one ([`crate::record::decode`]).
     async fn load(&self) -> Result<Option<Record>> {
         let json: Option<String> = self.state.storage().get(Record::KEY).await?;
-        json.map(|json| serde_json::from_str(&json).map_err(worker::Error::from))
-            .transpose()
+        let Some(json) = json else {
+            return Ok(None);
+        };
+        match crate::record::decode(&json).map_err(worker::Error::RustError)? {
+            Decoded::Current(record) => Ok(Some(record)),
+            Decoded::Outdated { version } => {
+                console_warn!(
+                    "room {}: its record has the old version {version}; the meeting counts as ended",
+                    self.state.id()
+                );
+                let ended = Record::Ended {
+                    recording_policy: RecordingPolicy::HostDecides,
+                    pending_finish: None,
+                };
+                self.store(&ended).await?;
+                Ok(Some(ended))
+            }
+        }
     }
 
     async fn store(&self, record: &Record) -> Result<()> {
         self.state
             .storage()
-            .put(Record::KEY, serde_json::to_string(record)?)
+            .put(Record::KEY, crate::record::encode(record)?)
             .await
     }
 }
@@ -417,28 +662,53 @@ impl From<Event> for Input {
     }
 }
 
-/// Whether `effect` is an SFU call, carried out after the step's other effects
+/// What the room needs to carry out one step's recording effects.
+struct RecorderLink {
+    /// The `RecorderObject`'s id (hex).
+    id: String,
+    meeting: MeetingId,
+    transcript: TranscriptRef,
+    /// The room's roster after the step, for the speakers' names.
+    roster: Vec<RosterEntry>,
+    /// The room's consent record after the step.
+    consents: Vec<ConsentRecord>,
+}
+
+/// Whether `effect` is an SFU or recorder call, carried out after the step's other effects
 /// ([`RoomObject::execute_step`]).
-fn is_sfu_call(effect: &Effect) -> bool {
+fn is_remote_call(effect: &Effect) -> bool {
     match effect {
         Effect::SfuNewSession { .. }
         | Effect::SfuPublish { .. }
         | Effect::SfuSubscribe { .. }
         | Effect::SfuRenegotiate { .. }
         | Effect::SfuCloseTracks { .. }
-        | Effect::SfuUpdateLayer { .. } => true,
+        | Effect::SfuUpdateLayer { .. }
+        | Effect::StartRecording { .. }
+        | Effect::RecordTrack { .. }
+        | Effect::StopRecordingTrack { .. }
+        | Effect::StopRecording
+        | Effect::FinishRecording { .. } => true,
         Effect::Send { .. }
         | Effect::Broadcast { .. }
         | Effect::CloseSocket { .. }
         | Effect::Rebind { .. }
         | Effect::SetAlarm { .. }
-        | Effect::StartRecording { .. }
-        | Effect::RecordTrack { .. }
-        | Effect::StopRecordingTrack { .. }
-        | Effect::StopRecording
         | Effect::ReleaseMeetingId { .. }
         | Effect::EndMeeting => false,
     }
+}
+
+/// Whether `effect` is for the recorder.
+fn is_recording(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::StartRecording { .. }
+            | Effect::RecordTrack { .. }
+            | Effect::StopRecordingTrack { .. }
+            | Effect::StopRecording
+            | Effect::FinishRecording { .. }
+    )
 }
 
 /// Names the SFU call an effect makes, its participant and its session, for the log, e.g.

@@ -1,7 +1,8 @@
 /**
  * Measures how loud each voice in the meeting is, for the active-speaker ring and level bars.
- * One `AnalyserNode` per audio track, all in one `AudioContext`, read 10 times a second.
- * Nothing is played through the context; remote audio plays through `<audio>` elements.
+ * One `AnalyserNode` per audio track, all in the session's `AudioContext` (`RemoteAudio`
+ * resumes it in the Join tap), read 10 times a second. Nothing is played through the context;
+ * remote audio plays through `<audio>` elements.
  */
 import { levelFromRms, rms, smoothLevel } from './speaking.ts';
 
@@ -30,12 +31,16 @@ export class AudioLevels {
 	/** The smoothed level in 0..1 of each measured track by key; silent keys are absent. */
 	levels = $state.raw<Levels>({});
 
-	#context: AudioContext | null = null;
+	readonly #context: AudioContext;
 	// Web Audio bookkeeping, never read by the UI, so it needs no reactivity.
 	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	#meters = new Map<string, Meter>();
 	#samples = new Float32Array(FFT_SIZE);
 	#timer: ReturnType<typeof setInterval> | null = null;
+
+	constructor(context: AudioContext) {
+		this.#context = context;
+	}
 
 	/**
 	 * Measures exactly `tracks`: starts meters for new tracks and stops those for gone ones.
@@ -49,9 +54,8 @@ export class AudioLevels {
 		}
 		for (const [key, track] of tracks) {
 			if (this.#meters.has(key)) continue;
-			const context = this.#audioContext();
-			const source = context.createMediaStreamSource(new MediaStream([track]));
-			const analyser = context.createAnalyser();
+			const source = this.#context.createMediaStreamSource(new MediaStream([track]));
+			const analyser = this.#context.createAnalyser();
 			analyser.fftSize = FFT_SIZE;
 			source.connect(analyser);
 			this.#meters.set(key, { track, source, analyser });
@@ -64,17 +68,6 @@ export class AudioLevels {
 		this.#timer = null;
 		for (const { source } of this.#meters.values()) source.disconnect();
 		this.#meters.clear();
-		void this.#context?.close();
-		this.#context = null;
-	}
-
-	#audioContext(): AudioContext {
-		if (!this.#context) {
-			this.#context = new AudioContext();
-			// Created after the user pressed Join, so browsers let it run.
-			this.#context.resume().catch(() => {});
-		}
-		return this.#context;
 	}
 
 	#poll(): void {

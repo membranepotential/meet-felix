@@ -22,6 +22,13 @@
 		if (!shared) session.toasts.show('Screen sharing did not start.');
 	}
 
+	/** The mic stalled (an iPhone after a phone call): the mute button restarts it instead. */
+	async function restartMic() {
+		if (!(await media.restartMic())) {
+			session.toasts.show('The microphone did not start. Try again.', 'alert');
+		}
+	}
+
 	function endForEveryone() {
 		confirmEnd?.close();
 		session.send({ type: 'end' });
@@ -29,16 +36,24 @@
 </script>
 
 <div class="bar" role="toolbar" aria-label="Meeting controls">
-	<button
-		type="button"
-		class={['control', !media.micOn && 'off']}
-		aria-pressed={!media.micOn}
-		onclick={() => media.toggleMic()}
-		disabled={!media.tracks.audio}
-	>
-		<Icon name={media.micOn ? 'mic' : 'mic-off'} />
-		<span class="label">{media.micOn ? 'Mute' : 'Unmute'}</span>
-	</button>
+	{#if media.micStalled}
+		<button type="button" class="control stalled" onclick={restartMic}>
+			<Icon name="mic" />
+			<span class="warning" aria-hidden="true"></span>
+			<span class="label">Re-enable microphone</span>
+		</button>
+	{:else}
+		<button
+			type="button"
+			class={['control', !media.micOn && 'off']}
+			aria-pressed={!media.micOn}
+			onclick={() => media.toggleMic()}
+			disabled={!media.tracks.audio}
+		>
+			<Icon name={media.micOn ? 'mic' : 'mic-off'} />
+			<span class="label">{media.micOn ? 'Mute' : 'Unmute'}</span>
+		</button>
+	{/if}
 
 	<button
 		type="button"
@@ -176,6 +191,22 @@
 		background: var(--signal);
 		color: var(--signal-ink);
 		box-shadow: none;
+	}
+
+	/* A lamp dot on the round face: the action to take now (D30's meaning of lamp). */
+	.stalled {
+		position: relative;
+	}
+
+	.warning {
+		position: absolute;
+		top: 2px;
+		left: calc(50% + 14px);
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: var(--lamp);
+		box-shadow: 0 0 0 2px var(--lake);
 	}
 
 	.control:disabled {

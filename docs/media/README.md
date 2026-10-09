@@ -211,6 +211,22 @@ the home screen as a web app by default, and home-screen web apps have a
 history of camera bugs, which is why the plain tab is the default
 ([05 §4–5](../research/05-frontend-and-browser.md)).
 
+Since 2026-10-09 a stalled microphone gets a manual recovery. On iOS a
+phone call mutes the mic track, and afterwards WebKit fires neither `unmute`
+nor `ended`, and may not fire `visibilitychange` either; calling
+`getUserMedia` again fixes it, but WebKit captures only after a user action
+([WebKit 213853](https://bugs.webkit.org/show_bug.cgi?id=213853),
+[204681](https://bugs.webkit.org/show_bug.cgi?id=204681),
+[240651](https://bugs.webkit.org/show_bug.cgi?id=240651);
+[research 11](../research/11-gotchas-on-cloudflare.md), item 4). So the
+event-driven reacquire above stays, and in addition `LocalMedia.micStalled`
+turns true when the mic is on but its track has been `muted` for 2 seconds
+or has ended. The mute button then becomes "Re-enable microphone", and a
+notice says once that the microphone was interrupted. The tap captures the
+mic again and swaps the new track onto the publisher's sender, the same
+path a device switch takes. These bugs predate 2024; spike 4 checks on a
+real iPhone whether they still apply.
+
 ## D33: A dead SFU session is replaced, not retried (2026-10-09)
 
 When the SFU no longer serves one of a participant's sessions, or the

@@ -57,7 +57,8 @@ time is an extra argument because the core reads no clock.
   SFU (`SfuNewSession`, `SfuPublish`, `SfuSubscribe`, `SfuRenegotiate`,
   `SfuCloseTracks`, `SfuUpdateLayer`), set the alarm (`SetAlarm`), drive the
   recorder (`StartRecording`, `RecordTrack`, `StopRecordingTrack`,
-  `StopRecording`), free the meeting words (`ReleaseMeetingId`), and end the
+  `StopRecording`, and `FinishRecording` with the roster and the consent
+  record when a recorded meeting ends), free the meeting words (`ReleaseMeetingId`), and end the
   meeting (`EndMeeting`, always the last effect a room produces).
 - **Protocol**: `ClientMsg` and `ServerMsg`, serialized with serde and
   exported to TypeScript with `tsify`. Client messages: `Join` (name,
@@ -73,9 +74,10 @@ time is an extra argument because the core reads no clock.
   message; the code has none so far.
 
 The names above are those in the code on 2026-10-09; the code is the source
-of truth. Still to come in the core (from the plan): the simulcast layer
-policy, the state machine that cuts recording chunks and gates silence, and
-the transcript merge.
+of truth. The recorder's rules (silence gate, chunk cuts, holes in the adapter
+stream, speaker labels) are in `recording.rs` and the transcript merge in
+`transcript.rs` (2026-10-09). Still to come in the core (from the plan): the
+simulcast layer policy.
 
 ## How the shells run effects
 
@@ -94,10 +96,11 @@ the new state, and carries out the effects in order:
   socket.
 - `SetAlarm` sets the DO's single alarm; a later one replaces an earlier one,
   and a late or spurious alarm is harmless (see [The alarm](#the-alarm)).
-- `StartRecording`, `RecordTrack`, `StopRecordingTrack` and `StopRecording`
-  go to the meeting's `RecorderObject`.
+- `StartRecording`, `RecordTrack`, `StopRecordingTrack`, `StopRecording` and
+  `FinishRecording` go to the meeting's `RecorderObject`;
+  `FinishRecording` starts the transcript job.
 - `ReleaseMeetingId` deletes the words from KV; `EndMeeting` stops accepting
-  sockets and starts the transcript job.
+  sockets.
 
 **Browser**: the Svelte app loads the core as WASM. It uses the generated
 types for every message on the signaling socket, and core functions such as

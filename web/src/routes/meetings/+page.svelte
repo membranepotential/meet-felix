@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { listMeetings, type ApiError, type PastMeeting } from '#lib/api.ts';
+	import Icon from '#lib/components/Icon.svelte';
 	import LoginForm from '#lib/components/LoginForm.svelte';
 	import { OwnerSession } from '#lib/owner-session.svelte.ts';
 	import type { Phase } from '#lib/protocol.ts';
@@ -80,7 +81,7 @@
 	{:else if listState.kind === 'loading'}
 		<p class="hint" role="status">Loading…</p>
 	{:else if listState.kind === 'failed'}
-		<p class="error" role="alert">{describe(listState.error)}</p>
+		<p class="error" role="alert"><Icon name="alert" size={18} />{describe(listState.error)}</p>
 		<button class="button quiet" type="button" onclick={load}>Try again</button>
 	{:else}
 		{#if listState.meetings.length === 0}
@@ -216,11 +217,5 @@
 		color: var(--lamp);
 		font-weight: 650;
 		text-underline-offset: 0.2em;
-	}
-
-	.error {
-		padding: 0.875rem 1rem;
-		border-left: 3px solid var(--signal);
-		background: var(--water);
 	}
 </style>

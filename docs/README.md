@@ -65,6 +65,7 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D31](ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09) | The transcript page shows speaker-labelled paragraphs with wall-clock times | [ui/](ui/README.md) |
 | [D32](architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09) | One owner is the only host; everyone else is a guest | [architecture/](architecture/README.md) |
 | [D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09) | A dead SFU session is replaced, not retried | [media/](media/README.md) |
+| [D34](ui/README.md#d34-cards-have-no-coloured-bar-on-their-left-edge-2026-10-09) | Cards have no coloured bar on their left edge | [ui/](ui/README.md) |
 
 ## Features with their own docs
 

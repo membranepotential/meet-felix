@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, SessionId, TrackName};
 use crate::protocol::{ClientMsg, LocalTrack, Rid, ServerMsg, SessionKind, TrackKind};
+use crate::recording::{ConsentRecord, RosterEntry};
 
 /// Something that happened to the room.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +273,15 @@ pub enum Effect {
     },
     /// Stop recording all tracks.
     StopRecording,
+    /// The meeting ended after it was recorded: the recorder finishes its chunks and starts the
+    /// transcript job. Follows [`Effect::StopRecording`], if recording was on, and precedes
+    /// [`Effect::EndMeeting`].
+    FinishRecording {
+        /// Everyone who ever joined, for naming the speakers.
+        roster: Vec<RosterEntry>,
+        /// The consent record for the transcript.
+        consents: Vec<ConsentRecord>,
+    },
     /// Make the meeting's words available for new meetings.
     ReleaseMeetingId {
         /// The words to release.

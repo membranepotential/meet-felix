@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { ApiError } from '../api.ts';
 	import type { OwnerSession } from '../owner-session.svelte.ts';
+	import Icon from './Icon.svelte';
 	import PasswordField from './PasswordField.svelte';
 
 	let {
@@ -47,7 +48,7 @@
 <form onsubmit={submit}>
 	<PasswordField bind:value={password} />
 	{#if attempt?.kind === 'failed'}
-		<p class="error" role="alert">{describe(attempt.error)}</p>
+		<p class="error" role="alert"><Icon name="alert" size={18} />{describe(attempt.error)}</p>
 	{/if}
 	<button class="button primary" type="submit" disabled={sending || password.trim() === ''}>
 		{sending ? 'Logging in…' : 'Log in'}
@@ -58,11 +59,5 @@
 	form {
 		display: grid;
 		gap: 1.25rem;
-	}
-
-	.error {
-		padding: 0.875rem 1rem;
-		border-left: 3px solid var(--signal);
-		background: var(--water);
 	}
 </style>

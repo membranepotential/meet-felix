@@ -1,4 +1,5 @@
-//! Cloudflare Worker for meet-felix: the HTTP router plus the per-meeting `RoomObject`.
+//! Cloudflare Worker for meet-felix: the HTTP router plus the per-meeting `RoomObject` and
+//! `RecorderObject`.
 //!
 //! Routes ("owner only" means the owner's session cookie or
 //! `Authorization: Bearer <CREATE_SECRET>`, else 401):
@@ -15,6 +16,14 @@
 //!   `TURN_KEY_API_TOKEN` are set. TURN traffic is billed, so strangers get no credentials.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
 //!   A socket opened with the owner's session cookie joins as host (D32 in `docs/architecture`).
+//! - `GET /rec/:recorder/:secret/:who/:n` upgrades an SFU adapter's WebSocket into the meeting's
+//!   `RecorderObject`, which checks the secret.
+//! - `GET /api/transcript/:token` returns the transcript's status and, once ready, the transcript
+//!   (`{"status", "meeting", "startedAt", "endedAt"?, "progress": {"done", "total"}` in
+//!   milliseconds of audio, `"retryAt"?, "audioUntil"?, "transcript"?}`), or 404;
+//!   `GET /api/transcript/:token/transcript.md` and `.../transcript.json` download the files.
+//!   These responses carry `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex` and
+//!   `Cache-Control: no-store`, and the token is never logged (research 11, item 7).
 
 mod ice;
 mod internal;
@@ -22,18 +31,22 @@ mod meetings;
 mod owner;
 mod random;
 mod record;
+mod recorder;
 mod room;
 mod sfu;
 
 use futures_util::future::join_all;
-use meeting_core::{MeetingId, Millis, Phase, RecordingPolicy, SCHEDULED_TTL_MS};
+use meeting_core::{MeetingId, Millis, Phase, RecordingPolicy, SCHEDULED_TTL_MS, TranscriptRef};
 use serde::{Deserialize, Serialize};
 use worker::{
     Context, Date, Env, KvStore, Method, ObjectNamespace, Request, RequestInit, Response, Result,
     RouteContext, Router, console_error, event,
 };
 
-use crate::internal::{INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES, RoomInfo};
+use crate::internal::{
+    INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES, RECORDER_STATUS, RoomInfo,
+    TRANSCRIPT_JSON, TRANSCRIPT_MD,
+};
 use crate::owner::{CreateSecret, OwnerSession};
 
 /// KV namespace mapping meeting words to the Room Durable Object id (hex); also holds the
@@ -41,6 +54,8 @@ use crate::owner::{CreateSecret, OwnerSession};
 const MEETINGS: &str = "MEETINGS";
 /// Durable Object namespace of `RoomObject`.
 const ROOMS: &str = "ROOMS";
+/// Durable Object namespace of `RecorderObject`.
+const RECORDERS: &str = "RECORDERS";
 /// Var naming the jurisdiction new rooms are pinned to; see [`Jurisdiction`].
 const ROOM_JURISDICTION: &str = "ROOM_JURISDICTION";
 /// The owner's password, which `POST /api/login` checks and owner-only routes also accept as a
@@ -143,8 +158,77 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/api/meeting/:words", meeting_info)
         .get_async("/api/ice", ice_servers)
         .get_async("/ws/:words", join_meeting)
+        .get_async("/rec/:recorder/:secret/:who/:n", recorder_stream)
+        .get_async("/api/transcript/:token", |_, ctx| async move {
+            transcript(&ctx, RECORDER_STATUS).await
+        })
+        .get_async("/api/transcript/:token/:file", |_, ctx| async move {
+            match ctx.param("file").map(String::as_str) {
+                Some(file @ (TRANSCRIPT_MD | TRANSCRIPT_JSON)) => {
+                    transcript(&ctx, &format!("/{file}")).await
+                }
+                _ => private(Response::error("not found", 404)),
+            }
+        })
         .run(req, env)
         .await
+}
+
+/// The KV key that maps a transcript token to its `RecorderObject`'s id. Meeting words never
+/// contain `:`, so it cannot collide with them.
+fn transcript_key(token: &TranscriptRef) -> String {
+    format!("transcript:{}", token.as_str())
+}
+
+/// Passes `GET /api/transcript/:token...` to the transcript's recorder at `path`. The token is
+/// 32 hex digits; anything else is unknown without a KV lookup.
+async fn transcript(ctx: &RouteContext<Config>, path: &str) -> Result<Response> {
+    let token = ctx.param("token").filter(|t| {
+        t.len() == 32
+            && t.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    });
+    let Some(token) = token else {
+        return private(Response::error("unknown transcript", 404));
+    };
+    let key = transcript_key(&TranscriptRef::new(token.as_str()));
+    let Some(recorder) = ctx.kv(MEETINGS)?.get(&key).text().await? else {
+        return private(Response::error("unknown transcript", 404));
+    };
+    let response = ctx
+        .durable_object(RECORDERS)?
+        .id_from_string(&recorder)?
+        .get_stub()?
+        .fetch_with_str(&format!("{ORIGIN}{path}"))
+        .await;
+    private(response)
+}
+
+/// Adds the headers that keep a transcript out of referrers, search engines and caches.
+fn private(response: Result<Response>) -> Result<Response> {
+    let response = response?;
+    // A copy: the headers of a response fetched from a Durable Object are immutable.
+    let headers = response.headers().clone();
+    headers.set("Referrer-Policy", "no-referrer")?;
+    headers.set("X-Robots-Tag", "noindex")?;
+    headers.set("Cache-Control", "no-store")?;
+    Ok(response.with_headers(headers))
+}
+
+/// Forwards an SFU adapter's WebSocket upgrade to its recorder. The recorder checks the secret
+/// in the path; an id that is not a recorder's fails here.
+async fn recorder_stream(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+    if !is_websocket_upgrade(&req)? {
+        return Response::error("expected a WebSocket upgrade", 426);
+    }
+    let Some(id) = ctx.param("recorder") else {
+        return Response::error("not found", 404);
+    };
+    let recorders = ctx.durable_object(RECORDERS)?;
+    let Ok(id) = recorders.id_from_string(id) else {
+        return Response::error("not found", 404);
+    };
+    id.get_stub()?.fetch_with_request(req).await
 }
 
 /// `POST /api/login`: sets the owner's session cookie if the password is `CREATE_SECRET`.

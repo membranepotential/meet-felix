@@ -145,3 +145,88 @@ pub const CLOSE_TRACK_ERROR: &str = "close_track_error";
 /// `errorCode` of a request on a session the SFU no longer serves, e.g. "Session appears to be
 /// disconnected" with HTTP 410 (seen in production on 2026-10-09).
 pub const SESSION_ERROR: &str = "session_error";
+
+/// The id of a WebSocket adapter, which closing it needs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AdapterId(String);
+
+impl AdapterId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The codec an egress adapter delivers. `pcm` is 48 kHz stereo signed 16-bit little-endian,
+/// left and right interleaved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputCodec {
+    Pcm,
+}
+
+/// One entry of `adapters/websocket/new`
+/// (<https://developers.cloudflare.com/realtime/sfu/media-transport-adapters/websocket-adapter/>,
+/// checked 2026-10-09). Only media egress is modelled: the SFU streams a published track to
+/// `endpoint`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "location", rename_all = "lowercase")]
+pub enum AdapterTrack {
+    #[serde(rename_all = "camelCase")]
+    Remote {
+        /// The publisher's session.
+        session_id: SessionId,
+        /// The published track.
+        track_name: TrackName,
+        /// A public `wss://` URL; no custom headers, so any credential goes in the path.
+        endpoint: String,
+        output_codec: OutputCodec,
+    },
+}
+
+/// Body of `adapters/websocket/new`: one to four tracks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewAdaptersRequest {
+    pub tracks: Vec<AdapterTrack>,
+}
+
+/// Body of `adapters/websocket/close`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CloseAdaptersRequest {
+    pub tracks: Vec<AdapterRef>,
+}
+
+/// An adapter to close.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterRef {
+    pub adapter_id: AdapterId,
+}
+
+/// Response of both adapter calls: one result per requested track, in request order.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AdaptersResponse {
+    #[serde(default)]
+    pub tracks: Vec<AdapterResult>,
+}
+
+/// One entry of [`AdaptersResponse`]: an `adapterId` on success, `errorCode` and
+/// `errorDescription` on failure.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterResult {
+    pub adapter_id: Option<AdapterId>,
+    pub track_name: Option<TrackName>,
+    pub error_code: Option<String>,
+    pub error_description: Option<String>,
+}
+
+/// The status of `adapters/websocket/new` when every entry failed; the body still lists the
+/// per-entry errors.
+pub const ALL_ADAPTERS_FAILED: u16 = 503;
+
+/// The most entries one adapter request may carry.
+pub const MAX_ADAPTERS_PER_REQUEST: usize = 4;

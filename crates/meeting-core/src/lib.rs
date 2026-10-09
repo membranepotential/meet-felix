@@ -35,15 +35,21 @@
 //!   participants; knocking guests do not count. A scheduled room has no empty timer: it ends
 //!   only if no host joins within [`SCHEDULED_TTL_MS`] of its creation.
 //!
+//! The [`recording`] module holds the recorder's rules (speaker labels, silence gate, chunk
+//! cuts, holes in the adapter stream) and [`transcript`] the merge of speech segments into the
+//! transcript; the `RecorderObject` carries them out.
+//!
 //! With the `wasm` feature, the message and id types derive `tsify` TypeScript declarations,
 //! and `validateMeetingId`, `generateMeetingId`, `parseServerMsg` and `encodeClientMsg` are
 //! exported through `wasm-bindgen`.
 
 mod ids;
 mod protocol;
+pub mod recording;
 mod shell;
 mod state;
 mod step;
+pub mod transcript;
 #[cfg(feature = "wasm")]
 mod wasm;
 pub mod words;
@@ -62,7 +68,8 @@ pub use protocol::{
 };
 pub use shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 pub use state::{
-    EMPTY_ROOM_TIMEOUT_MS, NEGOTIATION_TIMEOUT_MS, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
+    EMPTY_ROOM_TIMEOUT_MS, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState, SCHEDULED_TTL_MS,
+    SUBSCRIBE_RETRY_MS,
 };
 pub use step::step;
 #[cfg(feature = "wasm")]
