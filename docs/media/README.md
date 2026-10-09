@@ -18,6 +18,7 @@ Decisions on this page:
 Code: [`crates/meeting-core/src/shell.rs`](../../crates/meeting-core/src/shell.rs)
 (the SFU effects and replies), [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
 (`Rid`, `TrackKind`), [`web/src/lib/sfu.ts`](../../web/src/lib/sfu.ts),
+[`web/src/lib/layers.ts`](../../web/src/lib/layers.ts),
 [`web/src/lib/signaling.ts`](../../web/src/lib/signaling.ts),
 [`web/src/lib/media/`](../../web/src/lib/media/); `crates/sfu-api` (not started).
 Research: [01 §1 — Realtime SFU and TURN](../research/01-hosting-and-media-platforms.md),
@@ -74,6 +75,19 @@ Rules that follow from the SFU limits:
 - A track idle for 30 seconds disappears. A turned-off camera must either
   keep sending packets or be published again when it is turned back on.
   Which of the two each target browser does is to be tested (spike 4).
+  The web shell (2026-10-09) does not rely on either browser behaviour: it
+  stops the transceiver when the camera or screen share is turned off, and
+  publishes a new track with a new name when it is turned back on. A muted
+  microphone stays published with `enabled = false`, and a device switch
+  swaps the track on the existing sender with `replaceTrack`, without a new
+  offer.
+- Track names (2026-10-09): `mic-N`, `cam-N` and `screen-N`, where `N`
+  counts the tracks published in this publish session. The core rejects a
+  name already in use, and the protocol has no unpublish message, so a
+  re-published kind needs a new name; the core then replaces the old track
+  on every subscriber. Subscribers notice a turned-off track because it
+  stops delivering frames (the browser reports `mute`), and show the
+  participant's initials instead.
 - When a participant leaves, the core closes their tracks on every
   subscriber (`Effect::SfuCloseTracks`), so no subscriber keeps a dead track.
 
@@ -85,8 +99,15 @@ three layers (high, mid, low with `scaleResolutionDownBy` 1, 2 and 4;
 [05 §6](../research/05-frontend-and-browser.md)). Each subscriber asks for a
 layer per track, with `preferredRid` on `tracks/new`, and switches with
 `tracks/update`. In the core, `ClientMsg::SetLayer` leads to
-`Effect::SfuUpdateLayer`. The browser picks the layer from the tile size;
-per-tile selection is phase 2.
+`Effect::SfuUpdateLayer`. The browser picks the layer from the tile size.
+
+Layer choice in the web shell (2026-10-09): the encodings' `rid`s are the
+core's `Rid` names `low`, `mid` and `high` (`scaleResolutionDownBy` 4, 2
+and 1). Each received camera tile reports its rendered width in CSS pixels;
+below 240 px it asks for `low`, below 640 px for `mid`, otherwise `high`.
+The browser sends `SetLayer` only after the track has arrived and only when
+the layer changes, 400 ms after the last size change. A new subscription
+starts at the SFU default, `high`.
 
 A screen share uses one or two layers, a low maximum frame rate, and
 `contentHint = "detail"`, which keeps text sharp.

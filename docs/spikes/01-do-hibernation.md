@@ -6,6 +6,8 @@
 
 The Rust `RoomObject` holds 10 WebSockets through the Hibernation API, keeps its state in SQLite and socket attachments, and survives eviction. In `wrangler dev`, `workerd` evicted the room during a 15 s idle phase. It then rebuilt the room with all 10 sockets still connected, and the next chat reached all 10 clients. Pings matching the auto-response were answered without waking the room. The empty-room alarm deleted all storage after 2 minutes.
 
+Rerun on 2026-10-09 after the `RoomObject` started running `meeting_core::step`: the room keeps its `RoomState` as JSON under one storage key and each socket's participant id in its attachment. With a mock SFU, the script passes 36 checks: create with the creation secret, host and guest join, publish and subscribe, a 15 s idle phase, lock, knock, admit, kick, resume, end, the refusal of later sockets, `SfuUnavailable` while the SFU is down, and the keepalive check that closes a socket without pings. An ended room no longer deletes its storage: it keeps an ended marker so it refuses later sockets.
+
 Two findings need action outside `crates/worker`:
 
 1. **`strip = true` in the workspace `[profile.release]` breaks `worker-build`.** wasm-bindgen fails with `externref table required for catch wrappers`. Tested one setting at a time: `strip = true` fails, while `lto = true`, `opt-level = "s"`, `codegen-units = 1` and `strip = "debuginfo"` all build. Fix: set `strip = "debuginfo"` in the root `Cargo.toml`. Until then, run with `CARGO_PROFILE_RELEASE_STRIP=debuginfo`.
@@ -24,11 +26,60 @@ Two findings need action outside `crates/worker`:
 
 ## How to run
 
-1. If `~/.cargo/bin` is not on `PATH`, prepend it: `wrangler` calls `worker-build` by name.
-2. From the repo root, start the Worker: `CARGO_PROFILE_RELEASE_STRIP=debuginfo pnpm exec wrangler dev --var ROOM_JURISDICTION:`. Wait until it prints `Ready on http://localhost:8787`.
-3. In a second terminal, run `node crates/worker/spike/ws-clients.mjs` (optional argument: base URL; `SPIKE_IDLE_MS` sets the idle phase, default 15000). It prints one PASS/FAIL line per check, then a summary, and exits 0 on success.
+Since 2026-10-09 the script drives the real room (`meeting_core::step`) and starts a mock Realtime SFU on port 8788, so it needs no network. The root `Cargo.toml` now has `strip = "debuginfo"`, so the `CARGO_PROFILE_RELEASE_STRIP` override is no longer needed.
 
-## Output of the spike script (final run, real `wrangler.toml`)
+1. If `~/.cargo/bin` is not on `PATH`, prepend it: `wrangler` calls `worker-build` by name.
+2. From the repo root, start the Worker with the spike's secrets and the mock SFU:
+   `pnpm exec wrangler dev --var ROOM_JURISDICTION: --var CREATE_SECRET:spike-secret --var CALLS_APP_ID:spike --var CALLS_APP_SECRET:spike-sfu --var SFU_API_URL:http://localhost:8788/v1`.
+   Wait until it prints `Ready on http://localhost:8787`.
+3. In a second terminal, run `node crates/worker/spike/ws-clients.mjs` (optional argument: base URL; `SPIKE_IDLE_MS` sets the idle phase, default 15000; `SPIKE_KEEPALIVE=1` adds the keepalive check, about two more minutes). It prints one PASS/FAIL line per check, then a summary, and exits 0 on success.
+
+## Output of the spike script with the core (2026-10-09, `SPIKE_KEEPALIVE=1`)
+
+```
+PASS  POST /api/new without a secret -> 401
+PASS  POST /api/new with a wrong secret -> 401
+PASS  POST /api/new with the secret -> 201  (status 201)
+PASS  meeting is three words  (cringe-shine-region)
+PASS  hostToken is 32 bytes hex
+PASS  GET /api/meeting/{words} -> recording policy, not ended  ({"recordingPolicy":"fromStart","ended":false})
+PASS  GET /api/meeting/{WORDS} matches case-insensitively  (status 200)
+PASS  GET /api/meeting/{words} unknown -> 404  (status 404)
+PASS  GET /ws/{words} without upgrade -> 426  (status 426)
+PASS  GET /api/ice returns Cloudflare STUN
+PASS  host gets Welcome as host, recording on  (you=0)
+PASS  auto-response answers the exact ping
+PASS  room rejects a malformed frame
+PASS  guest with consent gets Welcome  (Host,Guest)
+PASS  host gets the State broadcast with the guest joined
+PASS  host gets the SFU's PublishAnswer
+PASS  guest gets a SubscribeOffer for the host's audio  ([{"mid":"0","track":{"owner":0,"kind":"audio"}}])
+PASS  the guest's answer reaches the SFU's renegotiate
+      idle 15000 ms ...
+PASS  Lock reaches the guest as State
+PASS  a third client in the locked room gets Waiting
+PASS  host gets the Knock  (who=2)
+PASS  admitted client gets Welcome
+PASS  kicked client gets Kicked
+PASS  kicked client's socket closes  (code 1000)
+PASS  a guest cannot kick
+PASS  resume keeps the participant id  (you=1)
+PASS  the room closes the old socket  (code 1000)
+PASS  messages for the participant reach the new socket
+PASS  End reaches everyone  (true,true)
+PASS  every socket closes after End  (1000,1000)
+PASS  the next socket is refused  (status 404)
+PASS  the words are released  (status 404)
+PASS  with the SFU down, joining yields Error{SfuUnavailable}
+PASS  …and the room closes the socket  (code 1000)
+      waiting up to 130 s for the keepalive check ...
+PASS  keepalive closes a socket that never pings (1001)  (code 1001)
+PASS  keepalive keeps a pinging socket
+
+PASS: 36/36 checks passed
+```
+
+## Output of the first spike script (placeholder protocol, real `wrangler.toml`)
 
 ```
 PASS  POST /api/new returns 201  (status 201)
@@ -74,7 +125,8 @@ Not proven locally:
 | All sockets | `State::get_websockets() -> Vec<WebSocket>` |
 | Ping without waking | `State::set_websocket_auto_response(&WebSocketRequestResponsePair::new(PING, PONG)?)`, set in `new`; matches the raw frame byte for byte |
 | Handlers | `websocket_message(ws, WebSocketIncomingMessage)`, `websocket_close(ws, code: usize, reason: String, was_clean: bool)`, `websocket_error(ws, Error)`, `alarm() -> Result<Response>` |
-| Storage | `state.storage().sql().exec(query, Vec<SqlStorageValue>)` + `SqlCursor::to_array::<T>()`; `storage().set_alarm(Duration)`; `storage().delete_all()` |
+| Storage | `state.storage().sql().exec(query, Vec<SqlStorageValue>)` + `SqlCursor::to_array::<T>()`; `storage().set_alarm(Duration)`; `storage().delete_all()`. Since the core runs, the room keeps one JSON string under one key with `storage().get::<String>` / `put` (SQLite-backed objects allow 2 MB per key plus value). |
+| Last auto-response | `getWebSocketAutoResponseTimestamp(ws)` has no binding in 0.8.7; `js_sys::Reflect` on `state.as_raw()` calls it. The keepalive check proves it works locally. |
 | Room id | `ObjectNamespace::unique_id_with_jurisdiction("eu")` exists; locally `unique_id()` |
 
 ## Gotchas found
@@ -83,7 +135,10 @@ Not proven locally:
 - **`wasm-bindgen` dependency.** `#[durable_object]` expands to code that names the `wasm_bindgen` crate directly, so the crate needs `wasm-bindgen` as its own dependency. Without it there are 17 errors such as ``cannot find module or crate `wasm_bindgen` ``.
 - **Close handshake.** Cloudflare documents that from compatibility date 2026-04-07 (`web_socket_auto_reply_to_close`) the runtime answers Close frames itself. Local `wrangler dev` did not: without an explicit `ws.close(1000, "bye")` in `websocket_close`, no client got a Close frame within 5 s. The handler now calls `close`, which the docs call safe under the new flag.
 - **Template layout.** The current workers-rs template uses `wrangler.toml`, `main = "build/index.js"` (not `build/worker/shim.mjs`) and builds with `worker-build --release`. Here the build runs in `crates/worker` (`build.cwd`) and `--out-dir ../../build` puts the bundle in the git-ignored `/build` at the repo root. A relative `build.cwd` resolves against the directory `wrangler` runs in, so run it from the repo root.
-- **KV binding.** It has no `id`. `wrangler dev` uses a local store, and `wrangler deploy` provisions the namespace.
+- **KV binding.** The namespace `MEETINGS` was created on 2026-10-09 and its `id` is in `wrangler.toml`; `wrangler dev` uses a local store.
+- **Method names.** `#[durable_object]` generates a `connect` method, so a `RoomObject` method of that name does not compile (`duplicate definitions with name connect`).
+- **Integer map keys in internally tagged enums.** `RoomState` keys maps by `ParticipantId(u32)`, which JSON writes as `"0"`. Wrapped in an enum with `#[serde(tag = ...)]`, the stored record failed to load (`invalid type: string "0", expected u32`), because serde buffers internally tagged content. The record enum is externally tagged.
+- **Upgrade from Node's `fetch`.** Node's `fetch` refuses an `Upgrade` header (`fetch failed`); the script reads a refused upgrade's status with `node:http`.
 
 ## Still to verify on a deployed Worker (Free plan)
 
@@ -91,5 +146,5 @@ Not proven locally:
 2. Dashboard: with 10 sockets open and idle for 10+ minutes, the DO's duration (GB-s) stays near zero, while requests count only real messages. Auto-response pings should add neither.
 3. `unique_id_with_jurisdiction("eu")` works, `id_from_string` on the plain namespace reaches the same EU object, and the dashboard shows the EU location.
 4. The deployed runtime replies to Close frames on its own, and the explicit `close` call stays harmless (no exception in logs).
-5. The alarm fires 2 minutes after the last socket leaves and `delete_all` empties the room.
+5. The room ends 2 minutes after the last admitted participant leaves (the core's alarm), keeps only its ended marker, and the words leave KV.
 6. Out of scope here, still part of spike 1: whether the Realtime SFU and Workers AI speech models work on the Free plan.

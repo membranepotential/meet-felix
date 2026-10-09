@@ -1,8 +1,8 @@
 # Meeting links and lifecycle
 
 A meeting link is three short English words, for example
-`meet.example/amber-otter-lamp`. Only the owner creates meetings, behind a
-Cloudflare Access login; guests need nothing but the link. The words belong
+`meet.example/amber-otter-lamp`. Only the owner creates meetings, with a
+creation secret; guests need nothing but the link. The words belong
 to a meeting only while it runs and are then reused. This page records how
 meeting ids are chosen, why three words are safe enough, how a meeting starts
 and ends, and how transcript links work.
@@ -10,7 +10,7 @@ and ends, and how transcript links work.
 Decisions on this page:
 
 - [D6: Meeting ids are three short English words that live only while the meeting runs (2026-10-09)](#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)
-- [D7: Only the owner creates meetings, behind Cloudflare Access (2026-10-09)](#d7-only-the-owner-creates-meetings-behind-cloudflare-access-2026-10-09)
+- [D7: Only the owner creates meetings, with a creation secret (2026-10-09)](#d7-only-the-owner-creates-meetings-with-a-creation-secret-2026-10-09)
 - [D8: A meeting ends when a host ends it or after two empty minutes (2026-10-09)](#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09)
 - [D9: Transcript links carry a 128-bit random token (2026-10-09)](#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09)
 
@@ -18,7 +18,9 @@ Code: [`crates/meeting-core/src/words.rs`](../../crates/meeting-core/src/words.r
 (the word list), [`crates/meeting-core/src/ids.rs`](../../crates/meeting-core/src/ids.rs)
 (`MeetingId`, `HostToken`), [`crates/meeting-core/src/state.rs`](../../crates/meeting-core/src/state.rs)
 (`EMPTY_ROOM_TIMEOUT_MS`), [`crates/worker/src/lib.rs`](../../crates/worker/src/lib.rs)
-(router, KV lookup), [`crates/worker/src/ids.rs`](../../crates/worker/src/ids.rs).
+(router, KV lookup, `POST /api/new`), [`crates/worker/src/room.rs`](../../crates/worker/src/room.rs)
+(`RoomObject`), [`crates/worker/src/random.rs`](../../crates/worker/src/random.rs)
+(meeting words, host and transcript tokens).
 Research: [00 — report](../research/00-report-serverless-rust-video-meetings.md)
 (invite links), [06 — existing projects](../research/06-existing-projects-lessons.md)
 (invite links, auth and lobby in Meet, Jitsi and Whereby),
@@ -26,11 +28,13 @@ Research: [00 — report](../research/00-report-serverless-rust-video-meetings.m
 
 ## Lifecycle of a meeting
 
-1. The owner opens `/new` and logs in through Cloudflare Access. The Worker
-   picks three words that no running meeting uses, creates the `RoomObject`
-   with `jurisdiction("eu")`, stores `words → DO id` in KV with a TTL, and
-   returns the link plus a host token. The owner's browser keeps the host
-   token.
+1. The owner's browser sends `POST /api/new` with the creation secret
+   ([D7](#d7-only-the-owner-creates-meetings-with-a-creation-secret-2026-10-09)) and the recording policy. The
+   Worker picks three words that no running meeting uses, creates the
+   `RoomObject` with `jurisdiction("eu")`, initialises the room's state with
+   the words, a new host token and the policy, stores `words → DO id` in KV
+   with a 7-day TTL, and returns the words plus the host token. The host token
+   lives only in the room's storage and the owner's browser.
 2. Guests open the link. The pre-join screen asks for a name, shows a device
    check and the recording notice, taken from the room's `recordingPolicy`.
    In a recorded meeting the join button reads "Join and accept recording"
@@ -91,17 +95,26 @@ DO id must come from `unique_id()` and cannot be derived from the words
 ([D5](../architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)).
 Each KV entry has a TTL, so the mapping expires even if a release is lost.
 
-## D7: Only the owner creates meetings, behind Cloudflare Access (2026-10-09)
+## D7: Only the owner creates meetings, with a creation secret (2026-10-09)
 
-The `/new` route sits behind Cloudflare Access, which is free for up to 50
-users. Guests need no login. Creating a meeting returns a host token, which
+`POST /api/new` requires `Authorization: Bearer <CREATE_SECRET>`, where
+`CREATE_SECRET` is a Worker secret (`wrangler secret put CREATE_SECRET`;
+locally in the git-ignored `.dev.vars`). Without the secret the Worker
+answers 401; without a configured secret, 500. Guests need no login. Creating a meeting returns a host token, which
 the creator's browser keeps. A participant who joins with the host token
 becomes a host. Only hosts lock, admit, kick, mute, record and end; the core
 enforces this ([core/](../core/README.md)).
 
-Why: without the login anyone could run meetings on the owner's SFU bill.
+Why: without a check anyone could run meetings on the owner's SFU bill.
 
-The host token is a secret: it never goes into git or logs.
+Changed on 2026-10-09 from "behind Cloudflare Access": the Worker has no
+custom domain yet, and a bearer secret works the same on `workers.dev` and in
+local `wrangler dev`, where no Access login runs in front of the Worker. Once
+a domain is attached, `/new` moves behind Cloudflare Access (free for up to
+50 users) and the secret goes.
+
+The creation secret and the host token are secrets: they never go into git
+or logs.
 
 ## D8: A meeting ends when a host ends it or after two empty minutes (2026-10-09)
 

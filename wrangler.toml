@@ -20,8 +20,15 @@ new_sqlite_classes = ["RoomObject"]
 
 [vars]
 # Pins each new Room DO to the EU. Local workerd implements no jurisdictions, so run
-# `wrangler dev --var ROOM_JURISDICTION:` to create rooms without one.
+# `wrangler dev --var ROOM_JURISDICTION:` to create rooms without one. Any value other than
+# "", "eu", "us" or "fedramp" makes every request fail with 500.
 ROOM_JURISDICTION = "eu"
+# Optional SFU_API_URL replaces https://rtc.live.cloudflare.com/v1, for the spike's mock SFU only.
+
+# Secrets (`pnpm exec wrangler secret put NAME`; locally in the git-ignored `.dev.vars`):
+# - CREATE_SECRET: bearer token that `POST /api/new` requires.
+# - CALLS_APP_ID, CALLS_APP_SECRET: the Realtime SFU app. Without them every join fails with
+#   `SfuUnavailable`.
 
 # Namespace MEETINGS created on 2026-10-09; `wrangler dev` uses a local store.
 [[kv_namespaces]]

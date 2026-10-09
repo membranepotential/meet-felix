@@ -11,7 +11,9 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Core unit tests | Single rules of `step`, whole meetings, ids, the word list | `cargo test -p meeting-core` | Exist; growing with the core |
 | Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 200 actions) |
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
-| Worker spike scripts | A real `RoomObject` under `wrangler dev`: sockets, broadcast, hibernation | `node crates/worker/spike/ws-clients.mjs` | Spike 1 script exists |
+| SFU client tests | Request and response JSON against samples from Cloudflare's docs; core SFU effects to replies | `cargo test -p sfu-api` | Exist |
+| Worker unit tests | Storage record, alarm and keepalive rules, `/api/new` input checks | `cargo test -p meet-worker` | Exist |
+| Worker spike scripts | The real `RoomObject` running the core under `wrangler dev`, with a mock SFU | `node crates/worker/spike/ws-clients.mjs` | Exists; covers the protocol end to end |
 | Web checks | Types and build of the Svelte shell | `pnpm --filter web check`, `pnpm --filter web build` | Exist |
 | Device checklist | Real phones, tablets and desktop browsers | manual, phase 4 | Planned |
 | Deployed Worker checks | Hibernation and billing on Cloudflare itself | manual, dashboard | Planned |
@@ -21,6 +23,7 @@ Run everything that exists before a commit:
 ```sh
 cargo test
 cargo clippy --all-targets -- -D warnings
+cargo clippy -p meet-worker -p sfu-api --all-targets --target wasm32-unknown-unknown -- -D warnings
 cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm
 pnpm --filter web check
 pnpm --filter web build
@@ -53,13 +56,44 @@ The Worker runs locally with `pnpm exec wrangler dev --var ROOM_JURISDICTION:`
 It needs `worker-build` (`cargo install worker-build`).
 
 [`crates/worker/spike/ws-clients.mjs`](../crates/worker/spike/ws-clients.mjs)
-is spike 1's script. It creates a meeting through `POST /api/new`, checks the
-three-word id, the host token and the meeting lookup, opens ten WebSocket
-clients, and checks that a message from one reaches all of them, that the
-auto-response answers pings, that malformed frames
-are rejected, and that every socket closes cleanly. It prints PASS or FAIL
-per check and needs Node 22 or newer. Its result goes to
-[spikes/01-do-hibernation.md](spikes/01-do-hibernation.md).
+started as spike 1's script and now speaks the real protocol
+(`meeting_core::ClientMsg`/`ServerMsg`). It starts a mock Realtime SFU on
+port 8788, so it needs no network and no SFU credentials; start the Worker
+with the `--var` flags given in its header comment (creation secret, SFU
+credentials, `SFU_API_URL` pointing at the mock). It checks:
+
+- `POST /api/new`: 401 without or with a wrong secret, 201 with it, three
+  words and a 64-hex host token; `GET /api/meeting/:words` with the recording
+  policy, case-insensitive; 404 and 426 cases; `GET /api/ice`;
+- the host joins with the token (recording starts), a guest joins with
+  consent, `Welcome` and `State` broadcasts, the auto-response ping, a
+  malformed frame;
+- publish (`PublishAnswer` from the SFU) and subscribe (`SubscribeOffer` to
+  the guest, whose answer reaches `renegotiate`);
+- after an idle phase (`SPIKE_IDLE_MS`, default 15 s): lock, a third client
+  gets `Waiting`, knock, admit, kick, a guest's kick refused;
+- resume: a new socket with the resume token keeps the participant id, the
+  old socket is closed, and messages reach the new one;
+- `End`: everyone gets `Ended`, the sockets close, the next socket and the
+  meeting lookup get 404;
+- with the mock SFU down, joining yields `Error{SfuUnavailable}` and the
+  socket closes;
+- with `SPIKE_KEEPALIVE=1` (two more minutes): a socket that never pings is
+  closed with 1001, a pinging one stays.
+
+It prints PASS or FAIL per check and needs Node 22 or newer. Its result goes
+to [spikes/01-do-hibernation.md](spikes/01-do-hibernation.md). Clients must
+send the exact frame `{"type":"ping"}` at least every 60 seconds, or the
+keepalive check closes their socket.
+
+For a local run against the real SFU, put the secrets into the git-ignored
+`.dev.vars` at the repo root instead of `--var` flags:
+
+```sh
+CREATE_SECRET=...
+CALLS_APP_ID=...
+CALLS_APP_SECRET=...
+```
 
 Local `wrangler dev` cannot prove that a DO hibernates or what Cloudflare
 bills; that needs the deployed checks below.

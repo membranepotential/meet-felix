@@ -36,7 +36,7 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D4](architecture/README.md#d4-the-backend-is-rust-on-workers-with-durable-objects-that-hibernate-2026-10-09) | The backend is Rust on Workers, with Durable Objects that hibernate | [architecture/](architecture/README.md) |
 | [D5](architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09) | Pin data to the EU where Cloudflare allows it | [architecture/](architecture/README.md) |
 | [D6](links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09) | Meeting ids are three short English words that live only while the meeting runs | [links/](links/README.md) |
-| [D7](links/README.md#d7-only-the-owner-creates-meetings-behind-cloudflare-access-2026-10-09) | Only the owner creates meetings, behind Cloudflare Access | [links/](links/README.md) |
+| [D7](links/README.md#d7-only-the-owner-creates-meetings-with-a-creation-secret-2026-10-09) | Only the owner creates meetings, with a creation secret | [links/](links/README.md) |
 | [D8](links/README.md#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09) | A meeting ends when a host ends it or after two empty minutes | [links/](links/README.md) |
 | [D9](links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09) | Transcript links carry a 128-bit random token | [links/](links/README.md) |
 | [D10](media/README.md#d10-each-participant-has-separate-publish-and-subscribe-sessions-2026-10-09) | Each participant has separate publish and subscribe sessions | [media/](media/README.md) |
