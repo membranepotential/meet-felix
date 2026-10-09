@@ -1,16 +1,16 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { listMeetings, type ApiError, type PastMeeting } from '#lib/api.ts';
-	import PasswordField from '#lib/components/PasswordField.svelte';
+	import LoginForm from '#lib/components/LoginForm.svelte';
+	import { OwnerSession } from '#lib/owner-session.svelte.ts';
 
 	type ListState =
-		| { kind: 'idle' }
 		| { kind: 'loading' }
 		| { kind: 'loaded'; meetings: PastMeeting[] }
 		| { kind: 'failed'; error: ApiError };
 
-	let listState = $state.raw<ListState>({ kind: 'idle' });
-	/** Typed or filled by the password manager each time; never stored. */
-	let password = $state('');
+	const owner = new OwnerSession();
+	let listState = $state.raw<ListState>({ kind: 'loading' });
 
 	const when = new Intl.DateTimeFormat(undefined, {
 		weekday: 'short',
@@ -21,24 +21,30 @@
 		minute: '2-digit'
 	});
 
-	async function show(event: SubmitEvent) {
-		event.preventDefault();
-		const key = password.trim();
-		if (key === '') return;
+	onMount(async () => {
+		await owner.check();
+		if (owner.signedIn) await load();
+	});
+
+	async function load() {
 		listState = { kind: 'loading' };
-		const result = await listMeetings(key);
+		const result = await listMeetings();
+		if (!result.ok && result.error.kind === 'unauthorized') {
+			// The session expired since the page loaded: the login form shows again.
+			owner.rejected();
+			return;
+		}
 		listState = result.ok
 			? { kind: 'loaded', meetings: result.value }
 			: { kind: 'failed', error: result.error };
-		if (result.ok) password = '';
 	}
 
 	function describe(error: ApiError): string {
 		switch (error.kind) {
 			case 'unauthorized':
-				return 'That password is wrong. Only the owner can see past meetings.';
+				return 'Your login has expired. Log in again.';
 			case 'rate-limited':
-				return 'Too many tries in a short time. Wait a minute, then try again.';
+				return 'Too many requests in a short time. Wait a minute, then try again.';
 			case 'network':
 				return 'The server could not be reached. Check your connection, then try again.';
 			case 'server':
@@ -59,7 +65,17 @@
 	<a class="brand" href="/">meet-felix</a>
 	<h1>Past meetings</h1>
 
-	{#if listState.kind === 'loaded'}
+	{#if owner.state.kind === 'checking'}
+		<p class="hint" role="status">Checking your login…</p>
+	{:else if owner.state.kind === 'signed-out'}
+		<p class="hint">Your meetings, newest first, with their transcripts. Log in to see them.</p>
+		<LoginForm {owner} onlogin={load} />
+	{:else if listState.kind === 'loading'}
+		<p class="hint" role="status">Loading…</p>
+	{:else if listState.kind === 'failed'}
+		<p class="error" role="alert">{describe(listState.error)}</p>
+		<button class="button quiet" type="button" onclick={load}>Try again</button>
+	{:else}
 		{#if listState.meetings.length === 0}
 			<p class="hint">No meetings yet. Meetings you start appear here.</p>
 		{:else}
@@ -81,21 +97,6 @@
 			</ul>
 		{/if}
 		<a class="button quiet" href="/">Start page</a>
-	{:else}
-		<form onsubmit={show}>
-			<p class="hint">Your meetings, newest first, with their transcripts.</p>
-			<PasswordField bind:value={password} />
-			{#if listState.kind === 'failed'}
-				<p class="error" role="alert">{describe(listState.error)}</p>
-			{/if}
-			<button
-				class="button primary"
-				type="submit"
-				disabled={listState.kind === 'loading' || password.trim() === ''}
-			>
-				{listState.kind === 'loading' ? 'Loading…' : 'Show meetings'}
-			</button>
-		</form>
 	{/if}
 </main>
 
@@ -126,11 +127,6 @@
 		line-height: 1.1;
 		font-weight: 700;
 		margin-top: 0.75rem;
-	}
-
-	form {
-		display: grid;
-		gap: 1.25rem;
 	}
 
 	.hint {

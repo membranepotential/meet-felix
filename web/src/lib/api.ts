@@ -4,18 +4,12 @@
  */
 import {
 	parseMeetingId,
-	type HostToken,
 	type MeetingId,
 	type Millis,
+	type Phase,
 	type RecordingPolicy,
 	type TranscriptRef
 } from './protocol.ts';
-
-export interface NewMeeting {
-	meeting: MeetingId;
-	/** Makes the creator a host; sent as `hostToken` in `ClientMsg::Join`. */
-	hostToken: HostToken;
-}
 
 /** One of the owner's meetings, as `GET /api/meetings` lists it. */
 export interface PastMeeting {
@@ -27,9 +21,15 @@ export interface PastMeeting {
 	transcript: TranscriptRef | null;
 }
 
+/** A meeting that can still be joined: waiting for the host, or running. */
+export type OpenPhase = Exclude<Phase, 'ended'>;
+
 /** What the pre-join screen needs to know about a meeting. */
 export type MeetingInfo =
-	{ kind: 'running'; recordingPolicy: RecordingPolicy } | { kind: 'ended' } | { kind: 'not-found' };
+	| { kind: 'open'; recordingPolicy: RecordingPolicy; phase: OpenPhase }
+	/** `transcript`: the link token of a recorded meeting, if the Worker gives it out. */
+	| { kind: 'ended'; transcript: TranscriptRef | null }
+	| { kind: 'not-found' };
 
 export type ApiError =
 	| { kind: 'network' }
@@ -42,14 +42,31 @@ export type ApiResult<T> = { ok: true; value: T } | { ok: false; error: ApiError
 
 const fail = (error: ApiError): ApiResult<never> => ({ ok: false, error });
 
+/** Reads a successful response; `null` means the reply is not what the endpoint promises. */
+type Reader<T> = (response: Response) => Promise<T | null>;
+
+/** A JSON body, checked by `parse`. */
+const json =
+	<T>(parse: (body: unknown) => T | null): Reader<T> =>
+	async (response) =>
+		parse(await response.json().catch(() => null));
+
 /**
- * Fetches `path` and parses a JSON body with `parse`. `onStatus` may turn a non-2xx status
- * into a value (such as 404 → not found) before it counts as an error.
+ * No body: only 204 counts. A 200 here is not this endpoint answering, for example the
+ * static app's fallback page served for an `/api` route the Worker does not have yet.
+ */
+const noContent: Reader<void> = async (response) => (response.status === 204 ? undefined : null);
+
+/**
+ * Fetches `path` and reads a 2xx response with `read`. `onStatus` may turn a non-2xx status
+ * into a value (such as 404 → not found) before it counts as an error. Requests stay
+ * same-origin (in development through Vite's proxy), so the browser sends the owner's session
+ * cookie with the default `credentials: 'same-origin'`.
  */
 async function request<T>(
 	path: string,
 	init: RequestInit,
-	parse: (body: unknown) => T | null,
+	read: Reader<T>,
 	onStatus: (status: number) => T | null = () => null
 ): Promise<ApiResult<T>> {
 	let response: Response;
@@ -65,8 +82,7 @@ async function request<T>(
 		if (response.status === 429) return fail({ kind: 'rate-limited' });
 		return fail({ kind: 'server', status: response.status });
 	}
-	const body: unknown = await response.json().catch(() => null);
-	const value = parse(body);
+	const value = await read(response);
 	return value === null ? fail({ kind: 'malformed' }) : { ok: true, value };
 }
 
@@ -76,31 +92,48 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isRecordingPolicy = (value: unknown): value is RecordingPolicy =>
 	value === 'fromStart' || value === 'hostDecides';
 
-/** Creates a meeting. Only the owner can: `secret` is the Worker's create secret. */
-export function createMeeting(
-	secret: string,
-	recording: RecordingPolicy
-): Promise<ApiResult<NewMeeting>> {
+const isOpenPhase = (value: unknown): value is OpenPhase =>
+	value === 'scheduled' || value === 'live';
+
+const postJson = (body: unknown): RequestInit => ({
+	method: 'POST',
+	headers: { 'Content-Type': 'application/json' },
+	body: JSON.stringify(body)
+});
+
+/**
+ * Logs the owner in: the Worker checks `password` and sets the session cookie. A wrong
+ * password is `unauthorized`.
+ */
+export function login(password: string): Promise<ApiResult<void>> {
+	return request('/api/login', postJson({ password }), noContent);
+}
+
+/** Ends the owner's session on this device: the Worker clears the cookie. */
+export function logout(): Promise<ApiResult<void>> {
+	return request('/api/logout', { method: 'POST' }, noContent);
+}
+
+/** Whether this browser holds a valid owner session cookie. */
+export function isOwner(): Promise<ApiResult<boolean>> {
 	return request(
-		'/api/new',
-		{
-			method: 'POST',
-			headers: { ...bearer(secret), 'Content-Type': 'application/json' },
-			body: JSON.stringify({ recording })
-		},
-		(body) => {
-			if (!isObject(body)) return null;
-			const { meeting, hostToken } = body;
-			if (typeof meeting !== 'string' || typeof hostToken !== 'string' || hostToken === '') {
-				return null;
-			}
-			const id = parseMeetingId(meeting);
-			return id ? { meeting: id, hostToken } : null;
-		}
+		'/api/me',
+		{},
+		async (response) => ((await noContent(response)) === null ? null : true),
+		(status) => (status === 401 ? false : null)
 	);
 }
 
-const bearer = (secret: string): HeadersInit => ({ Authorization: `Bearer ${secret}` });
+/** Creates a meeting. Needs the owner's session; without it the result is `unauthorized`. */
+export function createMeeting(recording: RecordingPolicy): Promise<ApiResult<MeetingId>> {
+	return request(
+		'/api/new',
+		postJson({ recording }),
+		json((body) =>
+			isObject(body) && typeof body.meeting === 'string' ? parseMeetingId(body.meeting) : null
+		)
+	);
+}
 
 function parsePastMeeting(value: unknown): PastMeeting | null {
 	if (!isObject(value)) return null;
@@ -113,18 +146,19 @@ function parsePastMeeting(value: unknown): PastMeeting | null {
 	return { meeting: id, createdAt, ended, transcript: transcript ?? null };
 }
 
-/**
- * Lists the owner's meetings, newest first. Only the owner can: `secret` is the Worker's
- * create secret.
- */
-export function listMeetings(secret: string): Promise<ApiResult<PastMeeting[]>> {
-	return request('/api/meetings', { headers: bearer(secret) }, (body) => {
-		if (!isObject(body) || !Array.isArray(body.meetings)) return null;
-		const meetings = body.meetings.map(parsePastMeeting);
-		return meetings.every((m): m is PastMeeting => m !== null)
-			? meetings.toSorted((a, b) => b.createdAt - a.createdAt)
-			: null;
-	});
+/** Lists the owner's meetings, newest first. Needs the owner's session. */
+export function listMeetings(): Promise<ApiResult<PastMeeting[]>> {
+	return request(
+		'/api/meetings',
+		{},
+		json((body) => {
+			if (!isObject(body) || !Array.isArray(body.meetings)) return null;
+			const meetings = body.meetings.map(parsePastMeeting);
+			return meetings.every((m): m is PastMeeting => m !== null)
+				? meetings.toSorted((a, b) => b.createdAt - a.createdAt)
+				: null;
+		})
+	);
 }
 
 /** Looks a meeting up for the pre-join screen. */
@@ -132,13 +166,21 @@ export function getMeeting(meeting: MeetingId): Promise<ApiResult<MeetingInfo>> 
 	return request<MeetingInfo>(
 		`/api/meeting/${encodeURIComponent(meeting)}`,
 		{},
-		(body) => {
+		json((body) => {
 			if (!isObject(body) || typeof body.ended !== 'boolean') return null;
-			if (body.ended) return { kind: 'ended' };
-			return isRecordingPolicy(body.recordingPolicy)
-				? { kind: 'running', recordingPolicy: body.recordingPolicy }
+			const { phase, transcript } = body;
+			if (body.ended || phase === 'ended') {
+				return {
+					kind: 'ended',
+					transcript: typeof transcript === 'string' && transcript !== '' ? transcript : null
+				};
+			}
+			// A Worker from before the phases sends none; its meetings were all live.
+			const open = phase === undefined ? 'live' : isOpenPhase(phase) ? phase : null;
+			return open !== null && isRecordingPolicy(body.recordingPolicy)
+				? { kind: 'open', recordingPolicy: body.recordingPolicy, phase: open }
 				: null;
-		},
+		}),
 		(status) => (status === 404 ? { kind: 'not-found' } : null)
 	);
 }
@@ -157,9 +199,13 @@ const isIceServer = (value: unknown): value is RTCIceServer => {
 
 /** STUN and TURN servers with short-lived TURN credentials. */
 export function getIceServers(): Promise<ApiResult<RTCIceServer[]>> {
-	return request('/api/ice', {}, (body) =>
-		isObject(body) && Array.isArray(body.iceServers) && body.iceServers.every(isIceServer)
-			? body.iceServers
-			: null
+	return request(
+		'/api/ice',
+		{},
+		json((body) =>
+			isObject(body) && Array.isArray(body.iceServers) && body.iceServers.every(isIceServer)
+				? body.iceServers
+				: null
+		)
 	);
 }

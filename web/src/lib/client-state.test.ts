@@ -18,6 +18,7 @@ const person = (
 
 const room = (extra: Partial<RoomView> = {}): RoomView => ({
 	meeting: 'amber-otter-lamp',
+	phase: 'live',
 	locked: false,
 	recordingPolicy: 'hostDecides',
 	participants: [person(1, 'Ada', { role: 'host' })],
@@ -84,8 +85,6 @@ describe('reduce', () => {
 	it('turns errors into notices and recovery commands', () => {
 		const publish = reduce(welcomed(), { type: 'error', code: 'publishFailed' })[1];
 		expect(publish.map((c) => c.kind)).toEqual(['publish-rejected', 'toast']);
-		const host = reduce(INITIAL, { type: 'error', code: 'invalidHostToken' })[1];
-		expect(host.map((c) => c.kind)).toEqual(['rejoin-as-guest', 'toast']);
 		expect(reduce(welcomed(), { type: 'error', code: 'notSubscribed' })[1]).toEqual([
 			{ kind: 'layer-refused' }
 		]);

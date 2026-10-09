@@ -121,6 +121,23 @@ export class SignalingClient {
 		return true;
 	}
 
+	/**
+	 * Replaces the socket with a new one at once, as after a lost connection: `onOpen` runs
+	 * again and the caller's `Join` carries the resume token. The new upgrade request carries
+	 * the cookies the browser holds now, such as an owner session from a login since.
+	 */
+	reconnect(): void {
+		if (this.#stopped) return;
+		clearTimeout(this.#retryTimer);
+		clearInterval(this.#keepalive);
+		const old = this.#socket;
+		// Cleared first, so the old socket's `close` event is ignored.
+		this.#socket = null;
+		old?.close(1000, 'reconnect');
+		this.#attempt = 0;
+		this.#open();
+	}
+
 	close(): void {
 		if (this.#stopped) return;
 		this.#stopped = true;

@@ -1,19 +1,27 @@
 <script lang="ts" module>
-	/** The meeting's recording policy, as far as the pre-join screen knows it. */
+	import type { OpenPhase } from '../api.ts';
+
+	/** The meeting's recording policy and phase, as far as the pre-join screen knows them. */
 	export type PolicyLookup =
-		{ kind: 'loading' } | { kind: 'failed' } | { kind: 'known'; policy: RecordingPolicy };
+		| { kind: 'loading' }
+		| { kind: 'failed' }
+		| { kind: 'known'; policy: RecordingPolicy; phase: OpenPhase };
 </script>
 
 <script lang="ts">
 	import type { LocalMedia } from '../local-media.svelte.ts';
 	import type { CaptureError } from '../media/capture.ts';
 	import { showStream } from '../media/video.ts';
+	import type { OwnerSession } from '../owner-session.svelte.ts';
+	import { hostOffer } from '../owner-state.ts';
 	import type { MeetingId, RecordingPolicy } from '../protocol.ts';
 	import Icon from './Icon.svelte';
+	import LoginForm from './LoginForm.svelte';
 
 	let {
 		meeting,
 		media,
+		owner,
 		lookup,
 		name = $bindable(),
 		onjoin,
@@ -21,6 +29,8 @@
 	}: {
 		meeting: MeetingId;
 		media: LocalMedia;
+		/** A browser with the owner's session joins as host (D32). */
+		owner: OwnerSession;
 		lookup: PolicyLookup;
 		name: string;
 		/** `consent`: the user pressed "Join and accept recording". */
@@ -33,9 +43,18 @@
 	let policy = $derived(lookup.kind === 'known' ? lookup.policy : null);
 	let recorded = $derived(policy === 'fromStart');
 	let canJoin = $derived(name.trim().length > 0 && policy !== null);
+	/** The user opened "Join as host". */
+	let hostFormOpen = $state(false);
+	let offer = $derived(hostOffer(owner.state, hostFormOpen));
+	let scheduled = $derived(lookup.kind === 'known' && lookup.phase === 'scheduled');
 
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
+		if (canJoin) onjoin(recorded);
+	}
+
+	/** The login made this browser the host: continue the join, or wait for a name. */
+	function loggedIn() {
 		if (canJoin) onjoin(recorded);
 	}
 
@@ -88,95 +107,116 @@
 		</div>
 	</div>
 
-	<form onsubmit={submit}>
-		<h1 class="meeting">{meeting}</h1>
+	<div class="side">
+		<form onsubmit={submit}>
+			<h1 class="meeting">{meeting}</h1>
 
-		{#if media.error}
-			<div class="error" role="alert">
-				<p>{describe(media.error)}</p>
-				{#if media.error !== 'insecure'}
-					<button class="button quiet" type="button" onclick={() => media.start()}>Try again</button
-					>
-				{/if}
-			</div>
-		{/if}
-
-		<label class="field">
-			<span>Your name</span>
-			<input
-				bind:value={name}
-				maxlength={NAME_MAX}
-				autocomplete="name"
-				enterkeyhint="go"
-				required
-			/>
-		</label>
-
-		{#if media.devices.microphones.length > 0 || media.devices.cameras.length > 0}
-			<details class="devices">
-				<summary>Microphone and camera</summary>
-				{#if media.devices.microphones.length > 0}
-					<label class="field">
-						<span>Microphone</span>
-						<select
-							value={media.tracks.audio?.getSettings().deviceId ?? media.choice.microphone ?? ''}
-							onchange={(e) => media.selectMicrophone(e.currentTarget.value)}
+			{#if media.error}
+				<div class="error" role="alert">
+					<p>{describe(media.error)}</p>
+					{#if media.error !== 'insecure'}
+						<button class="button quiet" type="button" onclick={() => media.start()}
+							>Try again</button
 						>
-							{#each media.devices.microphones as device (device.id)}
-								<option value={device.id}>{device.label}</option>
-							{/each}
-						</select>
-					</label>
-				{/if}
-				{#if media.devices.cameras.length > 0}
-					<label class="field">
-						<span>Camera</span>
-						<select
-							value={media.tracks.video?.getSettings().deviceId ?? media.choice.camera ?? ''}
-							onchange={(e) => media.selectCamera(e.currentTarget.value)}
-						>
-							{#each media.devices.cameras as device (device.id)}
-								<option value={device.id}>{device.label}</option>
-							{/each}
-						</select>
-					</label>
-				{/if}
-			</details>
-		{/if}
+					{/if}
+				</div>
+			{/if}
 
-		{#if lookup.kind === 'failed'}
-			<div class="error" role="alert">
-				<p>The meeting could not be reached. Check your connection, then try again.</p>
-				<button class="button quiet" type="button" onclick={onretry}>Try again</button>
-			</div>
-		{:else if policy === 'fromStart'}
-			<div class="notice">
-				<p class="notice-title">
-					<Icon name="record" size={20} />
-					This meeting is recorded
-				</p>
-				<p>
-					Voices become a written transcript that everyone in the meeting gets. Video is not
+			<label class="field">
+				<span>Your name</span>
+				<input
+					bind:value={name}
+					maxlength={NAME_MAX}
+					autocomplete="name"
+					enterkeyhint="go"
+					required
+				/>
+			</label>
+
+			{#if media.devices.microphones.length > 0 || media.devices.cameras.length > 0}
+				<details class="devices">
+					<summary>Microphone and camera</summary>
+					{#if media.devices.microphones.length > 0}
+						<label class="field">
+							<span>Microphone</span>
+							<select
+								value={media.tracks.audio?.getSettings().deviceId ?? media.choice.microphone ?? ''}
+								onchange={(e) => media.selectMicrophone(e.currentTarget.value)}
+							>
+								{#each media.devices.microphones as device (device.id)}
+									<option value={device.id}>{device.label}</option>
+								{/each}
+							</select>
+						</label>
+					{/if}
+					{#if media.devices.cameras.length > 0}
+						<label class="field">
+							<span>Camera</span>
+							<select
+								value={media.tracks.video?.getSettings().deviceId ?? media.choice.camera ?? ''}
+								onchange={(e) => media.selectCamera(e.currentTarget.value)}
+							>
+								{#each media.devices.cameras as device (device.id)}
+									<option value={device.id}>{device.label}</option>
+								{/each}
+							</select>
+						</label>
+					{/if}
+				</details>
+			{/if}
+
+			{#if lookup.kind === 'failed'}
+				<div class="error" role="alert">
+					<p>The meeting could not be reached. Check your connection, then try again.</p>
+					<button class="button quiet" type="button" onclick={onretry}>Try again</button>
+				</div>
+			{:else if policy === 'fromStart'}
+				<div class="notice">
+					<p class="notice-title">
+						<Icon name="record" size={20} />
+						This meeting is recorded
+					</p>
+					<p>
+						Voices become a written transcript that everyone in the meeting gets. Video is not
+						recorded.
+					</p>
+				</div>
+			{:else if policy === 'hostDecides'}
+				<p class="note">
+					A host may start recording during the meeting. You will be asked before your voice is
 					recorded.
 				</p>
-			</div>
-		{:else if policy === 'hostDecides'}
-			<p class="note">
-				A host may start recording during the meeting. You will be asked before your voice is
-				recorded.
-			</p>
-		{/if}
+			{/if}
 
-		<div class="join-bar">
-			<button class="button primary join" type="submit" disabled={!canJoin}>
-				{lookup.kind === 'loading'
-					? 'Checking the meeting…'
-					: recorded
-						? 'Join and accept recording'
-						: 'Join'}
-			</button>
-		</div>
-	</form>
+			{#if offer.kind === 'host'}
+				<p class="as-host">You join as host</p>
+			{:else if scheduled}
+				<p class="note">The meeting has not started yet. You wait until the host arrives.</p>
+			{/if}
+
+			<div class="join-bar">
+				<button class="button primary join" type="submit" disabled={!canJoin}>
+					{lookup.kind === 'loading'
+						? 'Checking the meeting…'
+						: recorded
+							? 'Join and accept recording'
+							: 'Join'}
+				</button>
+				{#if offer.kind === 'link'}
+					<button class="host-link" type="button" onclick={() => (hostFormOpen = true)}>
+						Join as host
+					</button>
+				{/if}
+			</div>
+		</form>
+
+		{#if offer.kind === 'form'}
+			<section class="host-login" aria-labelledby="host-heading">
+				<h2 id="host-heading">Join as host</h2>
+				<LoginForm {owner} onlogin={loggedIn} />
+			</section>
+		{/if}
+	</div>
 </main>
 
 <style>
@@ -272,10 +312,62 @@
 		color: var(--lake);
 	}
 
+	.side {
+		display: flex;
+		flex-direction: column;
+		gap: 1.5rem;
+	}
+
+	/* Phones: the form fills the column, so its join bar sits at the bottom. */
+	@media (max-width: 760px) {
+		.side,
+		form {
+			flex: 1;
+		}
+	}
+
 	form {
 		display: flex;
 		flex-direction: column;
 		gap: 1.25rem;
+	}
+
+	.as-host {
+		color: var(--fog);
+		font-weight: 650;
+	}
+
+	/* Quiet on purpose: only the owner needs it, and guests should not wonder about it. */
+	.host-link {
+		display: block;
+		min-height: var(--touch);
+		margin: 0.25rem auto 0;
+		padding: 0 1rem;
+		border: 0;
+		background: none;
+		color: var(--lichen);
+		font-size: var(--step--1);
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+		cursor: pointer;
+	}
+
+	.host-link:hover {
+		color: var(--fog);
+	}
+
+	.host-login {
+		display: grid;
+		gap: 1rem;
+		padding: 1rem;
+		border-radius: var(--radius-s);
+		background: var(--water);
+		box-shadow: inset 0 0 0 1px var(--reed);
+	}
+
+	.host-login h2 {
+		font-size: var(--step-0);
+		font-weight: 650;
 	}
 
 	h1.meeting {

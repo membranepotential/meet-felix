@@ -1,44 +1,53 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { createMeeting, type ApiError, type NewMeeting } from '#lib/api.ts';
+	import { createMeeting, type ApiError } from '#lib/api.ts';
 	import CopyButton from '#lib/components/CopyButton.svelte';
-	import PasswordField from '#lib/components/PasswordField.svelte';
+	import LoginForm from '#lib/components/LoginForm.svelte';
 	import ShareButton from '#lib/components/ShareButton.svelte';
-	import { dropStoredCreateSecret, saveHostToken } from '#lib/storage.ts';
+	import { OwnerSession } from '#lib/owner-session.svelte.ts';
+	import type { MeetingId } from '#lib/protocol.ts';
+	import { dropLegacySecrets } from '#lib/storage.ts';
 
 	type HostState =
 		| { kind: 'idle' }
 		| { kind: 'creating' }
-		| { kind: 'created'; meeting: NewMeeting }
+		| { kind: 'created'; meeting: MeetingId }
 		| { kind: 'failed'; error: ApiError };
 
+	const owner = new OwnerSession();
 	let hostState = $state.raw<HostState>({ kind: 'idle' });
-	/** Typed or filled by the password manager each time; never stored. */
-	let password = $state('');
 	/** On: `fromStart`. Off: `hostDecides`. */
 	let record = $state(true);
 
-	onMount(dropStoredCreateSecret);
+	onMount(() => {
+		dropLegacySecrets();
+		void owner.check();
+	});
 
 	async function start(event: SubmitEvent) {
 		event.preventDefault();
-		const key = password.trim();
-		if (key === '') return;
 		hostState = { kind: 'creating' };
-		const result = await createMeeting(key, record ? 'fromStart' : 'hostDecides');
-		if (!result.ok) {
+		const result = await createMeeting(record ? 'fromStart' : 'hostDecides');
+		if (result.ok) {
+			hostState = { kind: 'created', meeting: result.value };
+		} else if (result.error.kind === 'unauthorized') {
+			// The session expired since the page loaded: log in again, then start over.
+			hostState = { kind: 'idle' };
+			owner.rejected();
+		} else {
 			hostState = { kind: 'failed', error: result.error };
-			return;
 		}
-		password = '';
-		saveHostToken(result.value.meeting, result.value.hostToken);
-		hostState = { kind: 'created', meeting: result.value };
+	}
+
+	async function logOut() {
+		await owner.logout();
+		if (!owner.signedIn) hostState = { kind: 'idle' };
 	}
 
 	function describe(error: ApiError): string {
 		switch (error.kind) {
 			case 'unauthorized':
-				return 'That password is wrong. Only the owner can start meetings.';
+				return 'Your login has expired. Log in again.';
 			case 'rate-limited':
 				return 'Too many new meetings in a short time. Wait a minute, then try again.';
 			case 'network':
@@ -56,10 +65,34 @@
 </svelte:head>
 
 <main>
-	<p class="brand">meet-felix</p>
+	<header>
+		<p class="brand">meet-felix</p>
+		{#if owner.state.kind === 'signed-in'}
+			<button
+				class="logout"
+				type="button"
+				onclick={logOut}
+				disabled={owner.state.logout.kind === 'sending'}
+			>
+				Log out
+			</button>
+		{/if}
+	</header>
 
-	{#if hostState.kind === 'created'}
-		{@const meeting = hostState.meeting.meeting}
+	{#if owner.state.kind === 'signed-in' && owner.state.logout.kind === 'failed'}
+		<p class="error" role="alert">You are still logged in: the server could not be reached.</p>
+	{/if}
+
+	{#if owner.state.kind === 'checking'}
+		<p class="hint" role="status">Checking your login…</p>
+	{:else if owner.state.kind === 'signed-out'}
+		<section class="login" aria-labelledby="login-heading">
+			<h1 id="login-heading">Log in</h1>
+			<p class="hint">Only the owner starts meetings here. To join a meeting, open its link.</p>
+			<LoginForm {owner} />
+		</section>
+	{:else if hostState.kind === 'created'}
+		{@const meeting = hostState.meeting}
 		{@const url = `${window.location.origin}/${meeting}`}
 		<section class="created" aria-labelledby="link-heading">
 			<h1 id="link-heading" class="eyebrow">Your meeting</h1>
@@ -79,7 +112,6 @@
 	{:else}
 		<form class="create" onsubmit={start} aria-labelledby="start-heading">
 			<h1 id="start-heading">New meeting</h1>
-			<PasswordField bind:value={password} />
 			<label class="switch">
 				<span class="switch-text">
 					<strong>Record and transcribe</strong>
@@ -95,11 +127,7 @@
 				<p class="error" role="alert">{describe(hostState.error)}</p>
 			{/if}
 			<div class="spacer"></div>
-			<button
-				class="button primary big"
-				type="submit"
-				disabled={hostState.kind === 'creating' || password.trim() === ''}
-			>
+			<button class="button primary big" type="submit" disabled={hostState.kind === 'creating'}>
 				{hostState.kind === 'creating' ? 'Creating…' : 'New meeting'}
 			</button>
 			<a class="past" href="/meetings">Past meetings</a>
@@ -120,10 +148,39 @@
 		padding-bottom: calc(var(--gutter) + env(safe-area-inset-bottom));
 	}
 
+	header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+
 	.brand {
 		color: var(--lichen);
 		font-weight: 650;
 		letter-spacing: 0.01em;
+	}
+
+	/* Quiet: logging out is rare, and a session lasts 30 days. */
+	.logout {
+		min-height: var(--touch);
+		padding: 0 0.25rem;
+		border: 0;
+		background: none;
+		color: var(--lichen);
+		font-size: var(--step--1);
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+		cursor: pointer;
+	}
+
+	.logout:hover {
+		color: var(--fog);
+	}
+
+	.login {
+		display: grid;
+		gap: 1.25rem;
 	}
 
 	.create,

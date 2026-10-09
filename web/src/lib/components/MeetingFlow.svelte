@@ -2,9 +2,10 @@
 	import { onMount } from 'svelte';
 	import { getMeeting, type MeetingInfo } from '../api.ts';
 	import { LocalMedia } from '../local-media.svelte.ts';
-	import type { MeetingId } from '../protocol.ts';
+	import { OwnerSession } from '../owner-session.svelte.ts';
+	import type { MeetingId, TranscriptRef } from '../protocol.ts';
 	import { Session } from '../session.svelte.ts';
-	import { loadDisplayName, loadHostToken, saveDisplayName } from '../storage.ts';
+	import { loadDisplayName, saveDisplayName } from '../storage.ts';
 	import ConsentDialog from './ConsentDialog.svelte';
 	import CopyButton from './CopyButton.svelte';
 	import ShareButton from './ShareButton.svelte';
@@ -15,6 +16,7 @@
 	let { meeting }: { meeting: MeetingId } = $props();
 
 	const media = new LocalMedia();
+	const owner = new OwnerSession();
 	let name = $state(loadDisplayName());
 	let session = $state.raw<Session | null>(null);
 	let meetingInfo = $state.raw<
@@ -24,22 +26,17 @@
 	let lookup: PolicyLookup = $derived.by(() => {
 		if (meetingInfo.kind !== 'done') return meetingInfo;
 		const { info } = meetingInfo;
-		return info.kind === 'running'
-			? { kind: 'known', policy: info.recordingPolicy }
+		return info.kind === 'open'
+			? { kind: 'known', policy: info.recordingPolicy, phase: info.phase }
 			: { kind: 'failed' };
 	});
-	/** The link points to no running meeting, so there is nothing to join. */
+	/** The link points to no open meeting, so there is nothing to join. */
 	let gone = $derived(
-		meetingInfo.kind === 'done' && meetingInfo.info.kind !== 'running'
-			? meetingInfo.info.kind
-			: null
+		meetingInfo.kind === 'done' && meetingInfo.info.kind !== 'open' ? meetingInfo.info : null
 	);
+	let scheduled = $derived(lookup.kind === 'known' && lookup.phase === 'scheduled');
 
 	let end = $derived(session?.end ?? null);
-	/** Everyone present when a recorded meeting ends gets the transcript link (D19). */
-	let transcriptToken = $derived(
-		end?.kind === 'ended' && end.transcript !== null ? encodeURIComponent(end.transcript) : null
-	);
 	const transcriptBase = `${window.location.origin}/t/`;
 
 	async function lookUp() {
@@ -51,6 +48,7 @@
 	onMount(() => {
 		void media.start();
 		void lookUp();
+		void owner.check();
 		return () => {
 			session?.dispose();
 			media.dispose();
@@ -60,20 +58,42 @@
 	function join(consent: boolean) {
 		const trimmed = name.trim();
 		saveDisplayName(trimmed);
-		const next = new Session(
-			meeting,
-			{ name: trimmed, consent, hostToken: loadHostToken(meeting) },
-			media
-		);
+		// The room makes this a host if the socket carries the owner's session cookie (D32).
+		const next = new Session(meeting, { name: trimmed, consent }, media);
 		next.start();
 		session = next;
 	}
 </script>
 
+<!-- Everyone present when a recorded meeting ends gets the transcript link (D19). -->
+{#snippet ended(heading: string, transcript: TranscriptRef | null)}
+	<h1>{heading}</h1>
+	{#if transcript !== null}
+		{@const token = encodeURIComponent(transcript)}
+		{@const url = transcriptBase + token}
+		<p>
+			The transcript will be at this link once it is ready. Save the link now; this page does not
+			show it again.
+		</p>
+		<a class="transcript" href={url}><span class="host">{transcriptBase}</span>{token}</a>
+		<div class="actions">
+			<ShareButton {url} title="Meeting transcript" primary />
+			<CopyButton text={url} />
+			<a class="button quiet" href="/">Start page</a>
+		</div>
+	{:else}
+		<div class="actions"><a class="button quiet" href="/">Start page</a></div>
+	{/if}
+{/snippet}
+
 {#if session === null}
-	{#if gone !== null}
+	{#if gone?.kind === 'ended'}
 		<main class="message">
-			<h1>{gone === 'ended' ? 'This meeting has ended' : 'This meeting does not exist'}</h1>
+			{@render ended('This meeting has ended', gone.transcript)}
+		</main>
+	{:else if gone?.kind === 'not-found'}
+		<main class="message">
+			<h1>This meeting does not exist</h1>
 			<p>
 				Meeting links work only while the meeting runs. Ask the person who invited you for a new
 				link.
@@ -81,13 +101,13 @@
 			<div class="actions"><a class="button quiet" href="/">Start page</a></div>
 		</main>
 	{:else}
-		<PreJoin {meeting} {media} {lookup} bind:name onjoin={join} onretry={lookUp} />
+		<PreJoin {meeting} {media} {owner} {lookup} bind:name onjoin={join} onretry={lookUp} />
 	{/if}
 {:else if end === null}
 	{#if session.stage.kind === 'in'}
 		<Meeting {meeting} {media} {session} />
 	{:else}
-		<Lobby {meeting} {session} />
+		<Lobby {meeting} {session} {owner} {scheduled} />
 	{/if}
 	{#if session.state.consentAsked}
 		<ConsentDialog onaccept={() => session?.acceptRecording()} onleave={() => session?.leave()} />
@@ -106,24 +126,7 @@
 			<h1>A host removed you from the meeting</h1>
 			<div class="actions"><a class="button quiet" href="/">Start page</a></div>
 		{:else if end.kind === 'ended'}
-			<h1>The meeting has ended</h1>
-			{#if transcriptToken}
-				{@const url = transcriptBase + transcriptToken}
-				<p>
-					The transcript will be at this link once it is ready. Save the link now; this page does
-					not show it again.
-				</p>
-				<a class="transcript" href={url}
-					><span class="host">{transcriptBase}</span>{transcriptToken}</a
-				>
-				<div class="actions">
-					<ShareButton {url} title="Meeting transcript" primary />
-					<CopyButton text={url} />
-					<a class="button quiet" href="/">Start page</a>
-				</div>
-			{:else}
-				<div class="actions"><a class="button quiet" href="/">Start page</a></div>
-			{/if}
+			{@render ended('The meeting has ended', end.transcript)}
 		{:else}
 			<h1>You are not in the meeting</h1>
 			<p>{end.reason}</p>

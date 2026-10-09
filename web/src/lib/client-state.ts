@@ -26,7 +26,7 @@ export type SessionEnd =
 export type Stage =
 	/** The socket is connecting, or `Join` is sent and the room has not answered. */
 	| { kind: 'joining' }
-	/** The room is locked; a host must admit us. */
+	/** Outside the room: no host has arrived yet, or the room is locked and a host must admit us. */
 	| { kind: 'waiting' }
 	/** In the meeting. */
 	| { kind: 'in'; you: ParticipantId; room: RoomView }
@@ -59,8 +59,6 @@ export type Command =
 	/** The room refused a `SetLayer` for a track it does not deliver yet: ask again later. */
 	| { kind: 'layer-refused' }
 	| { kind: 'mute-mic' }
-	/** The stored host token is not this meeting's: forget it and join again as a guest. */
-	| { kind: 'rejoin-as-guest' }
 	/** The stay is over: release media and close the socket. */
 	| { kind: 'teardown' };
 
@@ -78,8 +76,6 @@ export function describeError(code: ErrorCode): string | null {
 			return 'The meeting did not understand this page. Reload the page to continue.';
 		case 'notJoined':
 			return 'You are not in the meeting yet. Wait a moment, then try again.';
-		case 'invalidHostToken':
-			return 'Your host link belongs to an earlier meeting, so you join as a guest.';
 		case 'notHost':
 			return 'Only hosts can do that.';
 		case 'invalidTarget':
@@ -153,7 +149,6 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			const text = describeError(msg.code);
 			const commands: Command[] = [];
 			if (PUBLISH_ERRORS.has(msg.code)) commands.push({ kind: 'publish-rejected' });
-			if (msg.code === 'invalidHostToken') commands.push({ kind: 'rejoin-as-guest' });
 			if (msg.code === 'notSubscribed') commands.push({ kind: 'layer-refused' });
 			// An `Unpublish` that crossed a reconnect: the room no longer had the track.
 			if (msg.code === 'notPublished') {

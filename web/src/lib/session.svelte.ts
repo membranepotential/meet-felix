@@ -17,7 +17,6 @@ import { holdWakeLock } from './media/wakelock.ts';
 import type {
 	ClientMsg,
 	DisplayName,
-	HostToken,
 	MeetingId,
 	ParticipantId,
 	ParticipantView,
@@ -33,14 +32,12 @@ import {
 	type RemoteTracks
 } from './sfu.ts';
 import { SignalingClient, type ConnectionStatus } from './signaling.ts';
-import { forgetHostToken } from './storage.ts';
 import { Toasts } from './toasts.svelte.ts';
 
 export interface JoinRequest {
 	name: DisplayName;
 	/** Whether the user accepted recording on the pre-join screen. */
 	consent: boolean;
-	hostToken: HostToken | null;
 }
 
 /** Used when `/api/ice` fails: direct and STUN-only paths still work on most networks. */
@@ -137,6 +134,14 @@ export class Session {
 		this.send({ type: 'setConsent', consent: true });
 	}
 
+	/**
+	 * Connects again with a new socket and the same participant. After the owner logged in,
+	 * the new socket carries the session cookie, and the room makes this participant a host.
+	 */
+	reconnect(): void {
+		this.#signaling.reconnect();
+	}
+
 	leave(): void {
 		this.#signaling.send({ type: 'leave' });
 		this.#finish({ kind: 'left' });
@@ -193,11 +198,6 @@ export class Session {
 			case 'mute-mic':
 				this.#media.mute();
 				return;
-			case 'rejoin-as-guest':
-				forgetHostToken(this.#meeting);
-				this.#join = { ...this.#join, hostToken: null };
-				this.#sendJoin();
-				return;
 			case 'teardown':
 				this.#over();
 				return;
@@ -251,15 +251,9 @@ export class Session {
 	}
 
 	#sendJoin(): void {
-		const { name, consent, hostToken } = this.#join;
+		const { name, consent } = this.#join;
 		const { resume } = this.state;
-		this.#signaling.send({
-			type: 'join',
-			name,
-			consent,
-			...(hostToken !== null ? { hostToken } : {}),
-			...(resume !== null ? { resume } : {})
-		});
+		this.#signaling.send({ type: 'join', name, consent, ...(resume !== null ? { resume } : {}) });
 	}
 
 	#onStatus(status: ConnectionStatus): void {
@@ -283,9 +277,11 @@ export class Session {
 		this.#checkingMeeting = true;
 		const result = await getMeeting(this.#meeting);
 		this.#checkingMeeting = false;
-		if (result.ok && result.value.kind !== 'running') {
-			this.#finish({ kind: 'ended', transcript: null });
-		}
+		if (!result.ok || result.value.kind === 'open') return;
+		this.#finish({
+			kind: 'ended',
+			transcript: result.value.kind === 'ended' ? result.value.transcript : null
+		});
 	}
 
 	#finish(end: SessionEnd): void {

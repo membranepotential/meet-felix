@@ -20,6 +20,7 @@ type Samples<M extends { type: string }> = { [T in M['type']]: Extract<M, { type
 
 const room: RoomView = {
 	meeting: 'abide-acid-acorn',
+	phase: 'live',
 	locked: false,
 	recordingPolicy: 'hostDecides',
 	recording: { since: 1_700_000_000_000, by: 1 },
@@ -54,7 +55,7 @@ const SERVER_SAMPLES: Samples<ServerMsg> = {
 };
 
 const CLIENT_SAMPLES: Samples<ClientMsg> = {
-	join: { type: 'join', name: 'Ada', consent: true, hostToken: 'h', resume: 'r1' },
+	join: { type: 'join', name: 'Ada', consent: true, resume: 'r1' },
 	setConsent: { type: 'setConsent', consent: false },
 	publishOffer: {
 		type: 'publishOffer',

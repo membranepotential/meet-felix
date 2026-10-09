@@ -2,15 +2,14 @@
  * Browser-local persistence. Every access is wrapped because storage throws in some
  * private modes and when site data is blocked; the app must work without it.
  */
-import type { HostToken, MeetingId } from './protocol.ts';
 
 const DISPLAY_NAME = 'meet-felix:name';
 /**
- * Where earlier versions kept the Worker's create secret. The owner's password manager fills
- * it now; nothing stores it, and `dropStoredCreateSecret` removes the old copy.
+ * Secrets earlier versions kept: the Worker's create secret, and one host token per meeting.
+ * The owner's session cookie replaces both; `dropLegacySecrets` removes the old copies.
  */
 const LEGACY_CREATE_SECRET = 'meet-felix:create-secret';
-const hostTokenKey = (meeting: MeetingId) => `meet-felix:host:${meeting}`;
+const LEGACY_HOST_TOKEN_PREFIX = 'meet-felix:host:';
 
 function read(key: string): string | null {
 	try {
@@ -28,24 +27,16 @@ function write(key: string, value: string): void {
 	}
 }
 
-function remove(key: string): void {
+export const loadDisplayName = (): string => read(DISPLAY_NAME) ?? '';
+export const saveDisplayName = (name: string): void => write(DISPLAY_NAME, name);
+
+export function dropLegacySecrets(): void {
 	try {
-		localStorage.removeItem(key);
+		const keys = Object.keys(localStorage).filter(
+			(key) => key === LEGACY_CREATE_SECRET || key.startsWith(LEGACY_HOST_TOKEN_PREFIX)
+		);
+		for (const key of keys) localStorage.removeItem(key);
 	} catch {
 		// Storage unavailable: nothing was stored.
 	}
 }
-
-export const loadDisplayName = (): string => read(DISPLAY_NAME) ?? '';
-export const saveDisplayName = (name: string): void => write(DISPLAY_NAME, name);
-
-export const dropStoredCreateSecret = (): void => remove(LEGACY_CREATE_SECRET);
-
-/**
- * Meeting words are recycled, so a stored token may belong to an earlier meeting with the
- * same words; the session forgets it when the room rejects it.
- */
-export const loadHostToken = (meeting: MeetingId): HostToken | null => read(hostTokenKey(meeting));
-export const saveHostToken = (meeting: MeetingId, token: HostToken): void =>
-	write(hostTokenKey(meeting), token);
-export const forgetHostToken = (meeting: MeetingId): void => remove(hostTokenKey(meeting));
