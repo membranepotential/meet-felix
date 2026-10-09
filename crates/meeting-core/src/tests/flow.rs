@@ -78,15 +78,22 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
             tracks: tracks.clone(),
         },
     );
+    // The offer fails if the SFU does not answer in time.
     assert_eq!(
         effects,
-        [Effect::SfuPublish {
-            who,
-            session: session(who, SessionKind::Publish),
-            sdp_offer: Sdp::new("offer"),
-            tracks
-        }]
+        [
+            Effect::SfuPublish {
+                who,
+                session: session(who, SessionKind::Publish),
+                sdp_offer: Sdp::new("offer"),
+                tracks
+            },
+            Effect::SetAlarm {
+                at: room.now.after(NEGOTIATION_TIMEOUT_MS)
+            },
+        ]
     );
+    room.now = room.now.after(1_000);
     let effects = room.sfu(SfuReply::Published {
         who,
         sdp_answer: Sdp::new("answer"),
@@ -129,7 +136,7 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
             tracks: AV.map(|kind| remote(who, kind)).to_vec()
         }
     );
-    // The negotiation fails if it takes too long.
+    // The subscribe negotiation fails if it takes too long.
     assert_eq!(
         alarm,
         &Effect::SetAlarm {

@@ -33,16 +33,25 @@ pub enum TrackKind {
     Screen,
 }
 
-/// A simulcast layer. The publisher must use these names as its encoding `rid`s.
+/// A simulcast layer. The publisher must use the serialized names (`f`, `h`, `q`) as its
+/// encoding `rid`s.
+///
+/// The names sort the layers from the best to the worst asciibetically (`f` < `h` < `q`). The
+/// SFU uses that order when the preferred layer is unavailable (`ridNotAvailable:
+/// "asciibetical"`): it switches to the next name, so a missing full layer falls back to half,
+/// not to quarter, as it would with `high` < `low` < `mid`. Cloudflare's simulcast docs use the
+/// same names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "wasm", derive(Tsify))]
-#[serde(rename_all = "camelCase")]
 pub enum Rid {
-    /// Lowest resolution and bitrate.
+    /// Quarter resolution (`q`): the lowest bitrate.
+    #[serde(rename = "q")]
     Low,
-    /// Medium resolution.
+    /// Half resolution (`h`).
+    #[serde(rename = "h")]
     Mid,
-    /// Full resolution; the default for new subscriptions.
+    /// Full resolution (`f`); the default for new subscriptions.
+    #[serde(rename = "f")]
     High,
 }
 
@@ -190,6 +199,13 @@ pub enum ClientMsg {
         /// The transceivers to publish, with distinct kinds, mids and names.
         tracks: Vec<LocalTrack>,
     },
+    /// Stop publishing your track of this kind, e.g. because the camera was turned off. The
+    /// room closes it on the publish session and on every subscriber. The client stops the
+    /// transceiver itself; a later [`ClientMsg::PublishOffer`] may publish the kind again.
+    Unpublish {
+        /// Which of your tracks.
+        kind: TrackKind,
+    },
     /// Answer the room's last [`ServerMsg::SubscribeOffer`].
     SubscribeAnswer {
         /// The client's answer.
@@ -312,13 +328,15 @@ pub enum ErrorCode {
     InvalidOffer,
     /// The previous publish offer is still being processed.
     NegotiationInProgress,
+    /// You do not publish a track of that kind.
+    NotPublished,
     /// There is no subscribe offer waiting for an answer.
     UnexpectedAnswer,
     /// You do not receive that track.
     NotSubscribed,
     /// The SFU could not create your sessions; reconnect later.
     SfuUnavailable,
-    /// The SFU rejected your publish offer.
+    /// The SFU rejected your publish offer, or did not answer it in time.
     PublishFailed,
     /// The SFU could not add remote tracks to your subscribe session.
     SubscribeFailed,

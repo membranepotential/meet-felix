@@ -4,6 +4,7 @@ use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 use crate::ids::MeetingId;
+use crate::protocol::{ClientMsg, ServerMsg};
 
 /// Whether `s` is a valid meeting id, i.e. three listed words joined by `-`.
 #[wasm_bindgen(js_name = validateMeetingId)]
@@ -19,4 +20,19 @@ pub fn generate_meeting_id(random_u32s: &[u32]) -> Result<Ts<MeetingId>, JsError
         .first_chunk::<{ MeetingId::WORD_COUNT }>()
         .ok_or_else(|| JsError::new("generateMeetingId needs three random u32 values"))?;
     Ok(MeetingId::from_random(*random).into_ts()?)
+}
+
+/// Parses and validates a whole message from the room's socket. Throws if `json` is not a
+/// valid [`ServerMsg`].
+#[wasm_bindgen(js_name = parseServerMsg)]
+pub fn parse_server_msg(json: &str) -> Result<Ts<ServerMsg>, JsError> {
+    let msg: ServerMsg = serde_json::from_str(json)?;
+    Ok(msg.into_ts()?)
+}
+
+/// The JSON text of a message for the room's socket. Throws if `msg` is not a valid
+/// [`ClientMsg`], e.g. if its display name is empty.
+#[wasm_bindgen(js_name = encodeClientMsg)]
+pub fn encode_client_msg(msg: Ts<ClientMsg>) -> Result<String, JsError> {
+    Ok(serde_json::to_string(&msg.to_rust()?)?)
 }

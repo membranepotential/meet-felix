@@ -58,7 +58,8 @@ time is an extra argument because the core reads no clock.
 - **Protocol**: `ClientMsg` and `ServerMsg`, serialized with serde and
   exported to TypeScript with `tsify`. Client messages: `Join` (name,
   consent, an optional host token and an optional resume token),
-  `SetConsent`, `PublishOffer`, `SubscribeAnswer`, `SetLayer`, `Lock`,
+  `SetConsent`, `PublishOffer`, `Unpublish` (a track kind), `SubscribeAnswer`,
+  `SetLayer`, `Lock`,
   `Admit`, `Kick`, `Mute`, `SetRecording`, `End` and `Leave`. Server
   messages: `Welcome` (with the resume token), `State`, `Waiting`,
   `PublishAnswer`, `SubscribeOffer`, `Knock`, `ConsentRequired`, `Muted`,
@@ -95,7 +96,9 @@ the new state, and carries out the effects in order:
 **Browser**: the Svelte app loads the core as WASM. It uses the generated
 types for every message on the signaling socket, and core functions such as
 `validateMeetingId` and `generateMeetingId` instead of restating the rules in
-TypeScript. The browser performs the I/O itself: DOM, `RTCPeerConnection`,
+TypeScript. `parseServerMsg(json)` parses and validates a whole message from
+the socket with serde, and `encodeClientMsg(msg)` validates and serializes one
+for it; both throw on an invalid message (2026-10-09). The browser performs the I/O itself: DOM, `RTCPeerConnection`,
 devices ([D3](../architecture/README.md#d3-the-browser-runs-a-typescript-and-svelte-shell-over-the-core-as-wasm-2026-10-09)).
 
 On 2026-10-09 the `RoomObject` from spike 1 does not yet call the core;
@@ -122,13 +125,21 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   recorded.
 - Each participant has a publish session (the client offers) and a subscribe
   session (the SFU offers, one negotiation at a time). New tracks reach every
-  other joined participant; a leaving participant's tracks are closed on all
-  subscribers. A track stays in the subscriber's wanted set until a
-  negotiation delivers it. A negotiation that fails, or whose step (SFU
+  other joined participant. When a track stops being published (`Unpublish`,
+  a replacement of the same kind, the SFU closing it, or its owner leaving or
+  being kicked), it is closed on every subscriber that received it and, if it
+  was recorded, `StopRecordingTrack` stops recording it; `Unpublish` also
+  closes it on the publisher's publish session. A track stays in the
+  subscriber's wanted set until a negotiation delivers it. A subscribe
+  negotiation that fails, or whose step (SFU
   offer, client answer, SFU confirmation) takes longer than
   `NEGOTIATION_TIMEOUT_MS` (15 seconds), ends with `SfuCloseTracks` for the
   offered transceivers and `Error { SubscribeFailed }` to the client; its
   tracks are requested again after `SUBSCRIBE_RETRY_MS` (3 seconds).
+- One publish offer runs at a time; a second gets `NegotiationInProgress`.
+  If the SFU does not answer within `NEGOTIATION_TIMEOUT_MS`, the room drops
+  the offer and sends `Error { PublishFailed }`, so the client may offer again
+  (2026-10-09).
 - The room ends when a host ends it, or after `EMPTY_ROOM_TIMEOUT_MS` (two
   minutes) without admitted (connecting or joined) participants. Knocking
   guests and guests awaiting consent do not count, so their coming and going
@@ -142,6 +153,7 @@ time it must act. `RoomState` derives it from its own state, with a reason
 for each candidate time:
 
 - `EmptyRoom`: the room has been empty for two minutes.
+- `Publish(participant)`: that participant's publish offer times out.
 - `Subscribe(participant)`: that participant's subscribe negotiation times
   out, or, while no negotiation runs, their earliest wanted track is due for
   a retry.
@@ -173,24 +185,30 @@ a participant id that already left is a fresh join.
 ## Invariants to test
 
 Property tests (`proptest`) generate random sequences of join, resume, leave,
-kick, lock, knock, consent, renegotiation, SFU failure, alarm and recording
-events under both recording policies, run them through `step`, and check
+kick, lock, knock, consent, publish, unpublish, renegotiation, SFU failure,
+lost SFU replies, alarms (at random times and at negotiation deadlines) and
+recording events under both recording policies, run them through `step`, and check
 after every step that:
 
 - no SFU track is orphaned: every requested and received track belongs to a
-  participant still in the room, and when a participant leaves or is kicked,
-  every other subscriber gets `SfuCloseTracks` for all of that participant's
-  tracks it received;
+  participant still in the room, and whenever a track stops being published
+  under its name (unpublished, replaced, closed by the SFU, or its owner left
+  or was kicked), every subscriber that received it gets `SfuCloseTracks`;
 - each SFU session has exactly one offerer: every `SfuPublish` names the
   participant's publish session, and every `SfuSubscribe`, `SfuRenegotiate`,
-  `SfuCloseTracks` and `SfuUpdateLayer` names their subscribe session;
+  `SfuCloseTracks` and `SfuUpdateLayer` names their subscribe session, except
+  that `Unpublish` closes the sender's own track on their publish session;
+- no negotiation older than `NEGOTIATION_TIMEOUT_MS`, publish or subscribe,
+  survives an alarm at or after its deadline;
 - no subscription is lost: every track of every other joined participant is
   received under its current name or still wanted;
 - recording is never on without a `State` broadcast or `Welcome` that tells
   every joined client first;
 - no guest is admitted without consent while the room records; whoever is in
   the room without consent while it records got `ConsentRequired` and
-  `Muted`; and exactly the consenting joined speakers' audio is recorded;
+  `Muted`; and exactly the consenting joined speakers' current audio is
+  recorded, with no track left over from a speaker who left or a track that
+  is gone;
 - guests never succeed with `Lock`, `Admit`, `Kick`, `Mute`, `SetRecording`
   or `End`: the state stays the same and they get an `Error`;
 - a host is never locked out of their own room (only guests knock or await

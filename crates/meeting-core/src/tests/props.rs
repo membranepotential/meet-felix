@@ -8,11 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use super::support::{Room, name, token};
-use crate::state::Connection;
+use crate::state::{AlarmReason, Connection};
 use crate::{
-    ClientMsg, Effect, ErrorCode, Event, HostToken, LocalTrack, Mid, Millis, OfferedTrack,
-    ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, Rid, Role, RoomState, RoomView, Sdp,
-    ServerMsg, SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
+    ClientMsg, Effect, ErrorCode, Event, HostToken, LocalTrack, Mid, Millis,
+    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken,
+    Rid, Role, RoomState, RoomView, Sdp, ServerMsg, SessionId, SessionKind, SfuCall, SfuReply,
+    TrackKind, TrackName, TrackRef,
 };
 
 const POOL: u32 = 6;
@@ -40,6 +41,10 @@ enum Action {
         pick: usize,
         fail: bool,
     },
+    /// The reply to a pending SFU call is lost.
+    Lose {
+        pick: usize,
+    },
     /// A client answers a pending subscribe offer.
     Answer {
         pick: usize,
@@ -51,7 +56,10 @@ enum Action {
     SocketClosed {
         who: u32,
     },
+    /// The alarm fires at a random time (possibly early or spurious).
     Alarm,
+    /// Time passes until the earliest negotiation deadline or retry, and the alarm fires.
+    NegotiationDue,
     Wait {
         ms: u64,
     },
@@ -60,6 +68,8 @@ enum Action {
 #[derive(Debug, Clone)]
 enum Msg {
     Publish(Vec<TrackKind>),
+    /// Unpublish one of the sender's published kinds, or any kind if they publish none.
+    Unpublish(usize),
     StrayAnswer,
     SetLayer {
         owner: u32,
@@ -88,6 +98,7 @@ fn msg() -> impl Strategy<Value = Msg> {
     let rid = proptest::sample::select(vec![Rid::Low, Rid::Mid, Rid::High]);
     prop_oneof![
         4 => proptest::sample::subsequence(KINDS.to_vec(), 0..=3).prop_map(Msg::Publish),
+        3 => any::<usize>().prop_map(Msg::Unpublish),
         1 => Just(Msg::StrayAnswer),
         2 => (who(), kind(), rid).prop_map(|(owner, kind, rid)| Msg::SetLayer { owner, kind, rid }),
         1 => any::<bool>().prop_map(Msg::Lock),
@@ -108,10 +119,12 @@ fn action() -> impl Strategy<Value = Action> {
         8 => (who(), msg()).prop_map(|(who, msg)| Action::Send { who, msg }),
         1 => (who(), who()).prop_map(|(socket, whose)| Action::Resume { socket, whose }),
         16 => (any::<usize>(), (0..20u8).prop_map(|n| n == 0)).prop_map(|(pick, fail)| Action::Reply { pick, fail }),
+        1 => any::<usize>().prop_map(|pick| Action::Lose { pick }),
         6 => any::<usize>().prop_map(|pick| Action::Answer { pick }),
         1 => (who(), kind()).prop_map(|(who, kind)| Action::TrackClosed { who, kind }),
         1 => who().prop_map(|who| Action::SocketClosed { who }),
         1 => Just(Action::Alarm),
+        1 => Just(Action::NegotiationDue),
         1 => prop_oneof![0..20_000u64, 0..90_000u64].prop_map(|ms| Action::Wait { ms }),
     ]
 }
@@ -135,6 +148,10 @@ struct Sim {
     alarm: Option<Millis>,
     /// How many clients resumed on a new socket.
     rebinds: usize,
+    /// How many tracks were unpublished.
+    unpublished: usize,
+    /// How many publish offers timed out.
+    publish_timeouts: usize,
     ended: bool,
     counter: u32,
 }
@@ -156,6 +173,8 @@ impl Sim {
             recorded: Vec::new(),
             alarm,
             rebinds: 0,
+            unpublished: 0,
+            publish_timeouts: 0,
             ended: false,
             counter: 0,
         }
@@ -229,6 +248,19 @@ impl Sim {
                             tracks,
                         }
                     }
+                    Msg::Unpublish(pick) => {
+                        let published = self
+                            .room
+                            .state
+                            .joined()
+                            .find(|&(owner, ..)| owner == id(who))
+                            .map(|(_, publish, _)| publish.kinds())
+                            .filter(|kinds| !kinds.is_empty())
+                            .unwrap_or_else(|| KINDS.to_vec());
+                        ClientMsg::Unpublish {
+                            kind: published[pick % published.len()],
+                        }
+                    }
                     Msg::StrayAnswer => ClientMsg::SubscribeAnswer {
                         sdp: Sdp::new("stray"),
                     },
@@ -296,6 +328,12 @@ impl Sim {
                     (other, _) => unreachable!("not an SFU call: {other:?}"),
                 })
             }
+            Action::Lose { pick } => {
+                if !self.pending.is_empty() {
+                    self.pending.remove(pick % self.pending.len());
+                }
+                return None;
+            }
             Action::Answer { pick } => {
                 if self.offers.is_empty() {
                     return None;
@@ -313,6 +351,17 @@ impl Sim {
             }
             Action::SocketClosed { who } => Event::SocketClosed { who: id(who) },
             Action::Alarm => Event::AlarmFired,
+            Action::NegotiationDue => {
+                let due = self
+                    .room
+                    .state
+                    .alarms()
+                    .filter(|&(_, reason)| reason != AlarmReason::EmptyRoom)
+                    .map(|(at, _)| at)
+                    .min()?;
+                self.room.now = self.room.now.max(due);
+                Event::AlarmFired
+            }
             Action::Wait { ms } => {
                 self.room.now = self.room.now.after(ms);
                 return None;
@@ -331,6 +380,30 @@ impl Sim {
         }
         let effects = self.room.apply(event.clone());
         self.check(&before, &event, &effects)?;
+        let publish_failed = |e: &Effect| {
+            matches!(
+                e,
+                Effect::Send {
+                    msg: ServerMsg::Error {
+                        code: ErrorCode::PublishFailed
+                    },
+                    ..
+                }
+            )
+        };
+        match &event {
+            Event::Client {
+                msg: ClientMsg::Unpublish { .. },
+                ..
+            } if effects
+                .iter()
+                .any(|e| matches!(e, Effect::SfuCloseTracks { .. })) =>
+            {
+                self.unpublished += 1;
+            }
+            Event::AlarmFired if effects.iter().any(publish_failed) => self.publish_timeouts += 1,
+            _ => {}
+        }
         for effect in effects {
             match effect {
                 Effect::SfuNewSession { .. }
@@ -459,12 +532,13 @@ impl Sim {
         };
         let known =
             |who: &ParticipantId| after.participants.contains_key(who) || Some(*who) == sender;
-        let present = |who: &ParticipantId| {
-            after
+        let present_in = |state: &RoomState, who: &ParticipantId| {
+            state
                 .participants
                 .get(who)
                 .is_some_and(|p| p.connection.presence().is_some())
         };
+        let present = |who: &ParticipantId| present_in(after, who);
         let session_of = |who: &ParticipantId, kind: SessionKind| match after
             .participants
             .get(who)
@@ -503,6 +577,25 @@ impl Sim {
                         effect
                     );
                 }
+                // On the publish session, only an unpublish closes a track: the sender's own,
+                // published one.
+                Effect::SfuCloseTracks { who, session, mids }
+                    if session_of(who, SessionKind::Publish).as_ref() == Some(session) =>
+                {
+                    let unpublished = match event {
+                        Event::Client {
+                            from,
+                            msg: ClientMsg::Unpublish { kind },
+                            ..
+                        } if from == who => before
+                            .joined()
+                            .find(|&(id, ..)| id == *who)
+                            .and_then(|(_, publish, _)| publish.published.get(kind))
+                            .map(|track| track.mid.clone()),
+                        _ => None,
+                    };
+                    prop_assert_eq!(Some(mids.clone()), unpublished.map(|mid| vec![mid]));
+                }
                 Effect::SfuRenegotiate { who, session, .. }
                 | Effect::SfuCloseTracks { who, session, .. }
                 | Effect::SfuUpdateLayer { who, session, .. } => {
@@ -513,8 +606,10 @@ impl Sim {
                         effect
                     );
                 }
-                Effect::RecordTrack { who, .. } | Effect::StopRecordingTrack { who, .. } => {
-                    prop_assert!(present(who), "{effect:?}")
+                Effect::RecordTrack { who, .. } => prop_assert!(present(who), "{effect:?}"),
+                // A participant who leaves in this step stops being recorded.
+                Effect::StopRecordingTrack { who, .. } => {
+                    prop_assert!(present_in(before, who), "{effect:?}")
                 }
                 Effect::SfuSubscribe {
                     who,
@@ -531,7 +626,7 @@ impl Sim {
                     for track in tracks {
                         let published = after.joined().any(|(_, publish, _)| {
                             publish.id == track.session
-                                && publish.published.values().any(|n| *n == track.name)
+                                && publish.published.values().any(|p| p.name == track.name)
                         });
                         prop_assert!(published, "{track:?} is not published");
                     }
@@ -540,18 +635,16 @@ impl Sim {
             }
         }
 
-        // Whoever leaves or is kicked stops reaching every other subscriber.
+        // A track that stops being published under its name (unpublished, replaced, closed by
+        // the SFU, or its owner left or was kicked) stops reaching every subscriber.
         if after.ended.is_none() {
-            let left = before.participants.iter().filter(|&(who, p)| {
-                p.connection.presence().is_some()
-                    && after.participants.get(who).map(|p| &p.connection) == Some(&Connection::Left)
-            });
-            for (&gone, _) in left {
-                for (subscriber, _, subscribe) in before.joined() {
+            let still_joined = |who: ParticipantId| after.joined().any(|(id, ..)| id == who);
+            for (subscriber, _, subscribe) in before.joined() {
+                if still_joined(subscriber) {
                     let received: BTreeSet<_> = subscribe
                         .receiving
                         .iter()
-                        .filter(|(track, _)| track.owner == gone)
+                        .filter(|&(&track, r)| after.resolve(track).as_ref() != Some(&r.remote))
                         .map(|(_, r)| r.mid.clone())
                         .collect();
                     let closed: BTreeSet<_> = effects
@@ -566,7 +659,7 @@ impl Sim {
                         .collect();
                     prop_assert!(
                         received.is_subset(&closed),
-                        "{subscriber:?} still receives {received:?} of {gone:?}: {effects:?}"
+                        "{subscriber:?} still receives {received:?}: {effects:?}"
                     );
                 }
             }
@@ -633,6 +726,19 @@ impl Sim {
             }
         }
 
+        // No negotiation older than the timeout survives an alarm at or after its deadline.
+        if *event == Event::AlarmFired {
+            let now = self.room.now;
+            for (who, publish, subscribe) in after.joined() {
+                for since in [publish.negotiation.since(), subscribe.negotiation.since()] {
+                    prop_assert!(
+                        since.is_none_or(|since| since.after(NEGOTIATION_TIMEOUT_MS) > now),
+                        "{who:?}'s negotiation since {since:?} survived the alarm at {now:?}"
+                    );
+                }
+            }
+        }
+
         // The empty timer runs exactly while nobody is admitted.
         if after.ended.is_none() {
             let admitted = after
@@ -644,26 +750,30 @@ impl Sim {
         Ok(())
     }
 
-    /// While recording, exactly the consenting joined speakers' current audio is recorded.
+    /// While recording, exactly the consenting joined speakers' current audio is recorded:
+    /// nothing is missing and nothing is left over from a track that is gone.
     fn check_recorded(&self) -> Result<(), TestCaseError> {
         let state = &self.room.state;
         if self.ended || state.recording.current().is_none() {
             return Ok(());
         }
-        for (who, ..) in state.joined() {
-            let audio = TrackRef {
-                owner: who,
-                kind: TrackKind::Audio,
-            };
-            if let Some(track) = state.resolve(audio) {
-                prop_assert_eq!(
-                    self.recorded.contains(&track),
-                    state.participants[&who].consent_recording,
-                    "{:?}",
-                    who
-                );
-            }
-        }
+        let expected: BTreeSet<_> = state
+            .joined()
+            .filter(|(who, ..)| state.participants[who].consent_recording)
+            .filter_map(|(owner, ..)| {
+                state.resolve(TrackRef {
+                    owner,
+                    kind: TrackKind::Audio,
+                })
+            })
+            .map(|track| (track.session, track.name))
+            .collect();
+        let recorded: BTreeSet<_> = self
+            .recorded
+            .iter()
+            .map(|track| (track.session.clone(), track.name.clone()))
+            .collect();
+        prop_assert_eq!(recorded, expected);
         Ok(())
     }
 
@@ -728,7 +838,8 @@ fn random_sessions_reach_joined_publishing_and_recording_rooms() {
     let mut runner = TestRunner::deterministic();
     let (mut receiving, mut recording, mut ended) = (0, 0, 0);
     let (mut awaiting, mut resumed, mut retried) = (0, 0, 0);
-    for case in 0..200 {
+    let (mut unpublished, mut publish_timeouts) = (0, 0);
+    for case in 0..400 {
         let actions = proptest::collection::vec(action(), 1..200)
             .new_tree(&mut runner)
             .expect("tree")
@@ -755,12 +866,24 @@ fn random_sessions_reach_joined_publishing_and_recording_rooms() {
         resumed += usize::from(saw[3]);
         retried += usize::from(saw[4]);
         ended += usize::from(sim.ended);
+        unpublished += usize::from(sim.unpublished > 0);
+        publish_timeouts += usize::from(sim.publish_timeouts > 0);
     }
     assert!(
-        [receiving, recording, ended, awaiting, resumed, retried]
-            .iter()
-            .all(|&n| n >= 20),
+        [
+            receiving,
+            recording,
+            ended,
+            awaiting,
+            resumed,
+            retried,
+            unpublished,
+            publish_timeouts
+        ]
+        .iter()
+        .all(|&n| n >= 20),
         "receiving {receiving}, recording {recording}, ended {ended}, \
-         awaiting consent {awaiting}, resumed {resumed}, retry pending {retried}"
+         awaiting consent {awaiting}, resumed {resumed}, retry pending {retried}, \
+         unpublished {unpublished}, publish timed out {publish_timeouts}"
     );
 }

@@ -17,8 +17,9 @@ use crate::shell::{Effect, RemoteTrack};
 /// How long a room may have no admitted participant before it ends.
 pub const EMPTY_ROOM_TIMEOUT_MS: u64 = 2 * 60 * 1000;
 
-/// How long one step of a subscribe negotiation (the SFU's offer, the client's answer, the SFU's
-/// confirmation) may take before the room treats it as failed.
+/// How long one step of a negotiation may take before the room treats it as failed: the SFU's
+/// answer to a publish offer, or one step of a subscribe negotiation (the SFU's offer, the
+/// client's answer, the SFU's confirmation).
 pub const NEGOTIATION_TIMEOUT_MS: u64 = 15 * 1000;
 
 /// How long the room waits before it requests tracks again after a subscription failed.
@@ -80,16 +81,26 @@ pub(crate) enum Connection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PublishSession {
     pub(crate) id: SessionId,
-    pub(crate) published: BTreeMap<TrackKind, TrackName>,
+    pub(crate) published: BTreeMap<TrackKind, PublishedTrack>,
     pub(crate) negotiation: PublishNegotiation,
 }
 
+/// A track the SFU accepted on a publish session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PublishedTrack {
+    pub(crate) name: TrackName,
+    /// The transceiver in the publish session, for closing the track there.
+    pub(crate) mid: Mid,
+}
+
+/// One publish offer at a time. A pending offer fails after [`NEGOTIATION_TIMEOUT_MS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PublishNegotiation {
     Idle,
-    /// The client's offer is at the SFU.
+    /// The client's offer is at the SFU since `since`.
     OfferPending {
         tracks: Vec<LocalTrack>,
+        since: Millis,
     },
 }
 
@@ -146,6 +157,8 @@ pub(crate) struct Offered {
 pub(crate) enum AlarmReason {
     /// The room has been empty for [`EMPTY_ROOM_TIMEOUT_MS`].
     EmptyRoom,
+    /// A participant's publish offer timed out.
+    Publish(ParticipantId),
     /// A participant's subscribe negotiation timed out, or a wanted track is due for a retry.
     Subscribe(ParticipantId),
 }
@@ -196,9 +209,7 @@ impl RoomState {
             .filter_map(|(&id, p)| {
                 let presence = p.connection.presence()?;
                 let tracks = match &p.connection {
-                    Connection::Joined { publish, .. } => {
-                        publish.published.keys().copied().collect()
-                    }
+                    Connection::Joined { publish, .. } => publish.kinds(),
                     _ => Vec::new(),
                 };
                 Some(ParticipantView {
@@ -265,7 +276,7 @@ impl RoomState {
         match &self.participants.get(&track.owner)?.connection {
             Connection::Joined { publish, .. } => Some(RemoteTrack {
                 session: publish.id.clone(),
-                name: publish.published.get(&track.kind)?.clone(),
+                name: publish.published.get(&track.kind)?.name.clone(),
             }),
             _ => None,
         }
@@ -285,10 +296,17 @@ impl RoomState {
         let empty = self
             .empty_since
             .map(|since| (since.after(EMPTY_ROOM_TIMEOUT_MS), AlarmReason::EmptyRoom));
-        let subscribe = self.joined().filter_map(|(who, _, subscribe)| {
-            Some((subscribe.due()?, AlarmReason::Subscribe(who)))
+        let negotiations = self.joined().flat_map(|(who, publish, subscribe)| {
+            let publish = publish.negotiation.since().map(|since| {
+                (
+                    since.after(NEGOTIATION_TIMEOUT_MS),
+                    AlarmReason::Publish(who),
+                )
+            });
+            let subscribe = subscribe.due().map(|at| (at, AlarmReason::Subscribe(who)));
+            publish.into_iter().chain(subscribe)
         });
-        empty.into_iter().chain(subscribe)
+        empty.into_iter().chain(negotiations)
     }
 
     /// The time for [`Effect::SetAlarm`]: the earliest of [`RoomState::alarms`].
@@ -297,6 +315,23 @@ impl RoomState {
             return None;
         }
         self.alarms().map(|(at, _)| at).min()
+    }
+}
+
+impl PublishSession {
+    /// The kinds of the published tracks, sorted.
+    pub(crate) fn kinds(&self) -> Vec<TrackKind> {
+        self.published.keys().copied().collect()
+    }
+}
+
+impl PublishNegotiation {
+    /// When the pending offer reached the SFU; `None` while idle.
+    pub(crate) fn since(&self) -> Option<Millis> {
+        match self {
+            Self::Idle => None,
+            Self::OfferPending { since, .. } => Some(*since),
+        }
     }
 }
 

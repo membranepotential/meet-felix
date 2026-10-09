@@ -11,7 +11,7 @@ use crate::protocol::{
 use crate::shell::{Effect, Event, OfferedTrack, RemoteTrack, SessionKind, SfuCall, SfuReply};
 use crate::state::{
     AlarmReason, Connection, NEGOTIATION_TIMEOUT_MS, Offered, Participant, PublishNegotiation,
-    PublishSession, Receiving, RecordingStatus, RoomState, SUBSCRIBE_RETRY_MS,
+    PublishSession, PublishedTrack, Receiving, RecordingStatus, RoomState, SUBSCRIBE_RETRY_MS,
     SubscribeNegotiation, SubscribeSession,
 };
 
@@ -189,7 +189,10 @@ impl RoomState {
                 self.set_consent(from, consent, fx);
                 Ok(())
             }
-            ClientMsg::PublishOffer { sdp, tracks } => self.publish_offer(from, sdp, tracks, fx),
+            ClientMsg::PublishOffer { sdp, tracks } => {
+                self.publish_offer(now, from, sdp, tracks, fx)
+            }
+            ClientMsg::Unpublish { kind } => self.unpublish(from, kind, fx),
             ClientMsg::SubscribeAnswer { sdp } => self.subscribe_answer(now, from, sdp, fx),
             ClientMsg::SetLayer { track, rid } => self.set_layer(from, track, rid, fx),
             ClientMsg::Leave => {
@@ -404,6 +407,7 @@ impl RoomState {
 
     fn publish_offer(
         &mut self,
+        now: Millis,
         who: ParticipantId,
         sdp: Sdp,
         tracks: Vec<LocalTrack>,
@@ -426,12 +430,13 @@ impl RoomState {
             )
             && tracks
                 .iter()
-                .all(|t| !publish.published.values().any(|name| *name == t.name));
+                .all(|t| !publish.published.values().any(|p| p.name == t.name));
         if !valid {
             return Err(ErrorCode::InvalidOffer);
         }
         publish.negotiation = PublishNegotiation::OfferPending {
             tracks: tracks.clone(),
+            since: now,
         };
         fx.push(Effect::SfuPublish {
             who,
@@ -439,6 +444,29 @@ impl RoomState {
             sdp_offer: sdp,
             tracks,
         });
+        Ok(())
+    }
+
+    /// Stops publishing `who`'s track of `kind`: the consumers (recorder, subscribers) first,
+    /// then the source on the publish session.
+    fn unpublish(
+        &mut self,
+        who: ParticipantId,
+        kind: TrackKind,
+        fx: &mut Effects,
+    ) -> Result<(), ErrorCode> {
+        let publish = self.publish_session_mut(who).ok_or(ErrorCode::NotJoined)?;
+        let track = publish
+            .published
+            .get(&kind)
+            .ok_or(ErrorCode::NotPublished)?;
+        let close = Effect::SfuCloseTracks {
+            who,
+            session: publish.id.clone(),
+            mids: vec![track.mid.clone()],
+        };
+        self.withdraw(who, &[kind], fx);
+        fx.push(close);
         Ok(())
     }
 
@@ -531,16 +559,20 @@ impl RoomState {
         }
     }
 
-    /// Records `who`'s audio if recording is on, they consented, and they publish audio.
-    fn record_audio_of(&self, who: ParticipantId, fx: &mut Effects) {
+    /// `who`'s audio track if the recorder should record it: recording is on, they consented,
+    /// and they publish audio.
+    fn recordable_audio_of(&self, who: ParticipantId) -> Option<RemoteTrack> {
         let consented = self
             .participants
             .get(&who)
             .is_some_and(|p| p.consent_recording);
-        if self.recording.current().is_some()
-            && consented
-            && let Some(track) = self.resolve(audio(who))
-        {
+        (self.recording.current().is_some() && consented)
+            .then(|| self.resolve(audio(who)))
+            .flatten()
+    }
+
+    fn record_audio_of(&self, who: ParticipantId, fx: &mut Effects) {
+        if let Some(track) = self.recordable_audio_of(who) {
             fx.push(Effect::RecordTrack { who, track });
         }
     }
@@ -557,14 +589,7 @@ impl RoomState {
                 tracks,
             } => self.subscribe_offer(now, who, sdp_offer, tracks, fx),
             SfuReply::Renegotiated { who } => self.renegotiated(now, who, fx),
-            SfuReply::TrackClosed { who, kind } => {
-                let removed = self
-                    .publish_session_mut(who)
-                    .and_then(|p| p.published.remove(&kind));
-                if removed.is_some() {
-                    self.unsubscribe_everyone(who, &[kind], fx);
-                }
-            }
+            SfuReply::TrackClosed { who, kind } => self.withdraw(who, &[kind], fx),
             SfuReply::Failed { who, call } => self.sfu_failed(now, who, call, fx),
         }
     }
@@ -634,17 +659,22 @@ impl RoomState {
         let Some(publish) = self.publish_session_mut(who) else {
             return;
         };
-        let PublishNegotiation::OfferPending { tracks } =
+        let PublishNegotiation::OfferPending { tracks, .. } =
             mem::replace(&mut publish.negotiation, PublishNegotiation::Idle)
         else {
             return;
         };
         let kinds: Vec<TrackKind> = tracks.iter().map(|t| t.kind).collect();
-        let replaced: Vec<TrackKind> = tracks
-            .into_iter()
-            .filter_map(|t| publish.published.insert(t.kind, t.name).map(|_| t.kind))
-            .collect();
-        self.unsubscribe_everyone(who, &replaced, fx);
+        // A new track replaces the published track of its kind.
+        self.withdraw(who, &kinds, fx);
+        let publish = self.publish_session_mut(who).expect("checked above");
+        publish.published.extend(tracks.into_iter().map(|t| {
+            let track = PublishedTrack {
+                name: t.name,
+                mid: t.mid,
+            };
+            (t.kind, track)
+        }));
         fx.send(who, ServerMsg::PublishAnswer { sdp: sdp_answer });
         let subscribers: Vec<_> = self
             .joined()
@@ -774,20 +804,7 @@ impl RoomState {
                     fx.push(Effect::CloseSocket { who });
                 }
             }
-            SfuCall::Publish => {
-                let Some(publish) = self.publish_session_mut(who) else {
-                    return;
-                };
-                if publish.negotiation != PublishNegotiation::Idle {
-                    publish.negotiation = PublishNegotiation::Idle;
-                    fx.send(
-                        who,
-                        ServerMsg::Error {
-                            code: ErrorCode::PublishFailed,
-                        },
-                    );
-                }
-            }
+            SfuCall::Publish => self.publish_failed(who, fx),
             SfuCall::Subscribe | SfuCall::Renegotiate => {
                 let Some(subscribe) = self.subscribe_session_mut(who) else {
                     return;
@@ -807,6 +824,24 @@ impl RoomState {
                     self.request_wanted(now, who, fx);
                 }
             }
+        }
+    }
+
+    /// Drops `who`'s pending publish offer, if any, and tells the client it failed, so it may
+    /// offer again.
+    fn publish_failed(&mut self, who: ParticipantId, fx: &mut Effects) {
+        let Some(publish) = self.publish_session_mut(who) else {
+            return;
+        };
+        if mem::replace(&mut publish.negotiation, PublishNegotiation::Idle)
+            != PublishNegotiation::Idle
+        {
+            fx.send(
+                who,
+                ServerMsg::Error {
+                    code: ErrorCode::PublishFailed,
+                },
+            );
         }
     }
 
@@ -895,6 +930,26 @@ impl RoomState {
         }
     }
 
+    /// Forgets `owner`'s published tracks of these kinds, if any: stops recording the audio
+    /// track if it is recorded and stops sending the tracks to everyone else. Leaves the publish
+    /// session to the caller.
+    fn withdraw(&mut self, owner: ParticipantId, kinds: &[TrackKind], fx: &mut Effects) {
+        if kinds.contains(&TrackKind::Audio)
+            && let Some(track) = self.recordable_audio_of(owner)
+        {
+            fx.push(Effect::StopRecordingTrack { who: owner, track });
+        }
+        let Some(publish) = self.publish_session_mut(owner) else {
+            return;
+        };
+        let removed: Vec<TrackKind> = kinds
+            .iter()
+            .copied()
+            .filter(|kind| publish.published.remove(kind).is_some())
+            .collect();
+        self.unsubscribe_everyone(owner, &removed, fx);
+    }
+
     /// Stops sending `owner`'s tracks of these kinds to everyone else.
     fn unsubscribe_everyone(
         &mut self,
@@ -928,7 +983,7 @@ impl RoomState {
     }
 
     fn leave(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
-        let Some(p) = self.participants.get_mut(&who) else {
+        let Some(p) = self.participants.get(&who) else {
             return;
         };
         let published = match &p.connection {
@@ -936,10 +991,13 @@ impl RoomState {
             Connection::Knocking | Connection::AwaitingConsent | Connection::Connecting { .. } => {
                 Vec::new()
             }
-            Connection::Joined { publish, .. } => publish.published.keys().copied().collect(),
+            Connection::Joined { publish, .. } => publish.kinds(),
         };
-        p.connection = Connection::Left;
-        self.unsubscribe_everyone(who, &published, fx);
+        self.withdraw(who, &published, fx);
+        self.participants
+            .get_mut(&who)
+            .expect("checked above")
+            .connection = Connection::Left;
         let anyone_admitted = self
             .participants
             .values()
@@ -958,6 +1016,8 @@ impl RoomState {
         for reason in due {
             match reason {
                 AlarmReason::EmptyRoom => return self.end(now, fx),
+                // Due only once the pending offer timed out.
+                AlarmReason::Publish(who) => self.publish_failed(who, fx),
                 AlarmReason::Subscribe(who) => {
                     let timed_out = self
                         .joined()

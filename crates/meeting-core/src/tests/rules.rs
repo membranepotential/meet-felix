@@ -454,7 +454,7 @@ fn publish_offers_are_validated_and_serialized() {
     );
     assert!(matches!(
         room.client(GUEST, offer(&[TrackKind::Audio])).as_slice(),
-        [Effect::SfuPublish { .. }]
+        [Effect::SfuPublish { .. }, Effect::SetAlarm { .. }]
     ));
     assert_eq!(
         room.client(GUEST, offer(&[TrackKind::Video])),
@@ -649,5 +649,143 @@ fn an_unanswered_subscribe_offer_times_out_and_is_requested_again() {
     assert!(matches!(
         room.apply(Event::AlarmFired).as_slice(),
         [Effect::SfuSubscribe { tracks, .. }, Effect::SetAlarm { .. }] if tracks == &[track]
+    ));
+}
+
+/// The host publishes audio and the guest receives it; returns the track and the guest's mid.
+fn guest_receives_host_audio(room: &mut Room) -> (RemoteTrack, Mid) {
+    let track = host_publishes_audio(room);
+    let mid = Mid::new("sub-audio");
+    room.sfu(SfuReply::SubscribeOffer {
+        who: GUEST,
+        sdp_offer: Sdp::new("offer"),
+        tracks: vec![OfferedTrack {
+            mid: mid.clone(),
+            track: track.clone(),
+        }],
+    });
+    room.client(
+        GUEST,
+        ClientMsg::SubscribeAnswer {
+            sdp: Sdp::new("answer"),
+        },
+    );
+    room.sfu(SfuReply::Renegotiated { who: GUEST });
+    (track, mid)
+}
+
+#[test]
+fn unpublishing_closes_the_track_everywhere_and_stops_recording_it() {
+    let mut room = meeting_room();
+    let (track, mid) = guest_receives_host_audio(&mut room);
+    let effects = room.client(HOST, ClientMsg::SetRecording { on: true });
+    assert!(effects.contains(&Effect::RecordTrack {
+        who: HOST,
+        track: track.clone()
+    }));
+
+    let effects = room.client(
+        HOST,
+        ClientMsg::Unpublish {
+            kind: TrackKind::Audio,
+        },
+    );
+    let [
+        Effect::Broadcast {
+            msg: ServerMsg::State { state },
+            ..
+        },
+        rest @ ..,
+    ] = effects.as_slice()
+    else {
+        panic!("unexpected effects {effects:#?}");
+    };
+    assert!(state.participants.iter().all(|p| p.tracks.is_empty()));
+    assert_eq!(
+        rest,
+        [
+            Effect::StopRecordingTrack { who: HOST, track },
+            Effect::SfuCloseTracks {
+                who: GUEST,
+                session: session(GUEST, SessionKind::Subscribe),
+                mids: vec![mid]
+            },
+            Effect::SfuCloseTracks {
+                who: HOST,
+                session: session(HOST, SessionKind::Publish),
+                mids: vec![Mid::new("Audio")]
+            },
+        ]
+    );
+    assert_eq!(
+        room.client(
+            HOST,
+            ClientMsg::Unpublish {
+                kind: TrackKind::Audio
+            }
+        ),
+        error(HOST, ErrorCode::NotPublished)
+    );
+    // The kind may be published again, under the same name.
+    assert!(matches!(
+        room.publish(HOST, &[TrackKind::Audio]).as_slice(),
+        [Effect::Broadcast { .. }, ..]
+    ));
+}
+
+#[test]
+fn a_recorded_speaker_who_leaves_or_is_kicked_is_no_longer_recorded() {
+    for (who, msg) in [
+        (GUEST, ClientMsg::Leave),
+        (HOST, ClientMsg::Kick { who: GUEST }),
+    ] {
+        let mut room = meeting_room();
+        room.client(HOST, ClientMsg::SetRecording { on: true });
+        room.publish(GUEST, &[TrackKind::Audio]);
+        let track = RemoteTrack {
+            session: session(GUEST, SessionKind::Publish),
+            name: track_name(GUEST, TrackKind::Audio),
+        };
+        assert!(
+            room.client(who, msg)
+                .contains(&Effect::StopRecordingTrack { who: GUEST, track })
+        );
+    }
+}
+
+#[test]
+fn an_unanswered_publish_offer_times_out_and_a_new_offer_goes_through() {
+    let mut room = meeting_room();
+    let offer = || ClientMsg::PublishOffer {
+        sdp: Sdp::new("offer"),
+        tracks: vec![super::support::local_track(GUEST, TrackKind::Audio)],
+    };
+    let deadline = room.now.after(NEGOTIATION_TIMEOUT_MS);
+    assert!(matches!(
+        room.client(GUEST, offer()).as_slice(),
+        [Effect::SfuPublish { .. }, Effect::SetAlarm { at }] if *at == deadline
+    ));
+    room.now = Millis(deadline.0 - 1);
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        [Effect::SetAlarm { at: deadline }]
+    );
+
+    room.now = deadline;
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        error(GUEST, ErrorCode::PublishFailed)
+    );
+    // A late answer to the dropped offer changes nothing.
+    assert_eq!(
+        room.sfu(SfuReply::Published {
+            who: GUEST,
+            sdp_answer: Sdp::new("late")
+        }),
+        []
+    );
+    assert!(matches!(
+        room.client(GUEST, offer()).as_slice(),
+        [Effect::SfuPublish { .. }, Effect::SetAlarm { .. }]
     ));
 }

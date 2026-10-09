@@ -190,11 +190,13 @@ pub enum Effect {
         /// The client's answer.
         sdp_answer: Sdp,
     },
-    /// Stop sending these tracks on a subscribe session, without renegotiation. No reply.
+    /// Close these transceivers without renegotiation. No reply. On a subscribe session the SFU
+    /// stops sending the remote tracks; on the publish session (after
+    /// [`ClientMsg::Unpublish`]) it drops the participant's own track.
     SfuCloseTracks {
-        /// The subscriber.
+        /// The session's owner.
         who: ParticipantId,
-        /// Their subscribe session.
+        /// One of their sessions.
         session: SessionId,
         /// The transceivers to close.
         mids: Vec<Mid>,
@@ -213,8 +215,8 @@ pub enum Effect {
         rid: Rid,
     },
     /// Fire [`Event::AlarmFired`] at this time, replacing any earlier alarm. The room has one
-    /// alarm, at the earliest time it must act: when an empty room ends, when a subscribe
-    /// negotiation times out, or when a failed subscription is retried. It emits this whenever
+    /// alarm, at the earliest time it must act: when an empty room ends, when a publish offer or
+    /// a subscribe negotiation times out, or when a failed subscription is retried. It emits this whenever
     /// that time changes and after every alarm; it never clears an alarm, because a spurious
     /// one is harmless.
     SetAlarm {
@@ -233,7 +235,8 @@ pub enum Effect {
         /// Their audio track.
         track: RemoteTrack,
     },
-    /// Stop recording this audio track: its speaker withdrew consent.
+    /// Stop recording this audio track: its speaker withdrew consent, unpublished or replaced
+    /// it, or left.
     StopRecordingTrack {
         /// The speaker.
         who: ParticipantId,

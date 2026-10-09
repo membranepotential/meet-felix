@@ -8,10 +8,11 @@ rust-version.workspace = true
 
 [features]
 # TypeScript declarations (tsify) and a small wasm-bindgen API for the browser shell.
-wasm = ["dep:tsify", "dep:wasm-bindgen"]
+wasm = ["dep:serde_json", "dep:tsify", "dep:wasm-bindgen"]
 
 [dependencies]
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
 tsify = { version = "0.5.8", default-features = false, features = ["js"], optional = true }
 wasm-bindgen = { version = "0.2.129", optional = true }
 

@@ -87,7 +87,7 @@ fn update_request_matches_the_openapi_simulcast_example() {
             }),
         }],
     };
-    // The docs' sample prefers rid "h"; the core's layers are named low/mid/high.
+    // The docs' sample prefers rid "h"; the core names its layers q/h/f on the wire (High = "f").
     assert_eq!(
         to_json(&request),
         json!({
@@ -97,7 +97,7 @@ fn update_request_matches_the_openapi_simulcast_example() {
             "trackName": "simulcast-track",
             "mid": "8",
             "simulcast": {
-              "preferredRid": "high",
+              "preferredRid": "f",
               "priorityOrdering": "asciibetical",
               "ridNotAvailable": "asciibetical"
             }

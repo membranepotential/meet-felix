@@ -16,16 +16,19 @@
 //! - Every change to the public [`RoomView`] reaches every joined client, so all of them see a
 //!   recording start; only consenting participants' audio is recorded.
 //! - Each participant has a publish session (the client offers) and a subscribe session (the SFU
-//!   offers, one negotiation at a time); new tracks reach every other joined participant, and a
-//!   leaving participant's tracks are closed on all subscribers. A track stays wanted until a
-//!   negotiation delivers it; a failed or timed-out negotiation is retried after
-//!   [`SUBSCRIBE_RETRY_MS`].
+//!   offers, one negotiation at a time); new tracks reach every other joined participant, and an
+//!   unpublished track or a leaving participant's tracks are closed on all subscribers and no
+//!   longer recorded. A track stays wanted until a negotiation delivers it; a failed or
+//!   timed-out subscribe negotiation is retried after [`SUBSCRIBE_RETRY_MS`]. A publish offer
+//!   the SFU does not answer within [`NEGOTIATION_TIMEOUT_MS`] fails, so the client may offer
+//!   again.
 //! - A client whose socket dropped takes its place again with its [`ResumeToken`].
 //! - The room ends when a host ends it or after [`EMPTY_ROOM_TIMEOUT_MS`] without admitted
 //!   participants; knocking guests do not count.
 //!
 //! With the `wasm` feature, the message and id types derive `tsify` TypeScript declarations,
-//! and `validateMeetingId` / `generateMeetingId` are exported through `wasm-bindgen`.
+//! and `validateMeetingId`, `generateMeetingId`, `parseServerMsg` and `encodeClientMsg` are
+//! exported through `wasm-bindgen`.
 
 mod ids;
 mod protocol;
@@ -51,4 +54,4 @@ pub use shell::{Effect, Event, OfferedTrack, RemoteTrack, SessionKind, SfuCall, 
 pub use state::{EMPTY_ROOM_TIMEOUT_MS, NEGOTIATION_TIMEOUT_MS, RoomState, SUBSCRIBE_RETRY_MS};
 pub use step::step;
 #[cfg(feature = "wasm")]
-pub use wasm::{generate_meeting_id, validate_meeting_id};
+pub use wasm::{encode_client_msg, generate_meeting_id, parse_server_msg, validate_meeting_id};

@@ -83,11 +83,15 @@ Rules that follow from the SFU limits:
   offer.
 - Track names (2026-10-09): `mic-N`, `cam-N` and `screen-N`, where `N`
   counts the tracks published in this publish session. The core rejects a
-  name already in use, and the protocol has no unpublish message, so a
-  re-published kind needs a new name; the core then replaces the old track
-  on every subscriber. Subscribers notice a turned-off track because it
+  name already in use. Publishing a kind again replaces the old track on
+  every subscriber. Subscribers notice a turned-off track because it
   stops delivering frames (the browser reports `mute`), and show the
   participant's initials instead.
+- Unpublishing (2026-10-09): `ClientMsg::Unpublish { kind }` stops a track
+  at once, so a turned-off camera does not stay listed until the SFU drops it
+  after 30 idle seconds. The core closes the track on the publish session
+  and on every subscriber (`Effect::SfuCloseTracks`), stops recording it if
+  it was recorded, and removes the kind from the participant's `tracks`.
 - When a participant leaves, the core closes their tracks on every
   subscriber (`Effect::SfuCloseTracks`), so no subscriber keeps a dead track.
 
@@ -102,12 +106,21 @@ layer per track, with `preferredRid` on `tracks/new`, and switches with
 `Effect::SfuUpdateLayer`. The browser picks the layer from the tile size.
 
 Layer choice in the web shell (2026-10-09): the encodings' `rid`s are the
-core's `Rid` names `low`, `mid` and `high` (`scaleResolutionDownBy` 4, 2
-and 1). Each received camera tile reports its rendered width in CSS pixels;
-below 240 px it asks for `low`, below 640 px for `mid`, otherwise `high`.
-The browser sends `SetLayer` only after the track has arrived and only when
-the layer changes, 400 ms after the last size change. A new subscription
-starts at the SFU default, `high`.
+core's `Rid` names `q` (quarter), `h` (half) and `f` (full), with
+`scaleResolutionDownBy` 4, 2 and 1. Each received camera tile reports its
+rendered width in CSS pixels; below 240 px it asks for `q`, below 640 px for
+`h`, otherwise `f`. The browser sends `SetLayer` only after the track has
+arrived and only when the layer changes, 400 ms after the last size change.
+A new subscription starts at `f`.
+
+Why these names (2026-10-09): when the preferred layer is unavailable, the
+SFU switches to the next `rid` in alphabetical order (`ridNotAvailable:
+"asciibetical"`), so the names must sort from the best layer to the worst.
+`f` < `h` < `q` falls back one step at a time; the earlier names `low`, `mid`
+and `high` sort as `high` < `low` < `mid`, so a missing `high` fell back to
+`low` and skipped `mid`. Cloudflare's docs use the same names
+([Simulcast](https://developers.cloudflare.com/realtime/sfu/simulcast/),
+checked 2026-10-09).
 
 A screen share uses one or two layers, a low maximum frame rate, and
 `contentHint = "detail"`, which keeps text sharp.
