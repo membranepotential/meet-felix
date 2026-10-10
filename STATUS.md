@@ -4,10 +4,11 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- first-pull — shorten the first-pull retry: `SUBSCRIBE_RETRY_MS` = 3 s serves the not-found path and the failure path alike; measure the window against the real SFU, give the not-found path its own shorter retry — implementer-high running — next: code-reviewer, deploy when no meeting is live
+- polish — small follow-ups the day's reviews collected (log level for not_found_track_error, the resize bug of the control bar, lobby heading under the consent dialog, stale doc lines) — implementer-high running — next: commit, deploy when no meeting is live
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-10 Deployed version 8c934a70, commit b3c5287: first pull retried after 500 ms (5×, then 3 s) when the SFU does not know the track yet; slowest first pull 4.2 s → 1.9 s against the real SFU; core 72, sfu-api 16.
 - 2026-10-10 Deployed version 6fedc9d7, commit 397dab6: simulcast layer holds (`priorityOrdering: none`; the SFU climbed back to full after 12 s with `asciibetical`), real-SFU hold check and a five-person run (2 @real passed); sfu-api 16 tests.
 - 2026-10-10 Deployed version db689400, commit 0df5c5b: recorder e2e as the Playwright project `recorder` (`pnpm test:e2e:recorder`, real Whisper, 1 passed), run.mjs deleted, data-testids in the fixtures; e2e 64 passed 3 skipped.
 - 2026-10-10 Deployed version 4ed4cdfc, commit ec55203: an ended room deletes its storage an hour after End (retention alarm, pending recorder /end retried first); worker 56 tests.
@@ -40,10 +41,12 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
-In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"); triage of 2026-10-10 pruned the done items.
-1. Shorten the first-pull (in Now) retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
-2. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
-- Owner, manual: observe hibernation, egress and neurons on the dashboard after real use; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
+In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"). The 2026-10-10 backlog is done except the last core item.
+1. Subscriber-side step-down on a weak link: since `priorityOrdering: none` the SFU no longer lowers the layer by itself; pick a lower layer when inbound loss is high or the bitrate low, if real use shows frozen video.
+2. Start the first pull from the publisher's first packets rather than its connection: the SFU still refuses pulls for 0.5–1 s after `connected` (measured 2026-10-10).
+3. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today); never observed in five real-SFU runs on 2026-10-10.
+4. Known gaps documented in D35: a kick or a PublishAnswer during the grace is lost; the kicked client comes back as a new guest.
+- Owner, manual: try on the iPhone the Devices dialog (front/back camera), "Reconnecting…" tiles after a drop, "Join as host" from inside a meeting; observe hibernation, egress and neurons on the dashboard; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
 
 ## Open questions
 - Workers Free is the plan for now (owner, 2026-10-09): Workers AI gives 10,000 neurons/day ≈ 214 speaker-minutes of Whisper, calls beyond that fail; the transcript job retries after the daily reset. Realtime SFU/TURN bill separately (1,000 GB free). 10 ms CPU per invocation applies.

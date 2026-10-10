@@ -53,6 +53,8 @@ Next: the SFU still refuses pulls for 0.5–1 s after the publisher reports
 by the publisher's first packets would save the rest; not worth it now.
 Deploy when no meeting runs.
 
+Deployed as version 8c934a70 (commit b3c5287) with no meeting live.
+
 ## 2026-10-10 — A smaller simulcast layer holds; a five-party run
 
 STATUS Next item 1. Against the real SFU a subscriber that asked for the
