@@ -31,6 +31,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
+- Switch camera and microphone inside a live meeting (the owner looked for it in the 2026-10-10 meeting; devices are chosen only on the pre-join page).
 - Against the real SFU the decoded layer went back to full ~12 s after `setLayer h` without a new SetLayer (e2e @real flake): check whether the preference is lost when a track is pulled again.
 - Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs adapters/websocket/new); add data-testids the e2e agent asked for (tiles, pills, meeting view, transcript link).
 - 'Join as host' inside a live meeting; shorten the first-pull retry (3 s) or pull after the publisher connects.
