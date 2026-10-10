@@ -11,11 +11,12 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import type { LocalMedia } from '../local-media.svelte.ts';
-	import type { CaptureError } from '../media/capture.ts';
+	import { describeCaptureError } from '../media/capture.ts';
 	import { showStream } from '../media/video.ts';
 	import type { OwnerSession } from '../owner-session.svelte.ts';
 	import { OWNER_NAME, hostOffer } from '../owner-state.ts';
 	import type { MeetingId, RecordingPolicy } from '../protocol.ts';
+	import DevicePickers from './DevicePickers.svelte';
 	import Icon from './Icon.svelte';
 	import LoginForm from './LoginForm.svelte';
 
@@ -69,23 +70,6 @@
 		prefillOwner();
 		if (canJoin) onjoin(recorded);
 	}
-
-	function describe(error: CaptureError): string {
-		switch (error) {
-			case 'denied':
-				return 'Camera and microphone are blocked. Allow them in your browser’s site settings, then try again.';
-			case 'not-found':
-				return 'No camera or microphone was found. You can still join and listen.';
-			case 'in-use':
-				return 'Another app is using your camera or microphone. Close it, then try again.';
-			case 'overconstrained':
-				return 'The selected device cannot be used. Pick another one.';
-			case 'insecure':
-				return 'This page needs HTTPS to use your camera and microphone.';
-			case 'unknown':
-				return 'Camera and microphone could not start. Try again.';
-		}
-	}
 </script>
 
 <main>
@@ -126,7 +110,7 @@
 			{#if media.error}
 				<div class="error" role="alert">
 					<Icon name="alert" size={18} />
-					<p>{describe(media.error)}</p>
+					<p>{describeCaptureError(media.error)}</p>
 					{#if media.error !== 'insecure'}
 						<button class="button quiet" type="button" onclick={() => media.start()}
 							>Try again</button
@@ -149,32 +133,7 @@
 			{#if media.devices.microphones.length > 0 || media.devices.cameras.length > 0}
 				<details class="devices">
 					<summary>Microphone and camera</summary>
-					{#if media.devices.microphones.length > 0}
-						<label class="field">
-							<span>Microphone</span>
-							<select
-								value={media.tracks.audio?.getSettings().deviceId ?? media.choice.microphone ?? ''}
-								onchange={(e) => media.selectMicrophone(e.currentTarget.value)}
-							>
-								{#each media.devices.microphones as device (device.id)}
-									<option value={device.id}>{device.label}</option>
-								{/each}
-							</select>
-						</label>
-					{/if}
-					{#if media.devices.cameras.length > 0}
-						<label class="field">
-							<span>Camera</span>
-							<select
-								value={media.tracks.video?.getSettings().deviceId ?? media.choice.camera ?? ''}
-								onchange={(e) => media.selectCamera(e.currentTarget.value)}
-							>
-								{#each media.devices.cameras as device (device.id)}
-									<option value={device.id}>{device.label}</option>
-								{/each}
-							</select>
-						</label>
-					{/if}
+					<DevicePickers {media} />
 				</details>
 			{/if}
 
@@ -402,10 +361,6 @@
 		margin-bottom: 0.5rem;
 	}
 
-	.devices .field + .field {
-		margin-top: 1rem;
-	}
-
 	.field {
 		display: grid;
 		gap: 0.375rem;
@@ -413,8 +368,7 @@
 		color: var(--lichen);
 	}
 
-	input,
-	select {
+	input {
 		min-height: 48px;
 		padding: 0 0.875rem;
 		border: 1px solid var(--reed);
@@ -424,8 +378,7 @@
 		color: var(--fog);
 	}
 
-	input:focus-visible,
-	select:focus-visible {
+	input:focus-visible {
 		border-color: var(--lamp);
 	}
 

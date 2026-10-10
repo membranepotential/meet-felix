@@ -100,9 +100,9 @@ On a clean checkout (CI or a new machine):
 4. Install the browsers of the pinned Playwright version:
    `pnpm --filter web exec playwright install chromium firefox`
    (on a CI runner add `--with-deps` for the system libraries).
-5. Run `pnpm test:e2e`. Expected: the build output, then about 58 tests, of
-   which 2 are skipped (the keepalive test without `E2E_SLOW=1`, and screen
-   sharing in Firefox).
+5. Run `pnpm test:e2e`. Expected: the build output, then about 60 tests, of
+   which 3 are skipped (the keepalive test without `E2E_SLOW=1`, and screen
+   sharing and the device switch in Firefox).
 
 For `pnpm test:e2e:real`, put `CREATE_SECRET`, `CALLS_APP_ID` and
 `CALLS_APP_SECRET` into the git-ignored `.dev.vars` at the repo root; the
@@ -176,9 +176,13 @@ Tests import `test` and `expect` from
   `startCall`; [`fixtures/media-stats.ts`](../web/e2e/fixtures/media-stats.ts)
   reads `getStats()` for the real-SFU test.
 
-Chromium runs with `--use-fake-device-for-media-stream` and
+Chromium runs with `--use-fake-device-for-media-stream=device-count=2` and
 `--use-fake-ui-for-media-stream`, Firefox with `media.navigator.streams.fake`
-and `media.navigator.permission.disabled`.
+and `media.navigator.permission.disabled`. `device-count=2` gives Chromium two
+fake cameras (`fake_device_0`, `fake_device_1`) and three fake microphones
+("Fake Default Audio Input", "Fake Audio Input 1", "Fake Audio Input 2"), so
+the device switch test has a second device to switch to. Firefox fakes one
+device per kind, so that test runs in Chromium only.
 
 ### What each spec covers
 
@@ -201,7 +205,7 @@ Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
 | Spec | Covers |
 |---|---|
 | `owner.spec.ts` | Login on `/` (wrong password, then the owner area), creating a meeting, logout; `/meetings` shows Scheduled, Live and Ended with the transcript link |
-| `call.spec.ts` | The owner's pre-join (name prefilled, "You join as host"); a guest's pre-join (recording notice, "not started yet") and lobby, let in when the host joins; tiles with names, the recording badge, host controls only for the host; mute, camera off and on (the guest's view of the host follows the room), a host muting a guest; screen share with the expand button, control bar visible while expanded for both sides (Chromium only); leave, end for all, the ended page with the transcript link, a late join |
+| `call.spec.ts` | The owner's pre-join (name prefilled, "You join as host"); a guest's pre-join (recording notice, "not started yet") and lobby, let in when the host joins; tiles with names, the recording badge, host controls only for the host; mute, camera off and on (the guest's view of the host follows the room), a host muting a guest; the device pickers on the pre-join; switching camera and microphone in the "Devices" dialog swaps the tracks on the publish connection's senders without an unpublish or a new publish offer, and the guest still sees the host's video (Chromium only); screen share with the expand button, control bar visible while expanded for both sides (Chromium only); leave, end for all, the ended page with the transcript link, a late join |
 | `recovery.spec.ts` | The SFU loses the guest's subscribe session: `SubscribeReset`, a new session, negotiation on it; a failed peer connection (simulated in the page): "Reconnecting to the others…", `ResetSession`, a new session; a dropped socket (through `page.routeWebSocket`): the "Reconnecting…" pill, then a `Join` with the resume token and the same participant |
 | `real-sfu.spec.ts` (`@real`) | Three people through the real SFU: each receives the others' video (bytes and decoded frames per tile) and audio; a small window gets a smaller simulcast layer; a screen share reaches the others; 60 s without a new socket or session reset while media keeps flowing |
 

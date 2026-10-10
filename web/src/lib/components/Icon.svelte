@@ -19,7 +19,8 @@
 		| 'info'
 		| 'alert'
 		| 'fullscreen'
-		| 'fullscreen-exit';
+		| 'fullscreen-exit'
+		| 'devices';
 </script>
 
 <script lang="ts">
@@ -82,5 +83,11 @@
 		<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />
 	{:else if name === 'fullscreen-exit'}
 		<path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" />
+	{:else if name === 'devices'}
+		<!-- Three sliders; each line leaves a gap for its knob. -->
+		<path d="M4 7h3M11 7h9M4 12h9M17 12h3M4 17h2M10 17h10" />
+		<circle cx="9" cy="7" r="2" />
+		<circle cx="15" cy="12" r="2" />
+		<circle cx="8" cy="17" r="2" />
 	{/if}
 </svg>

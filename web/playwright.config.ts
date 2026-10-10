@@ -10,7 +10,8 @@ const CI = process.env.CI !== undefined && process.env.CI !== '';
 
 const chromiumMedia = {
 	args: [
-		'--use-fake-device-for-media-stream',
+		// Two cameras and three mics, so a test can switch devices (Firefox fakes one of each).
+		'--use-fake-device-for-media-stream=device-count=2',
 		'--use-fake-ui-for-media-stream',
 		'--autoplay-policy=no-user-gesture-required'
 	]

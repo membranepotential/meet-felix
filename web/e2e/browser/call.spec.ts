@@ -1,10 +1,24 @@
 /**
  * A call through the UI against the mock SFU, which negotiates but carries no media: who sees
- * whom, the controls and how the room view follows them, screen sharing, leaving and ending.
+ * whom, the controls and how the room view follows them, switching devices, screen sharing,
+ * leaving and ending.
  */
+import type { Page } from '@playwright/test';
 import { createMeeting } from '../fixtures/api.ts';
 import { hostPreJoin, OWNER_NAME, startCall } from '../fixtures/call.ts';
 import { expect, test } from '../fixtures/test.ts';
+
+/** The labels of the tracks the page's senders carry, by kind (the publish connection's). */
+function sentTrackLabels(page: Page): Promise<Record<string, string>> {
+	return page.evaluate(() =>
+		Object.fromEntries(
+			(window.__e2ePeerConnections ?? [])
+				.filter((pc) => pc.connectionState !== 'closed')
+				.flatMap((pc) => pc.getSenders())
+				.flatMap((s) => (s.track ? [[s.track.kind, s.track.label]] : []))
+		)
+	);
+}
 
 test('the owner’s pre-join knows the host: name prefilled, no password, no "Join as host"', async ({
 	api,
@@ -16,6 +30,10 @@ test('the owner’s pre-join knows the host: name prefilled, no password, no "Jo
 	await expect(host.page.getByLabel('Your name')).toHaveValue(OWNER_NAME);
 	await expect(host.page.getByRole('button', { name: 'Join as host' })).toHaveCount(0);
 	await expect(host.page.locator('input[type=password]')).toHaveCount(0);
+	// The device pickers sit folded under the preview.
+	await host.page.getByText('Microphone and camera', { exact: true }).click();
+	await expect(host.page.getByRole('combobox', { name: 'Microphone' })).toBeVisible();
+	await expect(host.page.getByRole('combobox', { name: 'Camera' })).toBeVisible();
 });
 
 test('a guest waits for the host and is let in when the host joins', async ({
@@ -144,6 +162,60 @@ test('screen share: a featured tile that expands, for the sharer and the others'
 	await expect(guest.tiles).toHaveCount(2);
 	await expect(header).toBeVisible();
 	await expect.poll(() => guest.page.evaluate(() => document.fullscreenElement)).toBeNull();
+});
+
+test('devices: switching camera and mic in the meeting swaps the tracks without a new publish', async ({
+	api,
+	owner,
+	host,
+	guest,
+	browserName
+}) => {
+	test.skip(browserName !== 'chromium', 'only Chromium fakes more than one device per kind');
+	const meeting = await createMeeting(api, owner.headers, 'hostDecides');
+	await startCall(meeting, host, [{ who: guest, name: 'Guest' }]);
+	const hostOnGuest = guest.tile(OWNER_NAME);
+	await expect(hostOnGuest.locator('video')).toBeAttached();
+	await expect
+		.poll(() => sentTrackLabels(host.page))
+		.toEqual({
+			audio: 'Fake Default Audio Input',
+			video: 'fake_device_0'
+		});
+	const offers = host.sent('publishOffer').length;
+
+	await host.control('Devices').click();
+	const dialog = host.page.getByRole('dialog', { name: 'Microphone and camera' });
+	await expect(dialog).toBeVisible();
+	const camera = dialog.getByRole('combobox', { name: 'Camera' });
+	const microphone = dialog.getByRole('combobox', { name: 'Microphone' });
+	await camera.selectOption({ label: 'fake_device_1' });
+	await microphone.selectOption({ label: 'Fake Audio Input 2' });
+
+	// The new tracks went onto the existing senders: no unpublish, no new offer.
+	await expect
+		.poll(() => sentTrackLabels(host.page))
+		.toEqual({
+			audio: 'Fake Audio Input 2',
+			video: 'fake_device_1'
+		});
+	expect(host.sent('unpublish')).toEqual([]);
+	expect(host.sent('publishOffer')).toHaveLength(offers);
+	await expect(camera.locator('option:checked')).toHaveText('fake_device_1');
+	await expect(microphone.locator('option:checked')).toHaveText('Fake Audio Input 2');
+
+	await expect(host.tile(`${OWNER_NAME} (you)`).locator('video')).toBeAttached();
+	await expect(hostOnGuest.locator('video')).toBeAttached();
+	const hostView = guest
+		.received('state')
+		.at(-1)
+		?.state.participants.find((p) => p.role === 'host');
+	expect(hostView?.tracks).toEqual(expect.arrayContaining(['audio', 'video']));
+
+	await dialog.getByRole('button', { name: 'Done' }).click();
+	await expect(dialog).toBeHidden();
+	await host.control('Mute').click();
+	await expect(host.control('Unmute')).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('a guest leaves; the host ends the meeting for everyone, with the transcript link', async ({

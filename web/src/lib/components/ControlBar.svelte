@@ -1,7 +1,8 @@
 <script lang="ts">
 	import type { LocalMedia } from '../local-media.svelte.ts';
-	import { canShareScreen } from '../media/capture.ts';
+	import { canShareScreen, describeSwitchError } from '../media/capture.ts';
 	import type { Session } from '../session.svelte.ts';
+	import DevicePickers from './DevicePickers.svelte';
 	import Icon from './Icon.svelte';
 
 	let { media, session }: { media: LocalMedia; session: Session } = $props();
@@ -9,9 +10,14 @@
 	const shareable = canShareScreen();
 	let hostOpen = $state(false);
 	let confirmEnd: HTMLDialogElement | undefined = $state();
+	let devicesDialog: HTMLDialogElement | undefined = $state();
 
 	let locked = $derived(session.room?.locked ?? false);
 	let recording = $derived(session.room?.recording !== undefined);
+	/** Devices are listed once a permission is granted; without any there is nothing to pick. */
+	let hasDevices = $derived(
+		media.devices.microphones.length > 0 || media.devices.cameras.length > 0
+	);
 
 	async function toggleShare() {
 		if (media.screen) {
@@ -27,6 +33,12 @@
 		if (!(await media.restartMic())) {
 			session.toasts.show('The microphone did not start. Try again.', 'alert');
 		}
+	}
+
+	/** An old failure (a pick long ago, a lost camera) must not greet the user in the dialog. */
+	function openDevices() {
+		media.error = null;
+		devicesDialog?.showModal();
 	}
 
 	function endForEveryone() {
@@ -64,6 +76,13 @@
 		<Icon name={media.camOn ? 'camera' : 'camera-off'} />
 		<span class="label">{media.camOn ? 'Stop video' : 'Start video'}</span>
 	</button>
+
+	{#if hasDevices}
+		<button type="button" class="control" onclick={openDevices}>
+			<Icon name="devices" />
+			<span class="label">Devices</span>
+		</button>
+	{/if}
 
 	{#if shareable}
 		<button
@@ -120,6 +139,23 @@
 		<span class="label">Leave</span>
 	</button>
 </div>
+
+<!-- Device switches take effect at once; the others see the new camera or hear the new mic. -->
+<dialog class="dialog" bind:this={devicesDialog} aria-labelledby="devices-title">
+	<h2 id="devices-title">Microphone and camera</h2>
+	<div class="pickers">
+		<DevicePickers {media} />
+	</div>
+	{#if media.error}
+		<div class="error" role="alert">
+			<Icon name="alert" size={18} />
+			<p>{describeSwitchError(media.error)}</p>
+		</div>
+	{/if}
+	<div class="dialog-actions">
+		<button class="button quiet" type="button" onclick={() => devicesDialog?.close()}>Done</button>
+	</div>
+</dialog>
 
 <dialog class="dialog" bind:this={confirmEnd} aria-labelledby="end-title">
 	<h2 id="end-title">End the meeting for everyone?</h2>
@@ -212,6 +248,15 @@
 	.control:disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
+	}
+
+	.pickers {
+		display: grid;
+		margin-top: 1.25rem;
+	}
+
+	.pickers + .error {
+		margin-top: 1rem;
 	}
 
 	.label {

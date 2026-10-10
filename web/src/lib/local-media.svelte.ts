@@ -23,6 +23,15 @@ import {
 	type MediaKind
 } from './media/tracks.ts';
 
+/** One captured track, or why capturing it failed. */
+type TrackResult = { ok: true; track: MediaStreamTrack } | { ok: false; error: CaptureError };
+
+/**
+ * How a capture that replaces a track ended: the new track is in its slot, the capture failed
+ * (`error` says why), or a later decision overtook it and the new track was stopped.
+ */
+type Replacement = 'installed' | 'failed' | 'overtaken';
+
 export class LocalMedia {
 	tracks = $state.raw<LocalTracks>(NO_TRACKS);
 	screen = $state.raw<MediaStreamTrack | null>(null);
@@ -54,11 +63,23 @@ export class LocalMedia {
 
 	#guard: TrackGuard;
 	#unwatchDevices: () => void;
+	/** `dispose()` ran: captures that finish later are stopped, not installed. */
+	#disposed = false;
 
 	constructor() {
 		this.#guard = guardTracks({
-			reacquire: (kind) => this.#capture(kind),
-			onReplaced: (next) => this.#install(next)
+			reacquire: async (kind) => {
+				const before = this.tracks[kind];
+				const result = await this.#capture(kind);
+				if (result.ok) return result.track;
+				// The guard drops the result if the track was replaced meanwhile; so does the error.
+				if (!this.#disposed && this.tracks[kind] === before) this.error = result.error;
+				return null;
+			},
+			onReplaced: (next) => {
+				this.error = null;
+				this.#install(next);
+			}
 		});
 		this.#unwatchDevices = watchDevices(() => void this.refreshDevices());
 	}
@@ -107,35 +128,47 @@ export class LocalMedia {
 			this.tracks = withoutTrack(this.tracks, 'video');
 			return;
 		}
-		const track = await this.#capture('video');
-		if (track) this.#install(track);
+		await this.#replace('video');
 	}
 
+	/** The last pick wins; if its capture fails, the old mic stays and `choice` points to it again. */
 	async selectMicrophone(id: string): Promise<void> {
+		const before = this.tracks.audio?.getSettings().deviceId ?? this.choice.microphone;
 		this.choice.microphone = id;
-		await this.restartMic();
+		const outcome = await this.#replace('audio', () => this.choice.microphone === id);
+		if (outcome === 'failed') this.choice.microphone = before;
 	}
 
 	/**
 	 * Captures the chosen mic again and puts the new track in place of the old one, also on the
 	 * publisher's sender. Call it inside a tap: WebKit captures only after a user action.
-	 * Returns `false` if capturing failed (`error` says why).
+	 * Returns `false` if capturing failed (`error` says why); a capture that a later one overtook
+	 * does not count as failed.
 	 */
 	async restartMic(): Promise<boolean> {
-		const track = await this.#capture('audio');
-		if (track) this.#install(track);
-		return track !== null;
+		return (await this.#replace('audio')) !== 'failed';
 	}
 
+	/**
+	 * The last pick wins. If its capture fails, the camera is off and `choice` points to the
+	 * camera that was on before.
+	 */
 	async selectCamera(id: string): Promise<void> {
+		const previous = this.tracks.video;
+		const before = previous?.getSettings().deviceId ?? this.choice.camera;
 		this.choice.camera = id;
 		// Switching devices while the camera is off only records the choice.
-		if (!this.tracks.video) return;
-		// iOS opens one camera at a time: release the old one before asking for the new one.
-		this.#guard.unwatch(this.tracks.video);
-		this.tracks = withoutTrack(this.tracks, 'video');
-		const track = await this.#capture('video');
-		if (track) this.#install(track);
+		if (!previous) return;
+		// iOS opens one camera at a time: release the old one before asking for the new one. It
+		// stays in its slot meanwhile, so the camera counts as on and the publisher swaps the new
+		// track onto its sender instead of publishing the camera anew.
+		this.#guard.unwatch(previous);
+		previous.stop();
+		const outcome = await this.#replace('video', () => this.choice.camera === id);
+		if (outcome === 'failed') {
+			this.tracks = withoutTrack(this.tracks, 'video');
+			this.choice.camera = before;
+		}
 	}
 
 	/** Returns `false` if the user cancelled the picker or sharing failed. */
@@ -157,6 +190,7 @@ export class LocalMedia {
 	}
 
 	dispose(): void {
+		this.#disposed = true;
 		this.#guard.dispose();
 		this.#unwatchDevices();
 		stopTracks(this.tracks);
@@ -164,15 +198,35 @@ export class LocalMedia {
 		this.stopScreenShare();
 	}
 
-	async #capture(kind: MediaKind): Promise<MediaStreamTrack | null> {
-		const wants: CaptureWants = { audio: kind === 'audio', video: kind === 'video' };
-		const result = await captureUserMedia(this.choice, wants);
+	/**
+	 * Captures a fresh `kind` track from the chosen device and puts it in its slot, unless a
+	 * later decision overtook the capture: `dispose()` ran, the slot no longer holds the track it
+	 * held at the start, or `stillWanted` says no. An overtaken track is stopped, and only a
+	 * capture that was not overtaken sets or clears `error`.
+	 */
+	async #replace(kind: MediaKind, stillWanted: () => boolean = () => true): Promise<Replacement> {
+		const before = this.tracks[kind];
+		const result = await this.#capture(kind);
+		if (this.#disposed || this.tracks[kind] !== before || !stillWanted()) {
+			if (result.ok) result.track.stop();
+			return 'overtaken';
+		}
 		if (!result.ok) {
 			this.error = result.error;
-			return null;
+			return 'failed';
 		}
 		this.error = null;
-		return tracksOf(result.stream)[kind];
+		this.#install(result.track);
+		return 'installed';
+	}
+
+	/** Captures a fresh `kind` track from the chosen device; no side effects on this object. */
+	async #capture(kind: MediaKind): Promise<TrackResult> {
+		const wants: CaptureWants = { audio: kind === 'audio', video: kind === 'video' };
+		const result = await captureUserMedia(this.choice, wants);
+		if (!result.ok) return result;
+		const track = tracksOf(result.stream)[kind];
+		return track ? { ok: true, track } : { ok: false, error: 'unknown' };
 	}
 
 	/**

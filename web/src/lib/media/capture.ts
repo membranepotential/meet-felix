@@ -24,6 +24,41 @@ export type CaptureError =
 
 export type CaptureResult = { ok: true; stream: MediaStream } | { ok: false; error: CaptureError };
 
+/** What to tell the user on the pre-join screen about a capture that failed. */
+export function describeCaptureError(error: CaptureError): string {
+	switch (error) {
+		case 'denied':
+			return 'Camera and microphone are blocked. Allow them in your browser’s site settings, then try again.';
+		case 'not-found':
+			return 'No camera or microphone was found. You can still join and listen.';
+		case 'in-use':
+			return 'Another app is using your camera or microphone. Close it, then try again.';
+		case 'overconstrained':
+			return 'The selected device cannot be used. Pick another one.';
+		case 'insecure':
+			return 'This page needs HTTPS to use your camera and microphone.';
+		case 'unknown':
+			return 'Camera and microphone could not start. Try again.';
+	}
+}
+
+/** What to tell the user about a device switch inside the meeting that failed. */
+export function describeSwitchError(error: CaptureError): string {
+	switch (error) {
+		case 'not-found':
+			return 'That device was not found.';
+		case 'denied':
+			return 'The browser blocks this device. Allow it in the site settings.';
+		case 'in-use':
+			return 'Another app is using that device.';
+		case 'overconstrained':
+			return 'That device cannot be used. Pick another one.';
+		case 'insecure':
+		case 'unknown':
+			return 'That device could not start. Pick another one.';
+	}
+}
+
 /**
  * 720p at 30 fps is the top simulcast layer; the SFU forwards lower layers to small tiles.
  * `ideal` instead of `exact` so phones with other native modes still succeed.

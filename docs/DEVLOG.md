@@ -3,6 +3,47 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — Devices switchable inside a live meeting
+
+In the test meeting of 2026-10-10 the owner looked for a way to change the
+camera and microphone during the call; devices could only be chosen on the
+pre-join page. Now the control bar has a "Devices" button that opens a
+dialog, "Microphone and camera", with the same two selects as the pre-join
+(`DevicePickers.svelte`, shared by both) and the capture error, if any.
+`describeCaptureError` moved from `PreJoin.svelte` to `media/capture.ts`.
+docs/ui/README.md records the decision under D28.
+
+A switch reaches everyone without a new negotiation: the publisher swaps
+the new track onto its RTP sender (`replaceTrack`). For the mic this
+already worked. For the camera, `LocalMedia.selectCamera` used to empty the
+video slot while it captured the new camera (iOS opens one camera at a time,
+so the old one must stop first); the publisher saw the camera as off, sent
+`unpublish`, and then published the new camera with a new offer. Now the
+stopped old track stays in its slot during the capture, so the publisher
+only replaces the track; the others see a short gap while the old camera is
+released and the new one starts. With the camera off, a pick only records
+the choice.
+
+The last decision wins for both devices: a capture is stopped and dropped
+when, by the time it finishes, another device was picked, the slot holds a
+different track (the camera was turned off, the guard replaced the mic) or
+`dispose()` ran. Only that last capture sets or clears `error`. If it
+fails, the old mic stays, or the camera is turned off, and `choice` points
+back to the device from before, so the select shows it again. The dialog
+has its own short error texts (`describeSwitchError`) and clears an old
+error when it opens. `local-media.test.ts` covers these races with a
+stubbed `getUserMedia`.
+
+Tests: Chromium's fake media flag is now
+`--use-fake-device-for-media-stream=device-count=2`, which gives two cameras
+and three microphones. A new test in `call.spec.ts` (Chromium only; Firefox
+fakes one device per kind) switches both devices from the dialog and checks
+the sender track labels, that no `unpublish` and no further `publishOffer`
+was sent, and that the guest still sees the host's video. The pre-join test
+checks that the pickers are there.
+
+Next: the owner tries the switch on the iPhone (front and back camera).
+
 ## 2026-10-10 — first real test with a guest: mute state, expanded screen, Whisper filters
 
 The owner's test meeting (laptop plus an iPhone on mobile data, TURN live)

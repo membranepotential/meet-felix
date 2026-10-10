@@ -4,6 +4,7 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
+- device-switch — Devices dialog in the control bar (microphone/camera inside a live meeting), camera swap on the sender, e2e in Chromium with two fake devices — implemented, e2e 57 passed 3 skipped — code-reviewer-high running — next: fix findings, commit, deploy when no meeting is live
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
@@ -31,15 +32,16 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
-- Switch camera and microphone inside a live meeting (the owner looked for it in the 2026-10-10 meeting; devices are chosen only on the pre-join page).
-- Against the real SFU the decoded layer went back to full ~12 s after `setLayer h` without a new SetLayer (e2e @real flake): check whether the preference is lost when a track is pulled again.
-- Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs adapters/websocket/new); add data-testids the e2e agent asked for (tiles, pills, meeting view, transcript link).
-- 'Join as host' inside a live meeting; shorten the first-pull retry (3 s) or pull after the publisher connects.
-- Core later: reply for an SFU offer on the publish session; replace a subscribe session after 410; partial publish carries accepted tracks; grace period before a dropped socket counts as Leave; negotiation ids on SFU replies; cleanup of ended-room storage.
-- Web later: active speaker, remote mute state, peer-connection failure recovery, waiting-for-consent list for hosts.
-- Observe hibernation, egress and neurons on the dashboard after real use; switch to Paid if transcripts must arrive the same day for larger meetings.
-- Phase 2 remaining: screen share end-to-end test, >3 participants, 'Join as host' inside a live meeting, device checklist on real phones.
-- Phase 3: RecorderObject, adapters, R2 chunks, Whisper job, transcript page.
+In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"); triage of 2026-10-10 pruned the done items.
+1. Waiting-for-consent list for hosts: the core already sends `awaitingConsent`; the web shows only knocks (`session.svelte.ts`, `Toasts.svelte`).
+2. 'Join as host' inside a live meeting: core and worker support it (rules.rs, lifecycle.spec.ts); the web offers it only in the lobby and on the pre-join.
+3. Grace period before a dropped socket counts as Leave (core-first, plan from 2026-10-10), then cleanup of ended-room storage (`Record::Ended` is kept forever; room.rs only deletes the alarm).
+4. Core: a partial publish carries the accepted tracks (`SfuReply::Published` assumes all); a late reply in the same session is still applied to a newer pending negotiation.
+5. Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs `adapters/websocket/new`, stack needs `RECORDER_ORIGIN`); data-testids for tiles, pills, meeting view, transcript link.
+6. Against the real SFU: the decoded layer went back to full ~12 s after `setLayer h` (likely the `asciibetical` fallback ordering in sfu-api `update_layer`, which ranks `f` first); add a hold check to real-sfu.spec.ts; and a 4–6 person run. Costs SFU minutes.
+7. Shorten the first-pull retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
+8. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
+- Owner, manual: observe hibernation, egress and neurons on the dashboard after real use; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
 
 ## Open questions
 - Workers Free is the plan for now (owner, 2026-10-09): Workers AI gives 10,000 neurons/day ≈ 214 speaker-minutes of Whisper, calls beyond that fail; the transcript job retries after the daily reset. Realtime SFU/TURN bill separately (1,000 GB free). 10 ms CPU per invocation applies.

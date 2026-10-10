@@ -205,6 +205,18 @@ words must say what the press means.
   (`webkitEnterFullscreen`); in the iPhone test of 2026-10-10 that player
   hid the page and its control bar, so the user could not mute while
   watching the screen. A fullscreen tile hid the bar on desktops too.
+- **Devices can be switched inside the meeting.** The control bar has a
+  "Devices" button. It opens a dialog, "Microphone and camera", with the
+  microphone and camera selects; these are the same pickers as on the
+  pre-join page. When the new device's capture succeeds, the web app puts
+  its track onto the existing RTP sender (`replaceTrack`), so there is no
+  new negotiation and no unpublish. For the camera the others see a short
+  gap: the old camera is released before the new one starts, because iOS
+  opens one camera at a time. If the capture fails, the old mic stays on,
+  or the camera is turned off, and the dialog says why. With the camera off,
+  a pick only records the choice for the next Start video. Why: in the test
+  meeting of 2026-10-10 the owner looked for this control, and devices could
+  only be chosen on the pre-join page.
 
 ## D29: A shared screen keeps people in a column on desktops and in round chips on phones (2026-10-09)
 
