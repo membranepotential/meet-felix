@@ -41,6 +41,8 @@ without them.
 Next: STATUS Next item 2, the grace period before a dropped socket counts
 as Leave.
 
+Deployed as version 644b05c1 (commit 340fbee) with no meeting live.
+
 ## 2026-10-10 — Hosts see who has not accepted the recording
 
 STATUS Next item 1. When a host starts recording, everyone without consent
