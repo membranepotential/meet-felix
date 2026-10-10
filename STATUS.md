@@ -4,10 +4,10 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- device-switch — Devices dialog in the control bar (microphone/camera inside a live meeting), camera swap on the sender, e2e in Chromium with two fake devices — implemented, e2e 57 passed 3 skipped — code-reviewer-high running — next: fix findings, commit, deploy when no meeting is live
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-10 Deployed version f2bdd8b1, commit e32feb6: devices switchable inside a live meeting (Devices dialog in the control bar, track swap on the sender, last pick wins); review findings fixed; web 140 unit tests, e2e 57 passed 3 skipped.
 - 2026-10-10 Deployed version 0aa254e5, commit b0150b4: mute state in core/protocol with tile icons, expanded shared screen keeping the control bar (replaces iPhone's native player), Whisper names prompt removed + avg_logprob/compression_ratio filters, four real-speech snippets in web/e2e/audio for the recorder e2e (22/22). Two code-reviewer-high reviews, findings fixed; core 57, worker 54, web 133, e2e 56.
 - 2026-10-10 TURN live: the owner created a Realtime TURN key; secrets `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` uploaded; `/api/ice` on production returns STUN plus TURN credentials (port 53 filtered), and a relay-only gather in headless Chromium produced relay candidates over UDP, TCP and TLS.
 - 2026-10-10 Phase 3 live: version 24f9bf24, commit 8c4a918. Production proof with headless Chromium through the real SFU: adapter connected, 3 Opus chunks (≈33 KB per 30 s) in the EU bucket, transcript ready 10–12 s after the end; with synthesized speech as the microphone the transcript has the German and English sentences correctly, labelled "Felix Peppert (host)" with wall-clock times, consent recorded. Playwright e2e: 56 local tests + @real call. R2 lifecycle rule audio/ 3 days added.
@@ -33,7 +33,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 
 ## Next
 In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"); triage of 2026-10-10 pruned the done items.
-1. Waiting-for-consent list for hosts: the core already sends `awaitingConsent`; the web shows only knocks (`session.svelte.ts`, `Toasts.svelte`).
+1. Waiting-for-consent list for hosts (next up): the core already sends `awaitingConsent`; the web shows only knocks (`session.svelte.ts`, `Toasts.svelte`).
 2. 'Join as host' inside a live meeting: core and worker support it (rules.rs, lifecycle.spec.ts); the web offers it only in the lobby and on the pre-join.
 3. Grace period before a dropped socket counts as Leave (core-first, plan from 2026-10-10), then cleanup of ended-room storage (`Record::Ended` is kept forever; room.rs only deletes the alarm).
 4. Core: a partial publish carries the accepted tracks (`SfuReply::Published` assumes all); a late reply in the same session is still applied to a newer pending negotiation.

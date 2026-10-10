@@ -42,6 +42,8 @@ the sender track labels, that no `unpublish` and no further `publishOffer`
 was sent, and that the guest still sees the host's video. The pre-join test
 checks that the pickers are there.
 
+Deployed as version f2bdd8b1 (commit e32feb6) with no meeting live.
+
 Next: the owner tries the switch on the iPhone (front and back camera).
 
 ## 2026-10-10 — first real test with a guest: mute state, expanded screen, Whisper filters
