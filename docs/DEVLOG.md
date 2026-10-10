@@ -3,6 +3,43 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — An ended room deletes its storage after an hour
+
+STATUS Next item 1. Until now `Record::Ended` stayed in the room's storage
+forever, and `EndMeeting` only deleted the alarm. What still reads that
+record after the end: `accept` (410 to a socket), `/info` (`ended` for
+`GET /api/meeting/:words`) and the alarm that sends a failed `/end` to the
+recorder once more. The first two are reached only while KV still maps the
+words to the room, because the room releases the words at the end: a read
+cached at the edge (60 s) or a failed release. The transcript token never
+came from the record: the clients get it in `Ended`, the meetings list from
+the KV index, and the list already counts a room without a record as ended.
+
+Now `EndMeeting` arms the room's alarm for `ENDED_RETENTION_MS` (one hour).
+The ended record is a struct of its own, `EndedRoom` (the stored JSON is
+unchanged), and `EndedRoom::alarm()` decides what the alarm does: with a
+pending finish, store the record without it, re-arm the hour and send the
+finish once more; with nothing pending, `deleteAll()`, which also deletes
+the alarm at our compatibility date. The alarm handler now picks the open
+or the ended path from the record it finds before it steps the core, so a
+meeting that ends inside an open alarm keeps the alarms its effects armed;
+before, the pending finish was sent again at once instead of after 30 s.
+An outdated record that loads as ended also arms the hour.
+
+Checked: recycled words cannot hit an old ended record, since every meeting
+gets a fresh `unique_id()` object and `init`'s 409 cannot fire for it. The
+deletion is not visible through the HTTP API (the words are released
+first), so the e2e tests do not cover it; a one-off run with a 3 s
+retention showed the room's SQLite file empty after the alarm, with no
+errors in the wrangler log. As-built note in D8 (docs/links).
+
+Next: code review, deploy when no meeting is live.
+
+Accepted limit: rooms that ended before this version keep their record, because
+nothing arms their alarm any more and no request reaches them once the words
+are released. That is about 12 KB of SQLite metadata each for the 14 meetings
+held so far.
+
 ## 2026-10-10 — A partial publish keeps only the accepted tracks; late SFU replies stay late
 
 STATUS Next item 2, core first (D20). Two correctness fixes in the handling

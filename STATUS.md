@@ -8,7 +8,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
-- 2026-10-10 Deployed version aa8d8e50, commit dd1443c: partial publish carries the rejected tracks, NegotiationId on SFU effects and replies (late replies ignored); core 70, sfu-api 15, worker 55, web 143, e2e 64 passed 3 skipped.
+- 2026-10-10 Deployed version aa8d8e50, commit dd1443c: partial publish carries the rejected tracks, NegotiationId on SFU effects and replies (late replies ignored); core 70, sfu-api 15, worker 55, web 143, e2e 64 passed 3 skipped; the @real three-party test passed afterwards.
 - 2026-10-10 Deployed version b3ff7ba5, commit 8d5d8c6: D35 leave grace period (60 s; tracks and recording continue, "Reconnecting…" tile, pagehide leave, close codes logged); worker alarm ordering fix from review; core 64, worker 55, e2e 63 passed 3 skipped.
 - 2026-10-10 Deployed version 644b05c1, commit 340fbee: 'Join as host' inside a live meeting; reconnect() keeps the old socket open until the resume (the owner came back as a new participant before); e2e 61 passed 3 skipped.
 - 2026-10-10 Deployed version 5192341c, commit f007875: hosts see who has not accepted the recording (pill + "Not recorded" on tiles); consent.spec.ts; web 142 unit tests, e2e 59 passed 3 skipped.

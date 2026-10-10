@@ -68,7 +68,7 @@ pub fn decode(json: &str) -> Result<Decoded, String> {
 pub const KEEPALIVE_MS: u64 = 60 * 1000;
 
 /// The room's single storage value, kept as JSON under [`Record::KEY`]. No record means the
-/// router never initialised this object.
+/// router never initialised this object, or the ended room deleted its storage.
 ///
 /// Externally tagged on purpose: serde buffers internally tagged enums, and the buffer cannot
 /// read `RoomState`'s integer map keys (`{"0": ...}`) back.
@@ -77,14 +77,19 @@ pub const KEEPALIVE_MS: u64 = 60 * 1000;
 pub enum Record {
     /// The meeting runs.
     Open(OpenRoom),
-    /// The meeting is over; the object refuses new sockets for good. Holds no secrets.
-    #[serde(rename_all = "camelCase")]
-    Ended {
-        recording_policy: RecordingPolicy,
-        /// The recorder's `/end` that failed, which the room's alarm sends once more.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pending_finish: Option<PendingFinish>,
-    },
+    /// The meeting is over; the object refuses new sockets until its alarm deletes its storage
+    /// ([`EndedRoom::alarm`]).
+    Ended(EndedRoom),
+}
+
+/// What an ended room keeps until it deletes its storage. Holds no secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndedRoom {
+    pub recording_policy: RecordingPolicy,
+    /// The recorder's `/end` that failed, which the room's alarm sends once more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_finish: Option<PendingFinish>,
 }
 
 /// A [`FinishRecording`] the recorder did not take, with the recorder's id (hex).
@@ -97,6 +102,41 @@ pub struct PendingFinish {
 
 /// How long the room waits before it sends a failed `/end` to the recorder again.
 pub const FINISH_RETRY_MS: u64 = 30 * 1000;
+
+/// How long an ended room keeps its record, answering "ended" and refusing sockets, before it
+/// deletes its storage (D8 in `docs/links`). It covers clients that still reach the room after
+/// the words were released, through a KV read cached at the edge (60 s by default).
+pub const ENDED_RETENTION_MS: u64 = 60 * 60 * 1000;
+
+/// What the alarm of an ended room does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndedAlarm {
+    /// Store `record`, which no longer holds the finish, wait [`ENDED_RETENTION_MS`] again, and
+    /// send `pending` once more. It is sent at most once more: the recorder ends itself after
+    /// hours without audio, with the names and consents its `/track`s carried.
+    FinishAgain {
+        record: EndedRoom,
+        pending: PendingFinish,
+    },
+    /// Nothing pends and the retention is over: delete all storage.
+    Delete,
+}
+
+impl EndedRoom {
+    /// What this room's alarm does: send a pending finish once more, or delete the storage.
+    pub fn alarm(self) -> EndedAlarm {
+        match self.pending_finish {
+            Some(pending) => EndedAlarm::FinishAgain {
+                record: Self {
+                    pending_finish: None,
+                    ..self
+                },
+                pending,
+            },
+            None => EndedAlarm::Delete,
+        }
+    }
+}
 
 impl Record {
     /// The storage key. On a SQLite-backed object, key plus value may take up to 2 MB, far more
@@ -118,16 +158,14 @@ impl Record {
     pub fn phase(&self) -> Phase {
         match self {
             Self::Open(open) => open.room.view().phase,
-            Self::Ended { .. } => Phase::Ended,
+            Self::Ended(_) => Phase::Ended,
         }
     }
 
     pub fn recording_policy(&self) -> RecordingPolicy {
         match self {
             Self::Open(open) => open.room.view().recording_policy,
-            Self::Ended {
-                recording_policy, ..
-            } => *recording_policy,
+            Self::Ended(ended) => ended.recording_policy,
         }
     }
 
@@ -135,30 +173,11 @@ impl Record {
     #[must_use]
     pub fn with_pending_finish(self, pending: PendingFinish) -> Self {
         match self {
-            Self::Ended {
-                recording_policy, ..
-            } => Self::Ended {
-                recording_policy,
+            Self::Ended(ended) => Self::Ended(EndedRoom {
                 pending_finish: Some(pending),
-            },
+                ..ended
+            }),
             open @ Self::Open(_) => open,
-        }
-    }
-
-    /// The record without its pending finish, and the finish, which is sent at most once more.
-    pub fn take_pending_finish(self) -> (Self, Option<PendingFinish>) {
-        match self {
-            Self::Ended {
-                recording_policy,
-                pending_finish,
-            } => (
-                Self::Ended {
-                    recording_policy,
-                    pending_finish: None,
-                },
-                pending_finish,
-            ),
-            open @ Self::Open(_) => (open, None),
         }
     }
 }
@@ -216,10 +235,10 @@ impl OpenRoom {
     /// there is none.
     fn settle(self, effects: &[Effect]) -> Record {
         if effects.contains(&Effect::EndMeeting) {
-            return Record::Ended {
+            return Record::Ended(EndedRoom {
                 recording_policy: self.room.view().recording_policy,
                 pending_finish: None,
-            };
+            });
         }
         let alarm = effects
             .iter()
@@ -394,35 +413,53 @@ mod tests {
         let (record, effects) = room_with_host().step(T0, end);
         assert_eq!(effects.last(), Some(&Effect::EndMeeting));
         assert_eq!(record.phase(), Phase::Ended);
-        assert_eq!(
-            record,
-            Record::Ended {
-                recording_policy: RecordingPolicy::HostDecides,
-                pending_finish: None
-            }
-        );
-    }
-
-    #[test]
-    fn a_failed_finish_is_kept_once_and_old_ended_records_load() {
-        let ended = Record::Ended {
-            recording_policy: RecordingPolicy::FromStart,
+        let ended = EndedRoom {
+            recording_policy: RecordingPolicy::HostDecides,
             pending_finish: None,
         };
-        let pending = PendingFinish {
+        assert_eq!(record, Record::Ended(ended.clone()));
+        // Nothing pends, so the retention alarm deletes the storage.
+        assert_eq!(ended.alarm(), EndedAlarm::Delete);
+    }
+
+    fn pending_finish() -> PendingFinish {
+        PendingFinish {
             recorder: "abc".into(),
             finish: FinishRecording {
                 roster: Vec::new(),
                 consents: Vec::new(),
             },
+        }
+    }
+
+    #[test]
+    fn a_pending_finish_keeps_the_record_until_it_is_sent_again_then_the_storage_goes() {
+        let ended = EndedRoom {
+            recording_policy: RecordingPolicy::FromStart,
+            pending_finish: None,
         };
-        let waiting = ended.clone().with_pending_finish(pending.clone());
+        let Record::Ended(waiting) =
+            Record::Ended(ended.clone()).with_pending_finish(pending_finish())
+        else {
+            panic!("an ended record stays ended")
+        };
+        let EndedAlarm::FinishAgain { record, pending } = waiting.alarm() else {
+            panic!("a pending finish is sent again before the storage goes")
+        };
+        assert_eq!((record.clone(), pending), (ended, pending_finish()));
+        assert_eq!(record.alarm(), EndedAlarm::Delete);
+    }
+
+    #[test]
+    fn ended_records_survive_json_with_and_without_a_pending_finish() {
+        let ended = Record::Ended(EndedRoom {
+            recording_policy: RecordingPolicy::FromStart,
+            pending_finish: None,
+        });
+        let waiting = ended.clone().with_pending_finish(pending_finish());
         let json = encode(&waiting).unwrap();
-        assert_eq!(decode(&json), Ok(Decoded::Current(waiting.clone())));
-        assert_eq!(
-            waiting.take_pending_finish(),
-            (ended.clone(), Some(pending))
-        );
+        assert_eq!(decode(&json), Ok(Decoded::Current(waiting)));
+        // The shape before `EndedRoom` was a struct of its own, and before `pendingFinish`.
         let without = r#"{"version":2,"record":{"ended":{"recordingPolicy":"fromStart"}}}"#;
         assert_eq!(decode(without), Ok(Decoded::Current(ended)));
     }

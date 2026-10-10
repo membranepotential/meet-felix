@@ -36,7 +36,8 @@ use crate::internal::{
     TrackRecording, UntrackRecording,
 };
 use crate::record::{
-    Attachment, Decoded, FINISH_RETRY_MS, OpenSocket, PendingFinish, Record, alarm_time, is_stale,
+    Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS, OpenSocket,
+    PendingFinish, Record, alarm_time, is_stale,
 };
 use crate::{
     Jurisdiction, MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu,
@@ -143,13 +144,28 @@ impl DurableObject for RoomObject {
         self.socket_gone(&ws).await
     }
 
-    /// Fires for the core's alarm and for the keepalive check, whichever is earlier. Lets the
-    /// core handle whatever is due (a spurious `AlarmFired` is harmless), reports and closes
-    /// sockets whose client stopped pinging, and arms the next alarm.
+    /// In an open room, fires for the core's alarm and for the keepalive check
+    /// ([`RoomObject::open_alarm`]); in an ended room, to send a failed `/end` again or to delete
+    /// the storage ([`RoomObject::ended_alarm`]).
+    async fn alarm(&self) -> Result<Response> {
+        match self.load().await? {
+            Some(Record::Open(_)) => self.open_alarm().await?,
+            Some(Record::Ended(ended)) => self.ended_alarm(ended).await?,
+            None => {}
+        }
+        Response::empty()
+    }
+}
+
+impl RoomObject {
+    /// The alarm of an open room, for the core's alarm or the keepalive check, whichever is
+    /// earlier. Lets the core handle whatever is due (a spurious `AlarmFired` is harmless),
+    /// reports and closes sockets whose client stopped pinging, and arms the next alarm. If the
+    /// meeting ends meanwhile, `EndMeeting` armed the ended room's alarm already.
     ///
     /// A stale socket is closed only once the step that reports it is stored: if storing fails,
     /// the runtime retries the alarm, which must still find the socket open and stale.
-    async fn alarm(&self) -> Result<Response> {
+    async fn open_alarm(&self) -> Result<()> {
         let now = now();
         let stale = self
             .open_sockets()
@@ -167,16 +183,41 @@ impl DurableObject for RoomObject {
             .chain(std::iter::once(Input::from(Event::AlarmFired)))
             .collect();
         self.run(inputs).await?;
-        match self.load().await? {
-            Some(Record::Open(open)) => self.arm(open.alarm).await?,
-            Some(ended @ Record::Ended { .. }) => self.finish_again(ended).await?,
-            None => {}
+        if let Some(Record::Open(open)) = self.load().await? {
+            self.arm(open.alarm).await?;
         }
-        Response::empty()
+        Ok(())
     }
-}
 
-impl RoomObject {
+    /// The alarm of an ended room: sends a pending `/end` once more and waits the retention
+    /// again, or, with nothing pending, deletes all storage. With the compatibility date
+    /// 2026-02-24 or later, `deleteAll()` deletes the alarm too. Afterwards the room answers
+    /// like one the router never initialised: 404 to sockets and `/info`.
+    async fn ended_alarm(&self, ended: EndedRoom) -> Result<()> {
+        match ended.alarm() {
+            EndedAlarm::Delete => self.state.storage().delete_all().await,
+            EndedAlarm::FinishAgain { record, pending } => {
+                self.store(&Record::Ended(record)).await?;
+                self.delete_later().await?;
+                if let Err(e) = self
+                    .post_recorder(&pending.recorder, RECORDER_END, &pending.finish)
+                    .await
+                {
+                    console_error!("the recorder's end failed again: {e}");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Arms the ended room's alarm, which deletes its storage after [`ENDED_RETENTION_MS`].
+    async fn delete_later(&self) -> Result<()> {
+        self.state
+            .storage()
+            .set_alarm(i64::try_from(ENDED_RETENTION_MS).unwrap_or(i64::MAX))
+            .await
+    }
+
     async fn init(&self, init: InitRoom) -> Result<Response> {
         if self.load().await?.is_some() {
             return Response::error("room exists", 409);
@@ -201,7 +242,7 @@ impl RoomObject {
     async fn accept(&self, owner: bool) -> Result<Response> {
         let open = match self.load().await? {
             None => return Response::error("unknown meeting", 404),
-            Some(Record::Ended { .. }) => return Response::error("meeting ended", 410),
+            Some(Record::Ended(_)) => return Response::error("meeting ended", 410),
             Some(Record::Open(open)) => open,
         };
         let alarm = open.alarm;
@@ -319,7 +360,7 @@ impl RoomObject {
                 open.recorder = Some(id.clone());
                 (open.room.roster(), open.room.consents())
             }
-            Record::Ended { .. } => (Vec::new(), Vec::new()),
+            Record::Ended(_) => (Vec::new(), Vec::new()),
         };
         Some(RecorderLink {
             id,
@@ -403,7 +444,8 @@ impl RoomObject {
             },
             Effect::ReleaseMeetingId { meeting } => {
                 // Logged, not returned: `EndMeeting` must still close the sockets. The KV entry
-                // expires with its TTL, and the room answers "ended" until then.
+                // expires with its TTL; the room answers "ended" until it deletes its storage,
+                // then "unknown meeting".
                 if let Err(e) = self.release(&meeting).await {
                     console_error!("releasing {meeting:?} failed: {e}");
                 }
@@ -412,7 +454,8 @@ impl RoomObject {
                 for (ws, _) in self.open_sockets() {
                     close(&ws, CLOSE_NORMAL, "meeting ended");
                 }
-                self.state.storage().delete_alarm().await?;
+                // Replaces the core's last alarm; a failed `/end` re-arms it sooner.
+                self.delete_later().await?;
             }
             Effect::SfuNewSession { .. }
             | Effect::SfuPublish { .. }
@@ -490,7 +533,8 @@ impl RoomObject {
         }
     }
 
-    /// Keeps a failed `/end` in the ended record and arms the alarm to send it once more.
+    /// Keeps a failed `/end` in the ended record and arms the alarm to send it once more, which
+    /// also postpones the deletion of the storage ([`RoomObject::ended_alarm`]).
     async fn finish_later(&self, pending: PendingFinish) -> Result<()> {
         let Some(record) = self.load().await? else {
             return Ok(());
@@ -500,23 +544,6 @@ impl RoomObject {
             .storage()
             .set_alarm(i64::try_from(FINISH_RETRY_MS).unwrap_or(i64::MAX))
             .await
-    }
-
-    /// Sends a pending `/end` once more, then forgets it either way: the recorder ends itself
-    /// after hours without audio, with the names and consents its `/track`s carried.
-    async fn finish_again(&self, ended: Record) -> Result<()> {
-        let (record, pending) = ended.take_pending_finish();
-        let Some(pending) = pending else {
-            return Ok(());
-        };
-        self.store(&record).await?;
-        if let Err(e) = self
-            .post_recorder(&pending.recorder, RECORDER_END, &pending.finish)
-            .await
-        {
-            console_error!("the recorder's end failed again: {e}");
-        }
-        Ok(())
     }
 
     async fn post_recorder(&self, recorder: &str, path: &str, body: &impl Serialize) -> Result<()> {
@@ -632,7 +659,7 @@ impl RoomObject {
     }
 
     /// The stored record. A record of an older version is logged and replaced by an ended
-    /// one ([`crate::record::decode`]).
+    /// one ([`crate::record::decode`]), which deletes itself like any other.
     async fn load(&self) -> Result<Option<Record>> {
         let json: Option<String> = self.state.storage().get(Record::KEY).await?;
         let Some(json) = json else {
@@ -645,11 +672,12 @@ impl RoomObject {
                     "room {}: its record has the old version {version}; the meeting counts as ended",
                     self.state.id()
                 );
-                let ended = Record::Ended {
+                let ended = Record::Ended(EndedRoom {
                     recording_policy: RecordingPolicy::HostDecides,
                     pending_finish: None,
-                };
+                });
                 self.store(&ended).await?;
+                self.delete_later().await?;
                 Ok(Some(ended))
             }
         }

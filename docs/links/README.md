@@ -181,6 +181,22 @@ socket, stops a running recording, releases the words, and emits
 `Effect::EndMeeting` last. After that the room accepts no more sockets, and
 the transcript job starts.
 
+As built (2026-10-10): the ended room keeps a small ended record for one
+hour (`ENDED_RETENTION_MS` in `crates/worker/src/record.rs`), then its alarm
+deletes all its storage with `deleteAll()`. The record answers "ended" to
+`GET /api/meeting/:words` and 410 to sockets, which only a client still
+routed to the room needs: one whose KV read of the released words is cached
+at the edge (60 s by default), or any client if releasing the words failed.
+Nothing else needs the room after the end: the transcript token reaches the
+clients in the `Ended` message and the owner's list from the meeting index
+in KV, and the list counts a room without a record as ended. A failed `/end`
+to the recorder keeps the record: the alarm sends it again after 30 s, and
+the hour starts again from there. A recycled meeting id never meets an old
+record, because every new meeting gets a fresh `unique_id()` Durable Object;
+the words map to it only through KV. After the deletion, a client that still
+reaches the room through a stale KV entry gets 404, "This meeting does not
+exist", instead of "This meeting has ended".
+
 Why: the words must become free again soon after a meeting
 ([D6](#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)),
 and an empty room should hold no adapters. The two-minute wait lets a
