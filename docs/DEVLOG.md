@@ -67,6 +67,8 @@ Not verified against the real SFU: the shape of a failed publish result,
 and what a session does when the room ignores a late SFU offer (it may keep
 waiting for an answer until a later call fails and D33 replaces it).
 
+Deployed as version aa8d8e50 (commit dd1443c) with no meeting live.
+
 ## 2026-10-10 — A dropped socket gets a minute before it counts as leaving
 
 STATUS Next item 1, core first (D20), recorded as D35 in

@@ -4,10 +4,11 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- core-publish — a partial publish carries the accepted tracks; a late SFU reply in the same session must not be applied to a newer negotiation — implementer-high running — next: code-reviewer-high, deploy when no meeting is live
+- ended-cleanup — an ended room deletes its storage once nothing pends (Record::Ended kept forever today) — implementer-high running — next: code-reviewer, deploy when no meeting is live
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-10 Deployed version aa8d8e50, commit dd1443c: partial publish carries the rejected tracks, NegotiationId on SFU effects and replies (late replies ignored); core 70, sfu-api 15, worker 55, web 143, e2e 64 passed 3 skipped.
 - 2026-10-10 Deployed version b3ff7ba5, commit 8d5d8c6: D35 leave grace period (60 s; tracks and recording continue, "Reconnecting…" tile, pagehide leave, close codes logged); worker alarm ordering fix from review; core 64, worker 55, e2e 63 passed 3 skipped.
 - 2026-10-10 Deployed version 644b05c1, commit 340fbee: 'Join as host' inside a live meeting; reconnect() keeps the old socket open until the resume (the owner came back as a new participant before); e2e 61 passed 3 skipped.
 - 2026-10-10 Deployed version 5192341c, commit f007875: hosts see who has not accepted the recording (pill + "Not recorded" on tiles); consent.spec.ts; web 142 unit tests, e2e 59 passed 3 skipped.
@@ -37,12 +38,11 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 
 ## Next
 In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"); triage of 2026-10-10 pruned the done items.
-1. Cleanup of ended-room storage (`Record::Ended` is kept forever; room.rs only deletes the alarm; the meetings list already treats a missing record as ended).
-2. Core (in Now): a partial publish carries the accepted tracks (`SfuReply::Published` assumes all); a late reply in the same session is still applied to a newer pending negotiation.
-3. Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs `adapters/websocket/new`, stack needs `RECORDER_ORIGIN`); data-testids for tiles, pills, meeting view, transcript link.
-4. Against the real SFU: the decoded layer went back to full ~12 s after `setLayer h` (likely the `asciibetical` fallback ordering in sfu-api `update_layer`, which ranks `f` first); add a hold check to real-sfu.spec.ts; and a 4–6 person run. Costs SFU minutes.
-5. Shorten the first-pull retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
-6. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
+1. Cleanup of ended-room storage (in Now) (`Record::Ended` is kept forever; room.rs only deletes the alarm; the meetings list already treats a missing record as ended).
+2. Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs `adapters/websocket/new`, stack needs `RECORDER_ORIGIN`); data-testids for tiles, pills, meeting view, transcript link.
+3. Against the real SFU: the decoded layer went back to full ~12 s after `setLayer h` (likely the `asciibetical` fallback ordering in sfu-api `update_layer`, which ranks `f` first); add a hold check to real-sfu.spec.ts; and a 4–6 person run. Costs SFU minutes.
+4. Shorten the first-pull retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
+5. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
 - Owner, manual: observe hibernation, egress and neurons on the dashboard after real use; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
 
 ## Open questions
