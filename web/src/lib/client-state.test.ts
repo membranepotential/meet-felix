@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { INITIAL, reduce, syncMute, type ClientState } from './client-state.ts';
+import { awaitingConsent, INITIAL, reduce, syncMute, type ClientState } from './client-state.ts';
 import type { ParticipantView, RoomView, SessionEpochs } from './protocol.ts';
 
 const person = (
@@ -148,5 +148,28 @@ describe('syncMute', () => {
 	it('does nothing when both agree', () => {
 		expect(syncMute(true, false)).toEqual([]);
 		expect(syncMute(false, true)).toEqual([]);
+	});
+});
+
+describe('awaitingConsent', () => {
+	const recording = { since: 0, by: 1 };
+	const participants = [
+		person(1, 'Ada', { role: 'host', consentRecording: false }),
+		person(2, 'Bo', { consentRecording: false }),
+		person(3, 'Cy', { consentRecording: false, presence: 'awaitingConsent' }),
+		person(4, 'Di'),
+		person(5, 'Ed', { consentRecording: false, presence: 'knocking' }),
+		person(6, 'Fay', { consentRecording: false, presence: 'connecting' }),
+		// The owner's second device: a host without consent is admitted, muted and unrecorded.
+		person(7, 'Gil', { role: 'host', consentRecording: false })
+	];
+
+	it('lists the others in the room or let in who have not accepted the running recording', () => {
+		const names = awaitingConsent(room({ recording, participants }), 1).map((p) => p.name);
+		expect(names).toEqual(['Bo', 'Cy', 'Fay', 'Gil']);
+	});
+
+	it('is empty while nothing records', () => {
+		expect(awaitingConsent(room({ participants }), 1)).toEqual([]);
 	});
 });

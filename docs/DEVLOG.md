@@ -3,6 +3,34 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — Hosts see who has not accepted the recording
+
+STATUS Next item 1. When a host starts recording, everyone without consent
+is asked for it, but the host could not see who had not accepted. The core
+already had what the web needs. A participant waits in `AwaitingConsent`
+only if they were let in while the room records: they join, are admitted,
+are let in by an unlock, or wait for the host of a `FromStart` meeting,
+without consent; they stay outside without SFU sessions until they send
+`SetConsent` or recording stops. A guest already in the call when recording
+starts stays `Joined`, muted and not recorded, with `consentRecording`
+false. So the web derives the list from both: `awaitingConsent(room, you)`
+in `client-state.ts` returns the others with `consentRecording` false who
+are joined, connecting or awaiting consent, and nothing while the room does
+not record. Knocking guests are left to their knock request.
+
+`Session.awaitingConsent` holds that list for hosts only, like `knocking`.
+`Toasts.svelte` shows it as one info pill without a button, "Anna and Bo
+have not accepted the recording yet" (names joined by `Intl.ListFormat`),
+also in the polite live region; tiles of those in the room show "Not
+recorded" after the name (`TileView.unrecorded`). Recorded under D15 in
+docs/recording/README.md.
+
+Tests: two unit tests for `awaitingConsent`; a new browser spec,
+`consent.spec.ts`, for a guest in the call and a late guest waiting
+outside, through both accepts.
+
+Next: STATUS Next item 2, "Join as host" inside a live meeting.
+
 ## 2026-10-10 — Devices switchable inside a live meeting
 
 In the test meeting of 2026-10-10 the owner looked for a way to change the

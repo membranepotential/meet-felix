@@ -40,6 +40,11 @@
 		return track && isLive(track) ? streamFor(track) : null;
 	}
 
+	/** Who the host sees marked "Not recorded" (`Session.awaitingConsent`). */
+	let unrecorded: ReadonlySet<ParticipantId> = $derived(
+		new Set(session.awaitingConsent.map((p) => p.id))
+	);
+
 	let tiles: TileModel[] = $derived.by(() => {
 		const self: TileModel[] = [
 			{
@@ -50,6 +55,7 @@
 				source: 'camera',
 				stream: media.cameraStream,
 				micOn: media.micOn,
+				unrecorded: false,
 				level: () => levelOf(SELF),
 				layerTrack: null,
 				actions: null
@@ -64,6 +70,7 @@
 				source: 'screen',
 				stream: media.screenStream,
 				micOn: true,
+				unrecorded: false,
 				level: () => 0,
 				layerTrack: null,
 				actions: null
@@ -80,6 +87,7 @@
 					source: 'camera',
 					stream: camera,
 					micOn: p.tracks.includes('audio') && !p.muted,
+					unrecorded: unrecorded.has(p.id),
 					level: () => levelOf(String(p.id)),
 					layerTrack: camera ? { owner: p.id, kind: 'video' } : null,
 					actions: session.isHost
@@ -98,6 +106,7 @@
 								source: 'screen' as const,
 								stream: screen,
 								micOn: true,
+								unrecorded: false,
 								level: () => 0,
 								layerTrack: null
 							}

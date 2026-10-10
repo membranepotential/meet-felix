@@ -74,6 +74,21 @@ Research: [09 — post-meeting transcription and recording](../research/09-post-
   `ConsentRequired` and `Muted`. A host may enter a recording room without
   consent, so they can stop the recording; they are muted and not recorded
   like everyone else without consent.
+- Hosts see who has not accepted the running recording (as built
+  2026-10-10). The web app derives the list from the room view: every other
+  participant with `consentRecording` false who is joined, connecting, or
+  waiting in `AwaitingConsent`; knocking guests keep their knock request. A
+  host sees one notice in the pills above the control bar, "Anna and Bo have
+  not accepted the recording yet", without a button, because only they can
+  accept; it goes away when they accept, leave, or recording stops. The
+  tiles of those already in the room carry "Not recorded" after the name
+  (not on the narrow strip tiles beside a shared screen). Guests see
+  neither. Why: a
+  guest who was already in the call when recording started stays joined,
+  muted and unrecorded, and the host could not tell. Code:
+  `awaitingConsent()` in
+  [`client-state.ts`](../../web/src/lib/client-state.ts), shown in
+  `Toasts.svelte` and `Tile.svelte`.
 
 Why in the core and not in the UI: the core sends every change of the public
 room view to every joined client, so no client can miss a recording start,

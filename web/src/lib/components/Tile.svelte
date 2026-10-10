@@ -10,6 +10,8 @@
 		/** `null` shows the initials (or a screen icon). */
 		stream: MediaStream | null;
 		micOn: boolean;
+		/** The room records without this person's consent; shown only to hosts. */
+		unrecorded: boolean;
 		/**
 		 * Reads how loud this person's voice is now, 0..1 (see `media/speaking.ts`). A function,
 		 * so a level change re-renders only the ring and bars, not the tile list (which would
@@ -137,6 +139,8 @@
 			</span>
 		{/if}
 		<span class="name">{label}</span>
+		<!-- Not on strip tiles: their caption is too narrow for the name and the label. -->
+		{#if tile.unrecorded && variant !== 'strip'}<span class="unrecorded">Not recorded</span>{/if}
 		{#if speaking}<span class="visually-hidden">(speaking)</span>{/if}
 		{#if tile.host}<span class="visually-hidden">(host)</span>{/if}
 	</figcaption>
@@ -313,6 +317,12 @@
 	.muted {
 		display: inline-flex;
 		color: var(--signal);
+	}
+
+	.unrecorded {
+		flex: none;
+		color: var(--lichen);
+		font-size: 0.8125rem;
 	}
 
 	/* Three level bars, scaled by `levelBars`. */

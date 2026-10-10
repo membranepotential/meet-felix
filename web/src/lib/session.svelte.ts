@@ -6,6 +6,7 @@
 import { untrack } from 'svelte';
 import { getIceServers, getMeeting } from './api.ts';
 import {
+	awaitingConsent,
 	INITIAL,
 	reduce,
 	syncMute,
@@ -93,6 +94,10 @@ export class Session {
 	/** Guests knocking on the locked room; only hosts can let them in. */
 	knocking = $derived(
 		this.isHost ? (this.room?.participants.filter((p) => p.presence === 'knocking') ?? []) : []
+	);
+	/** Others the running recording leaves out until they accept it; only hosts see them. */
+	awaitingConsent: ParticipantView[] = $derived(
+		this.isHost && this.room && this.you !== null ? awaitingConsent(this.room, this.you) : []
 	);
 
 	readonly #meeting: MeetingId;

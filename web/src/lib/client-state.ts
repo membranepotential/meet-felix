@@ -7,6 +7,8 @@ import type {
 	ErrorCode,
 	IncomingTrack,
 	ParticipantId,
+	ParticipantView,
+	Presence,
 	ResumeToken,
 	RoomView,
 	Sdp,
@@ -123,6 +125,25 @@ export function syncMute(shownMuted: boolean, micOn: boolean): Command[] {
 	if (shownMuted && micOn) return [{ kind: 'mute-mic' }];
 	if (!shownMuted && !micOn) return [{ kind: 'report-muted' }];
 	return [];
+}
+
+/** Where a participant counts for the recording: in the room, or let in but waiting for consent. */
+const ADMITTED_OR_ASKED: ReadonlySet<Presence> = new Set<Presence>([
+	'awaitingConsent',
+	'connecting',
+	'joined'
+]);
+
+/**
+ * The others a running recording leaves out because they have not accepted it (D15): those in
+ * the room are muted and not recorded, those let in wait outside until they accept. Knocking
+ * guests are left to their knock request. Empty while nothing records.
+ */
+export function awaitingConsent(room: RoomView, you: ParticipantId): ParticipantView[] {
+	if (room.recording === undefined) return [];
+	return room.participants.filter(
+		(p) => p.id !== you && !p.consentRecording && ADMITTED_OR_ASKED.has(p.presence)
+	);
 }
 
 const over = (state: ClientState, end: SessionEnd): [ClientState, Command[]] => [
