@@ -4,10 +4,11 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- layer-hold — against the real SFU: why the decoded layer went back to full ~12 s after `setLayer h` (suspect: `asciibetical` fallback ordering in sfu-api `update_layer`), a hold check in real-sfu.spec.ts, and a 4–6 person run — implementer-high running — next: code-reviewer, deploy when no meeting is live
+- first-pull — shorten the first-pull retry: `SUBSCRIBE_RETRY_MS` = 3 s serves the not-found path and the failure path alike; measure the window against the real SFU, give the not-found path its own shorter retry — implementer-high running — next: code-reviewer, deploy when no meeting is live
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-10 Deployed version 6fedc9d7, commit 397dab6: simulcast layer holds (`priorityOrdering: none`; the SFU climbed back to full after 12 s with `asciibetical`), real-SFU hold check and a five-person run (2 @real passed); sfu-api 16 tests.
 - 2026-10-10 Deployed version db689400, commit 0df5c5b: recorder e2e as the Playwright project `recorder` (`pnpm test:e2e:recorder`, real Whisper, 1 passed), run.mjs deleted, data-testids in the fixtures; e2e 64 passed 3 skipped.
 - 2026-10-10 Deployed version 4ed4cdfc, commit ec55203: an ended room deletes its storage an hour after End (retention alarm, pending recorder /end retried first); worker 56 tests.
 - 2026-10-10 Deployed version aa8d8e50, commit dd1443c: partial publish carries the rejected tracks, NegotiationId on SFU effects and replies (late replies ignored); core 70, sfu-api 15, worker 55, web 143, e2e 64 passed 3 skipped; the @real three-party test passed afterwards.
@@ -40,9 +41,8 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 
 ## Next
 In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"); triage of 2026-10-10 pruned the done items.
-1. Against the real SFU (in Now): the decoded layer went back to full ~12 s after `setLayer h` (likely the `asciibetical` fallback ordering in sfu-api `update_layer`, which ranks `f` first); add a hold check to real-sfu.spec.ts; and a 4–6 person run. Costs SFU minutes.
-2. Shorten the first-pull retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
-3. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
+1. Shorten the first-pull (in Now) retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
+2. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
 - Owner, manual: observe hibernation, egress and neurons on the dashboard after real use; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
 
 ## Open questions

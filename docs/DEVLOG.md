@@ -39,6 +39,8 @@ Next: a subscriber-side step down on a weak link (the browser lowers the
 layer when its inbound stats show loss or a low bitrate), if real use
 shows frozen video; deploy when no meeting runs.
 
+Deployed as version 6fedc9d7 (commit 397dab6) with no meeting live.
+
 ## 2026-10-10 — The recorder e2e is a Playwright test; testids for the UI
 
 STATUS Next item 1. The standalone script `crates/worker/recorder-e2e/run.mjs`
