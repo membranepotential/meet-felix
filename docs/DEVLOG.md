@@ -47,6 +47,9 @@ and `a.transcript`. No behaviour changed. Offline e2e: 64 passed, 3 skipped.
 
 Next: code review, commit; no deploy needed beyond the testids.
 
+Deployed as version db689400 (commit 0df5c5b) with no meeting live (only the
+testids changed the served bundle).
+
 ## 2026-10-10 — An ended room deletes its storage after an hour
 
 STATUS Next item 1. Until now `Record::Ended` stayed in the room's storage
