@@ -121,7 +121,8 @@ export class Session {
 		this.toasts.show(text, 'alert')
 	);
 	#releaseWakeLock: () => void = () => {};
-	#stopSync: () => void = () => {};
+	/** Stops what `start` runs while the session lives: publishing, the mic and mute effects, the `pagehide` leave. */
+	#stopEffects: () => void = () => {};
 	#disposed = false;
 	#checkingMeeting = false;
 
@@ -150,8 +151,8 @@ export class Session {
 	start(): void {
 		this.#releaseWakeLock = holdWakeLock();
 		this.#signaling.connect();
-		// Publishing follows the local tracks: device switches, camera on/off, screen share.
-		this.#stopSync = $effect.root(() => {
+		this.#stopEffects = $effect.root(() => {
+			// Publishing follows the local tracks: device switches, camera on/off, screen share.
 			$effect(() => {
 				const outgoing = this.#media.outgoing;
 				void this.#publisher?.then((publisher) => publisher.sync(outgoing));
@@ -222,7 +223,7 @@ export class Session {
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
-		this.#stopSync();
+		this.#stopEffects();
 		this.#signaling.close();
 		this.#closeLink();
 		this.#resets.cancel();

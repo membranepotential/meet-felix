@@ -9,7 +9,7 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Layer | What it proves | Command | State on 2026-10-09 |
 |---|---|---|---|
 | Core unit tests | Single rules of `step`, whole meetings, ids, the word list | `cargo test -p meeting-core` | Exist; growing with the core |
-| Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 200 actions) |
+| Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 249 actions) |
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
 | SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer, and without one as `FailureCause::TrackNotFound`); core SFU effects to replies, with the negotiation id carried through and a publish answer's per-track errors turned into rejected kinds | `cargo test -p sfu-api` | Exist |
 | Worker unit tests | Storage record, socket attachment with the owner flag, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules; the ended room's alarm (a pending `/end` is sent again before the storage is deleted); the owner's session cookie (valid, expired, tampered, foreign, missing) and password; `/api/new` and `/api/login` input checks | `cargo test -p meet-worker` | Exist |

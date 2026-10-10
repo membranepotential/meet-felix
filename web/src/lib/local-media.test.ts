@@ -162,6 +162,19 @@ describe('LocalMedia device switches', () => {
 		expect(media.tracks.video).toBeNull();
 	});
 
+	it('starts one capture for two quick Start video presses', async () => {
+		const { media } = await started();
+		await media.toggleCamera();
+		expect(media.tracks.video).toBeNull();
+		const first = media.toggleCamera();
+		const second = media.toggleCamera();
+		const [cam] = next().grant();
+		await Promise.all([first, second]);
+		expect(requests).toHaveLength(0);
+		expect(media.tracks.video).toBe(cam);
+		expect(cam?.stopped).toBe(false);
+	});
+
 	it('keeps the last of two quick mic picks, and the old mic if a pick fails', async () => {
 		const { media, mic } = await started();
 		const first = media.selectMicrophone('mic-1');

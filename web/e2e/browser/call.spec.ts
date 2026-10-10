@@ -218,6 +218,32 @@ test('devices: switching camera and mic in the meeting swaps the tracks without 
 	await expect(host.control('Unmute')).toHaveAttribute('aria-pressed', 'true');
 });
 
+test('narrowing the window mid-meeting keeps the control bar on screen', async ({
+	api,
+	owner,
+	host,
+	guest
+}) => {
+	const meeting = await createMeeting(api, owner.headers);
+	await startCall(meeting, host, [{ who: guest, name: 'Guest' }]);
+	// From the desktop viewport to a phone's: the tiles' pixel sizes must not hold the layout wide.
+	const phone = { width: 390, height: 844 };
+	await host.page.setViewportSize(phone);
+	const leave = host.control('Leave');
+	await expect(leave).toBeVisible();
+	await expect
+		.poll(async () => {
+			const box = await leave.boundingBox();
+			return (
+				box !== null &&
+				box.x >= 0 &&
+				box.x + box.width <= phone.width &&
+				box.y + box.height <= phone.height
+			);
+		})
+		.toBe(true);
+});
+
 test('a guest leaves; the host ends the meeting for everyone, with the transcript link', async ({
 	api,
 	owner,

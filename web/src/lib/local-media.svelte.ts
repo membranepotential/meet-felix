@@ -65,6 +65,8 @@ export class LocalMedia {
 	#unwatchDevices: () => void;
 	/** `dispose()` ran: captures that finish later are stopped, not installed. */
 	#disposed = false;
+	/** The capture that Start video began; another press while it runs joins it. */
+	#cameraStart: Promise<void> | null = null;
 
 	constructor() {
 		this.#guard = guardTracks({
@@ -122,13 +124,24 @@ export class LocalMedia {
 		this.#applyMic();
 	}
 
+	/**
+	 * Turns the camera off, or starts it. The button reads Start video until the capture
+	 * finishes, so a second press meanwhile also means "on": it starts no second capture.
+	 */
 	async toggleCamera(): Promise<void> {
 		if (this.tracks.video) {
 			this.#guard.unwatch(this.tracks.video);
 			this.tracks = withoutTrack(this.tracks, 'video');
 			return;
 		}
-		await this.#replace('video');
+		this.#cameraStart ??= (async () => {
+			try {
+				await this.#replace('video');
+			} finally {
+				this.#cameraStart = null;
+			}
+		})();
+		await this.#cameraStart;
 	}
 
 	/** The last pick wins; if its capture fails, the old mic stays and `choice` points to it again. */

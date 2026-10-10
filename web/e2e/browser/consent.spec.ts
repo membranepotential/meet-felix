@@ -41,6 +41,8 @@ test('the host sees who has not accepted the recording until they do', async ({
 	await late.openPreJoin(meeting, 'Late');
 	await late.join();
 	await expect(consentDialog(late)).toBeVisible();
+	// Under the dialog, the lobby says what the guest waits for.
+	await expect(late.page.locator('main h1')).toHaveText('Recording consent');
 	await expect(unconsentedNotice(host)).toHaveText(
 		'Guest and Late have not accepted the recording yet'
 	);

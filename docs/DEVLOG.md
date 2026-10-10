@@ -3,6 +3,35 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — Polish after the day's reviews
+
+Small follow-ups that today's code reviews collected.
+
+- **Control bar after a resize.** Narrowing the window mid-meeting from
+  1280×800 to 390×844 left the control bar 1232 px wide, its Leave button
+  at x = 744, off screen, in Chromium and Firefox, for host and guest. The
+  `.meeting` grid had no column template, so its one column was `auto` and
+  sized to its content: the stage's tiles carry pixel widths from the last
+  measurement (`fitGrid`), so the column, the stage and with it
+  `bind:clientWidth` stayed wide. The column is now `minmax(0, 1fr)`. A
+  browser e2e in `call.spec.ts` resizes mid-meeting and checks that Leave
+  stays inside the viewport.
+- **Start video pressed twice.** `LocalMedia.toggleCamera` started a second
+  capture for a second press while the first ran; the button still reads
+  Start video then, so the second press now joins the running capture.
+- **Lobby under the consent dialog.** A guest who waits outside for consent
+  saw "Joining…" under the dialog; the lobby now says "Recording consent /
+  Accept the recording to join."
+- **Logs.** A subscribe that fails with `not_found_track_error` is expected
+  on a first pull and retried after 500 ms, so the room logs it with
+  `console_log!` instead of `console_error!`.
+- **Names and notes.** `Session#stopSync` is `#stopEffects`, since it also
+  removes the `pagehide` listener; `stack.ts` says why the `real` stack keeps
+  the production `RECORDER_ORIGIN`; TESTING.md gives the property test's
+  real size (up to 249 actions); spike 01 points to the D8 as-built note.
+
+Next: the STATUS Next list.
+
 ## 2026-10-10 — A track the SFU did not find is pulled again after 500 ms
 
 STATUS Next item 1. The first pull of a new track usually comes before its

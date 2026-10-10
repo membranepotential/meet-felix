@@ -256,13 +256,19 @@
 {/if}
 
 <style>
-	/* Named areas, so the stage keeps its row while the header is left out. */
+	/*
+	 * Named areas, so the stage keeps its row while the header is left out. The column must not
+	 * size to its content: the stage's tiles have pixel widths from the last measurement, and an
+	 * `auto` column would keep them (and the stage, and the control bar) wide after the window
+	 * narrows.
+	 */
 	.meeting {
 		display: grid;
 		grid-template:
 			'header' auto
 			'stage' minmax(0, 1fr)
-			'dock' auto;
+			'dock' auto
+			/ minmax(0, 1fr);
 		height: 100dvh;
 		overflow: hidden;
 		background: var(--lake);

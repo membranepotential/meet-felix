@@ -603,6 +603,12 @@ impl RoomObject {
         };
         match client.perform(effect).await {
             Ok(reply) => reply,
+            // A track the SFU does not know yet is expected on a first pull; the core pulls
+            // again soon, so it is no error.
+            Err(Failure { error, reply }) if error.cause() == FailureCause::TrackNotFound => {
+                console_log!("{} failed, retried soon: {error}", describe_call(effect));
+                reply
+            }
             Err(Failure { error, reply }) => {
                 console_error!("{} failed: {error}", describe_call(effect));
                 reply

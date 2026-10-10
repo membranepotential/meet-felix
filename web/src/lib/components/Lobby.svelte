@@ -31,7 +31,11 @@
 
 <main>
 	<p class="meeting">{meeting}</p>
-	{#if waiting && scheduled}
+	{#if session.state.consentAsked}
+		<!-- Seen under the consent dialog: a recording runs and we have not accepted it. -->
+		<h1>Recording consent</h1>
+		<p>Accept the recording to join.</p>
+	{:else if waiting && scheduled}
 		<h1>Waiting for the host</h1>
 		<p>The meeting has not started yet. You join as soon as the host arrives.</p>
 	{:else if waiting}

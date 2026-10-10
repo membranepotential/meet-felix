@@ -67,9 +67,8 @@ async function firstPulls(people: readonly Participant[]): Promise<FirstPull[]> 
 				connectedMs: connected && connected.at - offered,
 				pulledMs: pulled && pulled.at - offered,
 				leftOut: before.filter((f) => f.msg.type === 'subscribeOffer').length,
-				failed: before.filter(
-					(f) => f.msg.type === 'error' && f.msg.code === 'subscribeFailed'
-				).length
+				failed: before.filter((f) => f.msg.type === 'error' && f.msg.code === 'subscribeFailed')
+					.length
 			});
 		}
 	}

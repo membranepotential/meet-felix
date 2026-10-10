@@ -166,6 +166,8 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 				].flatMap((v) => ['--var', v])
 			);
 		} else {
+			// Keeps wrangler.toml's production `RECORDER_ORIGIN` on purpose: the real SFU cannot
+			// reach localhost, and the @real specs never record (that would need `wrangler dev --tunnel`).
 			if (!hasRealSfuSecrets()) throw new Error(`${DEV_VARS} lacks ${REAL_SECRETS.join(', ')}`);
 			ownerPassword = parseDevVars(readFileSync(DEV_VARS, 'utf8')).get('CREATE_SECRET') ?? '';
 			// Read in place: the secrets are never copied into the stack's directory.
