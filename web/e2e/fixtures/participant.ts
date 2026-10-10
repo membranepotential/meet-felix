@@ -145,18 +145,31 @@ export class Participant {
 
 	/** The in-meeting view. */
 	get meeting(): Locator {
-		return this.page.locator('div.meeting');
+		return this.page.getByTestId('meeting');
 	}
 
+	/** Every participant's tile, in any layout (grid, strip beside a screen, chip). */
 	get tiles(): Locator {
-		return this.page.locator('figure.tile');
+		return this.page.getByTestId('tile');
 	}
 
-	/** The tile whose caption is `name` exactly, e.g. "Guest" or "Felix Peppert (you)". */
+	/** The tile whose name is `name` exactly, e.g. "Guest" or "Felix Peppert (you)". */
 	tile(name: string): Locator {
 		return this.tiles.filter({
-			has: this.page.locator('figcaption .name', { hasText: new RegExp(`^${escapeRegExp(name)}$`) })
+			has: this.page
+				.getByTestId('tile-name')
+				.filter({ hasText: new RegExp(`^${escapeRegExp(name)}$`) })
 		});
+	}
+
+	/** The notification pill above the control bar that contains `text`. */
+	pill(text: string): Locator {
+		return this.page.getByTestId('pill').filter({ hasText: text });
+	}
+
+	/** The transcript link on the page shown after a recorded meeting ended. */
+	get transcriptLink(): Locator {
+		return this.page.getByTestId('transcript-link');
 	}
 
 	control(name: string): Locator {

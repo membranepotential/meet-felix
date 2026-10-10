@@ -75,7 +75,9 @@
 			The transcript will be at this link once it is ready. Save the link now; this page does not
 			show it again.
 		</p>
-		<a class="transcript" href={url}><span class="host">{transcriptBase}</span>{token}</a>
+		<a class="transcript" href={url} data-testid="transcript-link"
+			><span class="host">{transcriptBase}</span>{token}</a
+		>
 		<div class="actions">
 			<ShareButton {url} title="Meeting transcript" primary />
 			<CopyButton text={url} />

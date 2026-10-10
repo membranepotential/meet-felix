@@ -9,10 +9,17 @@
  * offer; later pulls of that track succeed. A lost session answers that call and every later
  * one with HTTP 410 `session_error`, as the live SFU did on 2026-10-09.
  *
+ * Its WebSocket adapters (`adapters/websocket/new` and `close`) behave like Cloudflare's: each
+ * one opens a WebSocket to the recorder's endpoint and streams the audio set through
+ * `/__control/adapter-audio` in 20 ms protobuf packets, looping, until it is closed. Without
+ * audio, an adapter connects and sends nothing. It connects only to `ws://` endpoints, so a
+ * Worker configured with the production `RECORDER_ORIGIN` never gets a stream from it.
+ *
  * Run it on its own with `node e2e/mock-sfu.ts <port> <app-id> <app-secret>` (port 0: any free one); the `stack`
  * fixture does that and stops it by PID.
  */
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
 	answerSdp,
@@ -48,9 +55,20 @@ export interface TracksRequest {
 	tracks: TrackObject[];
 }
 
-/** One call the room made, numbered in arrival order from 1. */
+/** One entry of `adapters/websocket/new` (`AdapterTrack` in `wire.rs`): stream a track there. */
+export interface AdapterTrack {
+	location: 'remote';
+	sessionId: string;
+	trackName: string;
+	endpoint: string;
+	outputCodec: 'pcm';
+}
+
+/** One call the Worker made, numbered in arrival order from 1. Adapter calls have no session. */
 export type SfuCall = { seq: number } & (
 	| { op: 'new'; session: null }
+	| { op: 'adapters/websocket/new'; session: null; body: { tracks: AdapterTrack[] } }
+	| { op: 'adapters/websocket/close'; session: null; body: { tracks: { adapterId: string }[] } }
 	| { op: 'tracks/new'; session: string; body: TracksRequest }
 	| { op: 'renegotiate'; session: string; body: { sessionDescription: SessionDescription } }
 	| { op: 'tracks/close'; session: string; body: { tracks: { mid: string }[]; force: boolean } }
@@ -59,9 +77,12 @@ export type SfuCall = { seq: number } & (
 
 // ---- The control API
 
-/** `POST /__control/{command}` bodies. `GET /__control/calls?since=n` lists calls after `n`. */
+/**
+ * `POST /__control/{command}` bodies. `GET /__control/calls?since=n` lists calls after `n`;
+ * `GET /__control/adapters` lists the adapters.
+ */
 export interface ControlCommands {
-	/** Clears every fault below. Sessions and the call log stay. */
+	/** Clears every fault below and the adapter audio. Sessions, adapters and the call log stay. */
 	reset: Record<string, never>;
 	/** While down, every SFU call answers 503. */
 	down: { down: boolean };
@@ -69,12 +90,32 @@ export interface ControlCommands {
 	'close-delay': { ms: number };
 	/** Loses the session of the next pull (`tracks/new` with remote tracks), or a given session. */
 	'lose-session': { next: 'pull' } | { session: string };
+	/**
+	 * Every adapter created afterwards streams this file, raw 48 kHz stereo s16le PCM as the
+	 * adapter delivers it, in a loop; `null`: adapters connect and send nothing (the default).
+	 */
+	'adapter-audio': { file: string | null };
 }
 
 export type ControlCommand = keyof ControlCommands;
 
 export interface CallsResponse {
 	calls: SfuCall[];
+}
+
+/** A WebSocket adapter of the mock: where it streams, how far its socket got, what it sent. */
+export interface AdapterView {
+	adapterId: string;
+	trackName: string;
+	endpoint: string;
+	/** `refused`: the endpoint closed or failed the socket before it opened. */
+	state: 'connecting' | 'open' | 'closed' | 'refused';
+	/** Packets sent so far, 20 ms of audio each. */
+	packets: number;
+}
+
+export interface AdaptersResponse {
+	adapters: AdapterView[];
 }
 
 // ---- State
@@ -111,6 +152,76 @@ const SESSION_GONE = {
 
 const random = (bytes: number) => new Uint8Array(randomBytes(bytes));
 
+// ---- WebSocket adapters
+
+/** One packet's payload: 20 ms of 48 kHz stereo signed 16-bit PCM. */
+const FRAME_BYTES = 960 * 4;
+
+/** Protobuf `Packet { uint32 sequenceNumber = 1; uint32 timestamp = 2; bytes payload = 5; }`. */
+export function adapterPacket(
+	sequenceNumber: number,
+	timestamp: number,
+	payload: Uint8Array
+): Uint8Array<ArrayBuffer> {
+	const header: number[] = [];
+	const varint = (value: number) => {
+		let rest = value;
+		while (rest >= 0x80) {
+			header.push((rest % 0x80) | 0x80);
+			rest = Math.floor(rest / 0x80);
+		}
+		header.push(rest);
+	};
+	varint(1 << 3);
+	varint(sequenceNumber >>> 0);
+	varint(2 << 3);
+	varint(timestamp >>> 0);
+	varint((5 << 3) | 2);
+	varint(payload.length);
+	return Buffer.concat([Uint8Array.from(header), payload]);
+}
+
+interface Adapter {
+	view: AdapterView;
+	socket: WebSocket;
+}
+
+/** Connects to `track.endpoint` and streams `audio` (if any) in 20 ms packets until closed. */
+function startAdapter(adapterId: string, track: AdapterTrack, audio: Uint8Array | null): Adapter {
+	const view: AdapterView = {
+		adapterId,
+		trackName: track.trackName,
+		endpoint: track.endpoint,
+		state: 'connecting',
+		packets: 0
+	};
+	const socket = new WebSocket(track.endpoint);
+	let timer: ReturnType<typeof setInterval> | undefined;
+	socket.addEventListener('open', () => {
+		view.state = 'open';
+		if (audio === null) return;
+		let sequence = 1000;
+		let offset = 0;
+		timer = setInterval(() => {
+			if (socket.readyState !== WebSocket.OPEN) return;
+			if (offset + FRAME_BYTES > audio.length) offset = 0;
+			socket.send(
+				adapterPacket(sequence, sequence * 960, audio.subarray(offset, offset + FRAME_BYTES))
+			);
+			offset += FRAME_BYTES;
+			sequence += 1;
+			view.packets += 1;
+		}, 20);
+	});
+	socket.addEventListener('close', () => {
+		clearInterval(timer);
+		view.state = view.state === 'connecting' ? 'refused' : 'closed';
+	});
+	// A refused upgrade fires `error`, then `close`; the state above records it.
+	socket.addEventListener('error', () => {});
+	return { view, socket };
+}
+
 // ---- Validation of what arrives: the room's JSON, and the tests' control commands
 
 type Json = Record<string, unknown>;
@@ -133,10 +244,41 @@ function isTrackObject(value: unknown): value is TrackObject {
 const isTrackList = (value: unknown): value is TrackObject[] =>
 	Array.isArray(value) && value.every(isTrackObject);
 
+const isAdapterTrack = (value: unknown): value is AdapterTrack =>
+	isObject(value) &&
+	value.location === 'remote' &&
+	isString(value.sessionId) &&
+	isString(value.trackName) &&
+	isString(value.endpoint) &&
+	value.outputCodec === 'pcm';
+
+/** 1 to 4 entries, as the API takes them. */
+const isAdapterBatch = <T>(value: unknown, isEntry: (v: unknown) => v is T): value is T[] =>
+	Array.isArray(value) && value.length >= 1 && value.length <= 4 && value.every(isEntry);
+
+const isAdapterRef = (value: unknown): value is { adapterId: string } =>
+	isObject(value) && isString(value.adapterId);
+
 /** The call `op` on `session` with `body`, or `null` if the body is not what the API takes. */
 function toCall(seq: number, op: string, session: string | null, body: unknown): SfuCall | null {
 	if (op === 'new') return { seq, op, session: null };
-	if (session === null || !isObject(body)) return null;
+	if (!isObject(body)) return null;
+	if (op === 'adapters/websocket/new') {
+		return isAdapterBatch(body.tracks, isAdapterTrack)
+			? { seq, op, session: null, body: { tracks: body.tracks } }
+			: null;
+	}
+	if (op === 'adapters/websocket/close') {
+		return isAdapterBatch(body.tracks, isAdapterRef)
+			? {
+					seq,
+					op,
+					session: null,
+					body: { tracks: body.tracks.map(({ adapterId }) => ({ adapterId })) }
+				}
+			: null;
+	}
+	if (session === null) return null;
 	switch (op) {
 		case 'tracks/new':
 			return isTrackList(body.tracks) &&
@@ -175,7 +317,10 @@ function toCall(seq: number, op: string, session: string | null, body: unknown):
 	}
 }
 
-function parseControl(command: string, body: unknown): Partial<Faults> | { lose: string } | null {
+function parseControl(
+	command: string,
+	body: unknown
+): Partial<Faults> | { lose: string } | { audioFile: string | null } | null {
 	if (!isObject(body)) return null;
 	switch (command) {
 		case 'reset':
@@ -187,6 +332,8 @@ function parseControl(command: string, body: unknown): Partial<Faults> | { lose:
 		case 'lose-session':
 			if (body.next === 'pull') return { loseNextPull: true };
 			return isString(body.session) ? { lose: body.session } : null;
+		case 'adapter-audio':
+			return body.file === null || isString(body.file) ? { audioFile: body.file } : null;
 		default:
 			return null;
 	}
@@ -202,6 +349,14 @@ function parseJson(text: string): unknown {
 	}
 }
 
+/** The PCM in `file`, whole frames only; at least one frame. */
+function audioFrom(file: string): Uint8Array {
+	const pcm = new Uint8Array(readFileSync(file));
+	const usable = pcm.length - (pcm.length % FRAME_BYTES);
+	if (usable === 0) throw new Error(`${file} holds less than 20 ms of audio`);
+	return pcm.subarray(0, usable);
+}
+
 // ---- The server
 
 export interface MockSfuOptions {
@@ -215,8 +370,12 @@ export function createMockSfu({ appId, appSecret }: MockSfuOptions) {
 	/** Published tracks pulled at least once, as `publisherSession/trackName`. */
 	const pulledOnce = new Set<string>();
 	let faults: Faults = NO_FAULTS;
+	const adapters = new Map<string, Adapter>();
+	/** What adapters created from now on stream; see `ControlCommands['adapter-audio']`. */
+	let adapterAudio: Uint8Array | null = null;
 
-	const sfuPath = new RegExp(`^/v1/apps/${appId}/sessions/(?:new|([0-9a-f]+)/(.+))$`);
+	const sessionPath = new RegExp(`^/v1/apps/${appId}/sessions/(?:new|([0-9a-f]+)/(.+))$`);
+	const adapterPath = new RegExp(`^/v1/apps/${appId}/(adapters/websocket/(?:new|close))$`);
 
 	function reply(res: ServerResponse, status: number, value: unknown): void {
 		res.writeHead(status, { 'content-type': 'application/json' });
@@ -297,13 +456,40 @@ export function createMockSfu({ appId, appSecret }: MockSfuOptions) {
 		});
 	}
 
+	/** Starts one adapter per entry; HTTP 503 with the entries' errors if every entry failed. */
+	function createAdapters(res: ServerResponse, tracks: AdapterTrack[]): void {
+		const results = tracks.map((track) => {
+			if (!track.endpoint.startsWith('ws://')) {
+				return {
+					trackName: track.trackName,
+					errorCode: 'invalid_endpoint',
+					errorDescription: 'the mock SFU streams only to ws:// endpoints (a local Worker)'
+				};
+			}
+			const adapterId = Buffer.from(random(8)).toString('hex');
+			adapters.set(adapterId, startAdapter(adapterId, track, adapterAudio));
+			return { adapterId, trackName: track.trackName, endpoint: track.endpoint };
+		});
+		const failed = results.every((r) => 'errorCode' in r);
+		reply(res, failed ? 503 : 200, { tracks: results });
+	}
+
+	/** Closes the adapters' sockets; closing an unknown or closed adapter succeeds. */
+	function closeAdapters(res: ServerResponse, tracks: { adapterId: string }[]): void {
+		for (const { adapterId } of tracks) adapters.get(adapterId)?.socket.close();
+		reply(res, 200, { tracks: tracks.map(({ adapterId }) => ({ adapterId })) });
+	}
+
 	async function sfuCall(req: IncomingMessage, res: ServerResponse, body: unknown, path: string) {
-		const match = sfuPath.exec(path);
-		if (!match) return reply(res, 404, { errorCode: 'not_found', errorDescription: path });
-		const [, sessionId, rest] = match;
+		const adapterOp = adapterPath.exec(path)?.[1];
+		const match = sessionPath.exec(path);
+		if (!adapterOp && !match) {
+			return reply(res, 404, { errorCode: 'not_found', errorDescription: path });
+		}
+		const [, sessionId, rest] = match ?? [];
 		const call = toCall(
 			calls.length + 1,
-			sessionId ? (rest ?? '') : 'new',
+			adapterOp ?? (sessionId ? (rest ?? '') : 'new'),
 			sessionId ?? null,
 			body
 		);
@@ -334,6 +520,8 @@ export function createMockSfu({ appId, appSecret }: MockSfuOptions) {
 			});
 			return reply(res, 201, { sessionId: id });
 		}
+		if (call.op === 'adapters/websocket/new') return createAdapters(res, call.body.tracks);
+		if (call.op === 'adapters/websocket/close') return closeAdapters(res, call.body.tracks);
 		const session = sessions.get(call.session);
 		if (!session)
 			return reply(res, 404, { errorCode: 'not_found', errorDescription: 'no such session' });
@@ -373,14 +561,25 @@ export function createMockSfu({ appId, appSecret }: MockSfuOptions) {
 			const response: CallsResponse = { calls: calls.filter((c) => c.seq > since) };
 			return reply(res, 200, response);
 		}
+		if (req.method === 'GET' && command === 'adapters') {
+			const response: AdaptersResponse = { adapters: [...adapters.values()].map((a) => a.view) };
+			return reply(res, 200, response);
+		}
 		const change = req.method === 'POST' ? parseControl(command, body ?? {}) : null;
 		if (change === null) return reply(res, 400, { error: `bad control request ${command}` });
-		if ('lose' in change) {
+		if ('audioFile' in change) {
+			try {
+				adapterAudio = change.audioFile === null ? null : audioFrom(change.audioFile);
+			} catch (error) {
+				return reply(res, 400, { error: String(error) });
+			}
+		} else if ('lose' in change) {
 			const session = sessions.get(change.lose);
 			if (!session) return reply(res, 404, { error: `no session ${change.lose}` });
 			session.gone = true;
 		} else {
 			faults = { ...faults, ...change };
+			if (command === 'reset') adapterAudio = null;
 		}
 		res.writeHead(204).end();
 	}

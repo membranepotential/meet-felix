@@ -1,7 +1,14 @@
 /** A typed client for the mock SFU's control API (see `../mock-sfu.ts`). */
-import type { CallsResponse, ControlCommand, ControlCommands, SfuCall } from '../mock-sfu.ts';
+import type {
+	AdaptersResponse,
+	AdapterView,
+	CallsResponse,
+	ControlCommand,
+	ControlCommands,
+	SfuCall
+} from '../mock-sfu.ts';
 
-export type { SfuCall };
+export type { AdapterView, SfuCall };
 
 export class MockSfu {
 	readonly #url: string;
@@ -22,7 +29,10 @@ export class MockSfu {
 		}
 	}
 
-	/** Clears every fault and starts a new call log view: `calls()` shows only later calls. */
+	/**
+	 * Clears every fault and the adapter audio, and starts a new call log view: `calls()` shows
+	 * only later calls.
+	 */
 	async reset(): Promise<void> {
 		await this.#command('reset', {});
 		const all = await this.#fetchCalls(0);
@@ -44,6 +54,20 @@ export class MockSfu {
 
 	loseSession(session: string): Promise<void> {
 		return this.#command('lose-session', { session });
+	}
+
+	/**
+	 * Adapters created from now on stream `file` (raw 48 kHz stereo s16le PCM) in a loop;
+	 * `null`: they connect and send nothing. `reset` sets `null`.
+	 */
+	setAdapterAudio(file: string | null): Promise<void> {
+		return this.#command('adapter-audio', { file });
+	}
+
+	/** Every WebSocket adapter the mock started, oldest first, including other tests'. */
+	async adapters(): Promise<AdapterView[]> {
+		const response = await fetch(`${this.#url}/__control/adapters`);
+		return ((await response.json()) as AdaptersResponse).adapters;
 	}
 
 	async #fetchCalls(since: number): Promise<SfuCall[]> {

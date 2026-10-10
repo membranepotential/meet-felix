@@ -62,7 +62,8 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 	api: async ({ stack }, use) => use(new Api(stack.baseUrl)),
 	owner: async ({ api, stack }, use) => use(await loginAsOwner(api, stack.ownerPassword)),
 	sfu: async ({ stack }, use) => {
-		if (!stack.sfu) throw new Error('the sfu fixture needs the mock SFU (stackKind "mock")');
+		if (!stack.sfu)
+			throw new Error('the sfu fixture needs the mock SFU (stackKind "mock" or "recorder")');
 		await stack.sfu.reset();
 		await use(stack.sfu);
 		await stack.sfu.reset();

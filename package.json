@@ -7,7 +7,8 @@
     "build": "pnpm --filter web build:core && pnpm --filter web build",
     "release": "pnpm build && wrangler deploy",
     "test:e2e": "pnpm --filter web test:e2e",
-    "test:e2e:real": "pnpm --filter web test:e2e:real"
+    "test:e2e:real": "pnpm --filter web test:e2e:real",
+    "test:e2e:recorder": "pnpm --filter web test:e2e:recorder"
   },
   "devDependencies": {
     "wrangler": "^4.147.0"

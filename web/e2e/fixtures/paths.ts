@@ -12,6 +12,8 @@ export const WRANGLER_CONFIG = at('../../../wrangler.toml');
 export const WRANGLER_BIN = at('../../../node_modules/.bin/wrangler');
 export const DEV_VARS = at('../../../.dev.vars');
 export const MOCK_SFU_SCRIPT = at('../mock-sfu.ts');
+/** Real speech for the recorder test; see the README there. */
+export const AUDIO_DIR = at('../audio/');
 
 /** Git-ignored: test results, the Worker bundle, and one directory per running stack. */
 export const ARTIFACTS_DIR = at('../.artifacts/');

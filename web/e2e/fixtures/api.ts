@@ -12,6 +12,11 @@ import type {
 	RecordingPolicy,
 	TranscriptRef
 } from '../../src/lib/protocol.ts';
+import {
+	parseTranscriptStatus,
+	type Progress,
+	type TranscriptStatus
+} from '../../src/lib/transcript.ts';
 
 /** Request headers that authenticate the owner: the session cookie or the bearer secret. */
 export type Auth = Readonly<Record<string, string>>;
@@ -42,12 +47,34 @@ export interface ListedMeetingWire {
 	transcript?: TranscriptRef;
 }
 
+/**
+ * `GET /api/transcript/{token}` for a known token: the transcript page's `TranscriptStatus`, and
+ * the progress the Worker sends with every status (the page reads it only while the job runs).
+ * Read it with `transcriptStatusOf`.
+ */
+export type TranscriptStatusWire = Exclude<TranscriptStatus, { status: 'not-found' }> & {
+	progress: Progress;
+};
+
+/** The downloads of a ready transcript. */
+export type TranscriptFile = 'transcript.md' | 'transcript.json';
+
 export interface IceWire {
 	iceServers: { urls: string[]; username?: string; credential?: string }[];
 }
 
 /** The body of a JSON response, typed as the endpoint promises; the caller asserts it. */
 export const body = async <T>(response: Response): Promise<T> => (await response.json()) as T;
+
+/** A transcript status, checked by the transcript page's own parser; throws if the page could not read it. */
+export async function transcriptStatusOf(response: Response): Promise<TranscriptStatusWire> {
+	const raw: unknown = await response.json();
+	const status = parseTranscriptStatus(raw);
+	if (status === null || status.status === 'not-found') {
+		throw new Error(`the transcript page cannot read this status: ${JSON.stringify(raw)}`);
+	}
+	return { ...status, progress: (raw as { progress: Progress }).progress };
+}
 
 /** The `Cookie` request header for a response's first `Set-Cookie`, or "" if there is none. */
 export const cookieOf = (response: Response): string =>
@@ -101,35 +128,56 @@ export class Api {
 		return this.#fetch(meeting === null ? '/api/ice' : `/api/ice?meeting=${meeting}`);
 	}
 
+	transcript(token: TranscriptRef): Promise<Response> {
+		return this.#fetch(`/api/transcript/${token}`);
+	}
+
+	transcriptFile(token: TranscriptRef, file: TranscriptFile): Promise<Response> {
+		return this.#fetch(`/api/transcript/${token}/${file}`);
+	}
+
+	/** The transcript page `/t/{token}`, a static asset of the web app. */
+	transcriptPage(token: TranscriptRef): Promise<Response> {
+		return this.#fetch(`/t/${token}`);
+	}
+
 	/** A plain GET of the socket path, without the upgrade headers. */
 	socketWithoutUpgrade(meeting: MeetingId): Promise<Response> {
 		return this.#fetch(`/ws/${meeting}`);
 	}
 
-	/** The status of a WebSocket upgrade request: 101 if accepted. (`fetch` forbids `Upgrade`.) */
+	/** The status of a WebSocket upgrade request to the room: 101 if accepted. */
 	upgradeStatus(meeting: MeetingId): Promise<number> {
-		return new Promise((resolve, reject) => {
-			const req = request(`${this.baseUrl}/ws/${meeting}`, {
-				headers: {
-					connection: 'Upgrade',
-					upgrade: 'websocket',
-					'sec-websocket-version': '13',
-					'sec-websocket-key': randomBytes(16).toString('base64')
-				}
-			});
-			req.on('upgrade', (_response, socket) => {
-				socket.destroy();
-				resolve(101);
-			});
-			req.on('response', (response) => {
-				response.resume();
-				resolve(response.statusCode ?? 0);
-			});
-			req.on('error', reject);
-			req.setTimeout(5_000, () => req.destroy(new Error('upgrade request timed out')));
-			req.end();
-		});
+		return upgradeStatus(`${this.baseUrl}/ws/${meeting}`);
 	}
+}
+
+/**
+ * The status of a WebSocket upgrade request to `url` (`http:` or `ws:`): 101 if accepted.
+ * (`fetch` forbids `Upgrade`.)
+ */
+export function upgradeStatus(url: string): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const req = request(url.replace(/^ws/, 'http'), {
+			headers: {
+				connection: 'Upgrade',
+				upgrade: 'websocket',
+				'sec-websocket-version': '13',
+				'sec-websocket-key': randomBytes(16).toString('base64')
+			}
+		});
+		req.on('upgrade', (_response, socket) => {
+			socket.destroy();
+			resolve(101);
+		});
+		req.on('response', (response) => {
+			response.resume();
+			resolve(response.statusCode ?? 0);
+		});
+		req.on('error', reject);
+		req.setTimeout(5_000, () => req.destroy(new Error('upgrade request timed out')));
+		req.end();
+	});
 }
 
 /** Logs in through `POST /api/login` and returns the owner's session cookie. */

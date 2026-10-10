@@ -14,7 +14,8 @@
 		"build:core": "wasm-pack build ../crates/meeting-core --target web --out-dir ../../web/src/lib/wasm --release --no-pack -- --features wasm",
 		"test": "vitest run",
 		"test:e2e": "playwright test --project=protocol --project=chromium --project=firefox",
-		"test:e2e:real": "playwright test --project=real"
+		"test:e2e:real": "playwright test --project=real",
+		"test:e2e:recorder": "E2E_RECORDER=1 playwright test --project=recorder"
 	},
 	"imports": {
 		"#lib/*": "./src/lib/*"

@@ -3,6 +3,50 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — The recorder e2e is a Playwright test; testids for the UI
+
+STATUS Next item 1. The standalone script `crates/worker/recorder-e2e/run.mjs`
+is gone; its checks live in `web/e2e/protocol/recorder.spec.ts`, run with
+`pnpm test:e2e:recorder`.
+
+- The mock SFU (`web/e2e/mock-sfu.ts`) now answers `adapters/websocket/new`
+  and `close` like Cloudflare: each adapter opens a WebSocket to the
+  recorder's endpoint and streams the audio a test set with
+  `/__control/adapter-audio` in 20 ms protobuf packets, looping, until it is
+  closed. Without audio it connects and sends nothing. It connects only to
+  `ws://` endpoints. `GET /__control/adapters` shows each adapter's socket
+  state and packet count.
+- The stack gives `wrangler dev` a port picked up front and
+  `RECORDER_ORIGIN=http://localhost:<port>`, for every stack on the mock SFU.
+  Before, the offline suite kept the production origin from
+  `wrangler.toml` and every recorded meeting logged "no adapter … HTTP 404";
+  now its adapters connect to the local recorder, store no chunks and never
+  call Workers AI.
+- A third stack kind, `recorder`: the mock SFU without `--local`, so Workers
+  AI runs remotely as before in the script. The new Playwright project
+  `recorder` runs only the test tagged `@recorder`; the `protocol` project
+  skips it. Why a separate project and script: the test needs the network
+  and `wrangler login`, costs Workers AI neurons and takes about a minute,
+  and the default `pnpm test:e2e` must stay offline and fast.
+- `fixtures/speech.ts` reads the snippets' WAV files itself (no `ffmpeg`), so
+  the tone fallback of the script is gone. The documented differences to the
+  script are in docs/TESTING.md.
+
+First run: passed in 46 s. Whisper's text: "okay, so on the laptop that works
+good. now i'm going to my phone in the other room. probably should have more
+better coverage of end-to-end tests. okay, ending now. okay, i'm still muted
+here. now i'm unmuted on my phone. i see the screen. that works well. hello,
+hello? okay, so now the button does do something. it just doesn't have
+feedback. okay, so on the…", with all nine keywords and no gaps.
+
+The UI got the `data-testid`s the e2e tests asked for: `meeting`, `tile` and
+`tile-name`, `pill` and `transcript-link`. `Participant` finds the meeting
+view, tiles, pills and the transcript link through them (`pill(text)` and
+`transcriptLink` are new); the specs no longer use the CSS classes `.pill`
+and `a.transcript`. No behaviour changed. Offline e2e: 64 passed, 3 skipped.
+
+Next: code review, commit; no deploy needed beyond the testids.
+
 ## 2026-10-10 — An ended room deletes its storage after an hour
 
 STATUS Next item 1. Until now `Record::Ended` stayed in the room's storage

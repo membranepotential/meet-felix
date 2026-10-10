@@ -12,8 +12,7 @@ const consentDialog = (p: Participant) =>
 	p.page.getByRole('dialog', { name: 'This meeting is being recorded' });
 
 /** The host's notice naming who has not accepted the recording. */
-const unconsentedNotice = (p: Participant) =>
-	p.page.locator('.stack .pill', { hasText: 'not accepted the recording yet' });
+const unconsentedNotice = (p: Participant) => p.pill('not accepted the recording yet');
 
 test('the host sees who has not accepted the recording until they do', async ({
 	api,

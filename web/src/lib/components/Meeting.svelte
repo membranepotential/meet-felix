@@ -208,7 +208,7 @@
 
 <svelte:document onfullscreenchange={onFullscreenChange} />
 
-<div bind:this={root} class={['meeting', expanded && 'expanded']}>
+<div bind:this={root} class={['meeting', expanded && 'expanded']} data-testid="meeting">
 	<!-- Expanded, the header gives way to the screen; only the recording badge stays (D15). -->
 	{#if !expanded || session.room?.recording}
 		<header>

@@ -88,9 +88,7 @@ test('a failed peer connection: the client asks for a new session and says it re
 
 	const mark = await sfu.lastSeq();
 	await guest.failSubscribeConnection();
-	await expect(
-		guest.page.locator('.pill', { hasText: 'Reconnecting to the others…' })
-	).toBeVisible();
+	await expect(guest.pill('Reconnecting to the others…')).toBeVisible();
 	await guest.waitForSent('resetSession', (m) => m.kind === 'subscribe' && m.epoch === 0);
 	await sfu.waitForCall(isNewSession, { after: mark });
 	await guest.waitForReceived('subscribeReset', (m) => m.epoch === 1);
@@ -133,7 +131,7 @@ test('a dropped socket shows "Reconnecting…" on both sides and the same partic
 	// and 3000–4999: with 1001 the room saw no close until the page closed (2026-10-10).
 	await dropped.server.close({ code: 4000, reason: 'e2e: dropped' });
 	await dropped.page.close({ code: 1001, reason: 'e2e: dropped' });
-	const pill = guest.page.locator('.pill', { hasText: 'Reconnecting…' });
+	const pill = guest.pill('Reconnecting…');
 	await expect(pill).toBeVisible();
 	// The host keeps the guest's tile, marked, while the room waits for the guest.
 	const guestTile = host.tile('Guest');

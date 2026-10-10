@@ -116,6 +116,7 @@
 			<button
 				type="button"
 				class="pill"
+				data-testid="pill"
 				title="Dismiss"
 				onclick={() => session.toasts.dismiss(toast.id)}
 			>
@@ -146,7 +147,7 @@
 	{/each}
 	<!-- No button: only they can accept; it goes away when they do or recording stops. -->
 	{#if unconsented}
-		<p class="pill" transition:fade={{ duration: motion }}>
+		<p class="pill" data-testid="pill" transition:fade={{ duration: motion }}>
 			{@render face('info', unconsented)}
 		</p>
 	{/if}
@@ -154,6 +155,7 @@
 		<button
 			type="button"
 			class="pill"
+			data-testid="pill"
 			transition:fade={{ duration: motion }}
 			onclick={() => session.audio.resume()}
 		>
@@ -161,7 +163,7 @@
 		</button>
 	{/if}
 	{#if connection}
-		<p class="pill" transition:fade={{ duration: motion }}>
+		<p class="pill" data-testid="pill" transition:fade={{ duration: motion }}>
 			{@render face(connection.tone, connection.text)}
 		</p>
 	{/if}

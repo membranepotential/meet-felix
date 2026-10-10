@@ -239,7 +239,7 @@ test('a guest leaves; the host ends the meeting for everyone, with the transcrip
 	await host.endForAll();
 	for (const p of [host, third]) {
 		await expect(p.page.getByRole('heading', { name: 'The meeting has ended' })).toBeVisible();
-		await expect(p.page.locator('a.transcript')).toHaveAttribute('href', /\/t\/[0-9a-f]{32}$/);
+		await expect(p.transcriptLink).toHaveAttribute('href', /\/t\/[0-9a-f]{32}$/);
 	}
 
 	const late = await people.open('late');

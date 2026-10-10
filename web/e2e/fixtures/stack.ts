@@ -1,13 +1,14 @@
 /**
  * The local stack the e2e tests run against: `wrangler dev` with the Worker from the build in
- * `.artifacts/worker`, and either the mock SFU (`mock`) or the real Cloudflare Realtime SFU
- * (`real`, with the secrets from the repo's `.dev.vars`).
+ * `.artifacts/worker`, and one of three kinds (`StackKind`): the mock SFU offline, the mock SFU
+ * with the real Workers AI, or the real Cloudflare Realtime SFU.
  *
  * Each stack gets its own directory under `.artifacts/stacks/`: a copy of `wrangler.toml`
  * without the `[build]` table (so `wrangler dev` neither rebuilds nor watches the crate while
  * tests run), its Durable Object and KV state, and the logs of both processes.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { MockSfu } from './mock-sfu-control.ts';
 import {
@@ -22,7 +23,14 @@ import {
 } from './paths.ts';
 import { spawnLogged, waitForLog, waitUntil, type Child } from './processes.ts';
 
-export type StackKind = 'mock' | 'real';
+/**
+ * - `mock`: the mock SFU, and no remote bindings, so no network and no Cloudflare login; the
+ *   transcript job cannot reach Workers AI.
+ * - `recorder`: the mock SFU, with Workers AI remote as `wrangler dev` runs it by default: needs
+ *   the network and `wrangler login`, and each transcript costs Workers AI neurons.
+ * - `real`: the real Realtime SFU with the secrets from the repo's `.dev.vars`.
+ */
+export type StackKind = 'mock' | 'recorder' | 'real';
 
 export interface Stack {
 	kind: StackKind;
@@ -87,6 +95,18 @@ export function prebuiltConfig(toml: string, main: string, assets: string): stri
 	return lines.join('\n');
 }
 
+/**
+ * A port that was free a moment ago. The race with another process taking it in between is
+ * accepted: `wrangler dev` then fails with an `[ERROR]` line, which fails the stack loudly.
+ */
+async function freePort(): Promise<number> {
+	const server = createServer();
+	await new Promise<void>((resolve) => server.listen(0, 'localhost', resolve));
+	const { port } = server.address() as AddressInfo;
+	await new Promise((resolve) => server.close(resolve));
+	return port;
+}
+
 async function startMockSfu(dir: string, appId: string, appSecret: string) {
 	const log = join(dir, 'mock-sfu.log');
 	const child = spawnLogged(process.execPath, [MOCK_SFU_SCRIPT, '0', appId, appSecret], {
@@ -121,22 +141,28 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 	try {
 		let ownerPassword: string;
 		let sfu: MockSfu | null = null;
+		// The Worker's port: 0 lets wrangler pick one and log it, so stacks started side by side
+		// never race for a port. Against the mock SFU, the recorder's `RECORDER_ORIGIN` must name
+		// the Worker itself (the mock's adapters connect there), so the port is chosen up front.
+		let port = 0;
 		const flags = ['--var', 'ROOM_JURISDICTION:'];
-		if (kind === 'mock') {
-			// No remote bindings (Workers AI runs remotely in `wrangler dev`): the local stack needs
-			// no network and no Cloudflare login.
-			flags.push('--local');
+		if (kind === 'mock' || kind === 'recorder') {
+			// `--local` disables the remote bindings; Workers AI is the only one this Worker has.
+			if (kind === 'mock') flags.push('--local');
 			ownerPassword = 'e2e-owner-password';
 			const [appId, appSecret] = ['e2e', 'e2e-sfu-secret'];
 			const mock = await startMockSfu(dir, appId, appSecret);
 			children.push(mock.child);
 			sfu = new MockSfu(mock.url);
+			// Picked right before wrangler starts, so no other process of this run takes it first.
+			port = await freePort();
 			flags.push(
 				...[
 					`CREATE_SECRET:${ownerPassword}`,
 					`CALLS_APP_ID:${appId}`,
 					`CALLS_APP_SECRET:${appSecret}`,
-					`SFU_API_URL:${mock.url}/v1`
+					`SFU_API_URL:${mock.url}/v1`,
+					`RECORDER_ORIGIN:http://localhost:${port}`
 				].flatMap((v) => ['--var', v])
 			);
 		} else {
@@ -154,8 +180,6 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 				WEB_BUILD_DIR
 			)
 		);
-		// Port 0 everywhere: wrangler picks free ports and logs the one it serves on, so stacks
-		// started side by side never race for a port.
 		const log = join(dir, 'wrangler.log');
 		const wrangler = spawnLogged(
 			WRANGLER_BIN,
@@ -164,7 +188,7 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 				'--config',
 				config,
 				'--port',
-				'0',
+				String(port),
 				'--inspector-port',
 				'0',
 				'--persist-to',

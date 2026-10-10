@@ -94,6 +94,7 @@
 </script>
 
 <figure
+	data-testid="tile"
 	class={['tile', variant, speaking && 'speaking', tile.reconnecting && 'reconnecting']}
 	title={variant === 'chip' ? label : undefined}
 	{@attach tile.layerTrack && reportWidth(tile.layerTrack)}
@@ -143,7 +144,7 @@
 				{#each bars as height, i (i)}<span style:--h={height}></span>{/each}
 			</span>
 		{/if}
-		<span class="name">{label}</span>
+		<span class="name" data-testid="tile-name">{label}</span>
 		<!-- Not on strip tiles: their caption is too narrow for the name and the label. -->
 		{#if tile.unrecorded && variant !== 'strip'}<span class="unrecorded">Not recorded</span>{/if}
 		<!-- Strip captions are too narrow for it; the dimmed picture shows it there. -->

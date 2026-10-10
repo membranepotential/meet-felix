@@ -1,7 +1,8 @@
 /**
  * End-to-end tests (docs/TESTING.md): a protocol layer that drives rooms over raw WebSockets,
  * and a browser layer with fake devices in Chromium and Firefox, both against a local
- * `wrangler dev` with the mock SFU; and `@real` browser tests against the real Realtime SFU.
+ * `wrangler dev` with the mock SFU; the `@recorder` protocol test, which needs the real Workers
+ * AI; and `@real` browser tests against the real Realtime SFU.
  */
 import { defineConfig, devices } from '@playwright/test';
 import type { StackKind } from './e2e/fixtures/stack.ts';
@@ -41,7 +42,12 @@ export default defineConfig<{ stackKind: StackKind }>({
 		screenshot: 'only-on-failure'
 	},
 	projects: [
-		{ name: 'protocol', testDir: './e2e/protocol', use: { stackKind: 'mock' } },
+		{
+			name: 'protocol',
+			testDir: './e2e/protocol',
+			grepInvert: /@recorder/,
+			use: { stackKind: 'mock' }
+		},
 		{
 			name: 'chromium',
 			testDir: './e2e/browser',
@@ -53,6 +59,14 @@ export default defineConfig<{ stackKind: StackKind }>({
 			testDir: './e2e/browser',
 			grepInvert: /@real/,
 			use: { ...devices['Desktop Firefox'], stackKind: 'mock', launchOptions: firefoxMedia }
+		},
+		{
+			name: 'recorder',
+			testDir: './e2e/protocol',
+			grep: /@recorder/,
+			// About 40 s of speech, then the transcript job, which waits on Workers AI.
+			timeout: 300_000,
+			use: { stackKind: 'recorder' }
 		},
 		{
 			name: 'real',

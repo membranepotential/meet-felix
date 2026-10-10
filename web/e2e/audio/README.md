@@ -7,6 +7,7 @@ what Chromium's `--use-file-for-fake-audio-capture` plays and what the
 recorder e2e streams as an adapter would (upmixed to stereo).
 
 `snippets.json` lists each file with the speaker's device, the words said and
-the `keywords` a transcript of it must contain. `crates/worker/recorder-e2e/run.mjs`
-streams all four in a row through the recorder and checks the keywords against
-the Whisper transcript.
+the `keywords` a transcript of it must contain. `../protocol/recorder.spec.ts`
+(`pnpm test:e2e:recorder`) streams all four in a row through the mock SFU's
+adapter into the recorder (read by `../fixtures/speech.ts`) and checks the
+keywords against the Whisper transcript.

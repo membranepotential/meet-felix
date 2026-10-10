@@ -15,6 +15,7 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Worker unit tests | Storage record, socket attachment with the owner flag, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules; the ended room's alarm (a pending `/end` is sent again before the storage is deleted); the owner's session cookie (valid, expired, tampered, foreign, missing) and password; `/api/new` and `/api/login` input checks | `cargo test -p meet-worker` | Exist |
 | E2E protocol tests | The real `RoomObject` running the core under `wrangler dev`, driven over raw WebSockets, with a mock SFU: owner session, HTTP routes, the meeting lifecycle, consent and recording state, negotiation, host controls, SFU failures and session recovery, the meetings list | `pnpm test:e2e` (project `protocol`) | Exist (Playwright Test, `web/e2e/protocol/`) |
 | E2E browser tests | The UI flows in Chromium and Firefox with fake devices against the same local stack: login, pre-join, lobby, tiles, controls, screen share, leave and end, past meetings, recovery | `pnpm test:e2e` (projects `chromium`, `firefox`) | Exist (`web/e2e/browser/`) |
+| E2E recorder test | A recorded meeting through the `RecorderObject`: the mock SFU's adapter streams 40 s of real speech into it, the chunks reach the local R2, the real Whisper on Workers AI returns the snippets' keywords, with speaker label, consent record and no gaps | `pnpm test:e2e:recorder` (project `recorder`) | Exists (`web/e2e/protocol/recorder.spec.ts`, tag `@recorder`); needs the network and `wrangler login` |
 | E2E real-SFU test | A three-party call through the real Realtime SFU: media both ways, screen share, a layer change, 60 s without reconnects | `pnpm test:e2e:real` | Exists; needs the `CALLS_*` secrets and network |
 | Web checks | Types and build of the Svelte shell | `pnpm --filter web check`, `pnpm --filter web build` | Exist |
 | Device checklist | Real phones, tablets and desktop browsers | manual, phase 4 | Planned |
@@ -34,7 +35,11 @@ pnpm test:e2e
 ```
 
 `pnpm test:e2e` builds the web app and the Worker itself, so a separate
-`pnpm --filter web build` is not needed.
+`pnpm --filter web build` is not needed. It stays offline; after a change to
+the recorder, the transcript job or the adapter calls, also run
+`pnpm test:e2e:recorder` (about 1 min, needs the network and `wrangler login`,
+and costs about 30–50 Workers AI neurons of the 10,000 free per day: 46.63 per
+audio minute for `whisper-large-v3-turbo`, see research 11).
 
 ## Core: unit and property tests
 
@@ -84,6 +89,7 @@ git history) and the throwaway Playwright scripts of spike 2.
 | Command | What runs |
 |---|---|
 | `pnpm test:e2e` | Builds, then the `protocol`, `chromium` and `firefox` projects against the mock SFU |
+| `pnpm test:e2e:recorder` | The `recorder` project (the test tagged `@recorder`): the mock SFU, and Workers AI remote. The script sets `E2E_RECORDER=1`; without it the test skips, so a `-g` filter cannot run it by accident |
 | `pnpm test:e2e:real` | The `real` project (tests tagged `@real`) against the real Realtime SFU; skipped without the secrets |
 | `pnpm --filter web exec playwright test e2e/protocol/failures.spec.ts` | One spec file (add `--project=…` for one browser) |
 | `pnpm --filter web exec playwright test -g "dropped socket"` | Tests whose title matches |
@@ -141,19 +147,39 @@ sharing state:
   local workerd gets `ROOM_JURISDICTION` empty (no jurisdictions locally,
   [D5](architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)).
 
-Both listen on port 0 and report the port they got in their log, so stacks
-never race for a port. Each child runs in its own process group and is
-stopped by signalling that group by its PID, never by matching command lines.
+A project picks the stack's kind with the `stackKind` option:
 
-The mock SFU speaks just enough of the Realtime SFU API for the room
+| Kind | SFU | Workers AI | Used by |
+|---|---|---|---|
+| `mock` | mock | none (`--local` disables remote bindings): no network, no login | `protocol`, `chromium`, `firefox` |
+| `recorder` | mock | remote, as `wrangler dev` runs it by default: needs the network and `wrangler login`, billed in neurons | `recorder` |
+| `real` | the real Realtime SFU, secrets from `.dev.vars` | remote | `real` |
+
+The mock SFU listens on port 0 and reports the port it got in its log. Against
+the mock SFU, `wrangler dev` gets a port picked just before it starts and
+`RECORDER_ORIGIN=http://localhost:<port>`, so the recorder's adapter
+endpoints name this Worker and the mock's adapters stream into it (the
+`wrangler.toml` value is the production host). If another process takes the
+port in between, `wrangler dev` fails with an `[ERROR]` line and the stack
+fails at once. The `real` stack keeps port 0. Each child runs in its own
+process group and is stopped by signalling that group by its PID, never by
+matching command lines.
+
+The mock SFU speaks just enough of the Realtime SFU API for the Worker
 (`sessions/new`, `tracks/new` for publishing and pulling, `renegotiate`,
-`tracks/close`, `tracks/update`) and writes real SDP
+`tracks/close`, `tracks/update`, `adapters/websocket/new` and `close`) and writes real SDP
 ([`sdp.ts`](../web/e2e/sdp.ts)): answers that accept a browser's offer with
 its codecs and simulcast layers, and offers that carry the pulled tracks. So
 browsers negotiate against it as against the real SFU, but no media flows (the
 SDP has no ICE candidates). Like the live SFU before a publisher is
 connected, the first pull of each track fails with `not_found_track_error`
-and still returns an offer. Tests control it through `/__control/`:
+and still returns an offer. Its WebSocket adapters work like Cloudflare's: each
+opens a WebSocket to the recorder's `/rec/…` endpoint and streams the audio
+set with `adapter-audio` in 20 ms protobuf `Packet`s, looping, until
+`adapters/websocket/close`; without audio (the default) an adapter connects
+and sends nothing, so recorded meetings in the offline suite store no chunks
+and never call Workers AI. It connects only to `ws://` endpoints, never to the
+production host. Tests control it through `/__control/`:
 
 | Request | Effect |
 |---|---|
@@ -161,7 +187,9 @@ and still returns an offer. Tests control it through `/__control/`:
 | `POST /__control/down` `{"down": true}` | Every SFU call answers 503 |
 | `POST /__control/close-delay` `{"ms": 1000}` | Holds each `tracks/close` that long |
 | `POST /__control/lose-session` `{"next": "pull"}` or `{"session": "<id>"}` | That session answers this and every later call with HTTP 410 `session_error` |
-| `GET /__control/calls?since=<seq>` | The calls the room made after `seq`, with their request bodies |
+| `POST /__control/adapter-audio` `{"file": "<path>"}` or `{"file": null}` | Adapters created afterwards stream that file (raw 48 kHz stereo s16le PCM, what an adapter delivers), or nothing; `reset` sets `null` |
+| `GET /__control/calls?since=<seq>` | The calls the Worker made after `seq`, with their request bodies |
+| `GET /__control/adapters` | Every adapter: id, track, endpoint, socket state (`connecting`, `open`, `closed`, `refused`) and packets sent |
 
 The typed client is `MockSfu` in
 [`fixtures/mock-sfu-control.ts`](../web/e2e/fixtures/mock-sfu-control.ts);
@@ -187,8 +215,13 @@ Tests import `test` and `expect` from
   ([`fixtures/participant.ts`](../web/e2e/fixtures/participant.ts)), each in
   its own context; the owner's context gets the session cookie through the
   API. A participant logs every signalling frame its page sent and received,
-  and knows the UI by its roles and texts (`tile(name)`, `control(name)`,
-  `endForAll()`, …). [`fixtures/call.ts`](../web/e2e/fixtures/call.ts) has
+  and knows the UI by its roles and texts (`control(name)`, `endForAll()`,
+  …) and, where a role or text does not single an element out, by a
+  `data-testid` (the getters `meeting`, `tiles`, `tile(name)`, `pill(text)`
+  and `transcriptLink`; the testids are listed in "Adding a test").
+- [`fixtures/speech.ts`](../web/e2e/fixtures/speech.ts): the snippets of
+  [`web/e2e/audio`](../web/e2e/audio/README.md) and `speechPcm()`, which
+  reads their WAV files and returns them as an adapter's PCM. [`fixtures/call.ts`](../web/e2e/fixtures/call.ts) has
   `startCall`; [`fixtures/media-stats.ts`](../web/e2e/fixtures/media-stats.ts)
   reads `getStats()` for the real-SFU test.
 
@@ -216,6 +249,13 @@ Protocol layer (`web/e2e/protocol/`, Node only, about 25 s):
 | `meetings-list.spec.ts` | `GET /api/meetings`: 401 without or with a wrong secret, 200 with the cookie; newest first; an ended meeting with its transcript token, a never-joined one as `scheduled` |
 | `keepalive.spec.ts` | With `E2E_SLOW=1`: a socket that never pings is closed with 1001, a pinging one stays |
 
+Recorder project (`web/e2e/protocol/recorder.spec.ts`, tag `@recorder`, Node
+only, about 50 s; the `protocol` project skips it):
+
+| Spec | Covers |
+|---|---|
+| `recorder.spec.ts` | A meeting recorded from the start: the host's arrival starts recording; the recorder creates one adapter for the host's published audio (publisher session, track name, `pcm`, an endpoint `ws://…/rec/{recorder}/{secret}/{who}/0`); it accepts the adapter's socket, and refuses a wrong secret (403) and an unknown generation (410); the adapter streams 40 s of the real speech; `Ended` carries the token; the end closes the adapter at the SFU; the status API sends `no-referrer`, `noindex`, `no-store`, names the meeting and its times, and counts the stored chunks as long as the stream (±3 s); an unknown token is 404 with the same headers; the job finishes with every chunk handled and `ready` (the transcript page's parser reads the status); the transcript names the meeting, labels the speaker "Felix (host)", lists the host's consent (notice version 1), has no gaps, and contains every snippet's keywords; `transcript.md` and `transcript.json` download; `/t/{token}` carries the headers from `web/static/_headers` |
+
 Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
 
 | Spec | Covers |
@@ -231,7 +271,8 @@ Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
 1. Pick the layer: a rule of the room or the HTTP API goes into
    `web/e2e/protocol/`; something a person sees or does goes into
    `web/e2e/browser/`; something that needs real media goes into
-   `real-sfu.spec.ts` (tag `@real`).
+   `real-sfu.spec.ts` (tag `@real`); something that needs the real Workers AI
+   goes into `recorder.spec.ts` (tag `@recorder`).
 2. Import `test` and `expect` from `../fixtures/test.ts` and ask for the
    fixtures you need; never start processes or log in by hand.
 3. Create a meeting of its own per test (`createMeeting`, `liveMeeting`,
@@ -241,7 +282,12 @@ Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
    something does not happen, use `gets(…, timeoutMs)` with a short window.
 5. Find UI elements by role and visible text, as a person does. If a test
    needs a hook the UI lacks, add a `data-testid` in the component rather than
-   a CSS path.
+   a CSS path, and a getter for it on `Participant`. The testids so far:
+   `meeting` (the meeting view, `Meeting.svelte`), `tile` and `tile-name`
+   (every participant's tile in any layout and the name in its caption,
+   `Tile.svelte`), `pill` (each notification pill above the control bar,
+   `Toasts.svelte`) and `transcript-link` (the link on the page after a
+   recorded meeting ended, `MeetingFlow.svelte`).
 6. Run `pnpm --filter web check` and `pnpm --filter web lint`: both cover
    `web/e2e/`.
 
@@ -277,7 +323,7 @@ Some facts only show on Cloudflare itself:
 - **Egress**: Cloudflare's usage numbers after a real four-person hour
   (spike 5) replace the assumed bitrates in [cost/](cost/README.md).
 
-## Recorder: unit tests and the local end-to-end script
+## Recorder: unit tests and the end-to-end test
 
 Pure parts run natively under `cargo test` (2026-10-09):
 `meeting-core` tests the consent record and roster, speaker labels, the
@@ -293,16 +339,23 @@ the Ogg writer (read back with `ogg::PacketReader`), the capture pipeline
 and gaps, Whisper's reply filter, and the versioned room record (including
 the grace alarm a dropped socket arms, 2026-10-10).
 
-[`crates/worker/recorder-e2e/run.mjs`](../crates/worker/recorder-e2e/run.mjs)
-drives a recorded meeting against `wrangler dev` (command in the script's
-header, with `--var RECORDER_ORIGIN:http://localhost:8803`). Its own mock SFU
-answers `adapters/websocket/new` by connecting to the given endpoint and
-streaming 20 ms protobuf packets of 48 kHz stereo audio: German and English
-sentences from `espeak-ng` if installed, else a 440 Hz tone. It checks the
-adapter's endpoint, refusal of a wrong secret and an unknown generation, the
-adapter close at the end, the status API and its privacy headers, that every
-chunk reached the local R2 and the job, a `ready` transcript with at least
-one paragraph (Workers AI runs remotely in `wrangler dev` and costs cents),
-the downloads, and the `/t/*` headers from `web/static/_headers`. First run on
-2026-10-09: 22/22, Whisper returned both sentences in their languages. It is
-standalone until it moves into the Playwright suite in `web/e2e/`.
+The end-to-end test is
+[`web/e2e/protocol/recorder.spec.ts`](../web/e2e/protocol/recorder.spec.ts),
+run with `pnpm test:e2e:recorder` (spec table above). It replaced the
+standalone script `crates/worker/recorder-e2e/run.mjs` (in the git history)
+on 2026-10-10 and keeps its 22 checks, with these differences:
+
+- The owner's login and the meeting's creation are no checks of their own:
+  the `owner` fixture and `createMeeting` fail the test if either fails, and
+  `owner-session.spec.ts` and `http-routes.spec.ts` check both.
+- The refusals check the status: 403 for a wrong secret, 410 for an unknown
+  generation (the script only saw "refused").
+- The test waits until the adapter has sent 40 s of packets instead of
+  sleeping 40 s, and compares the recorded length with what the adapter sent.
+- Added: the adapter belongs to the host's publish session and track, the
+  transcript has no gaps, and the transcript page's parser reads the status.
+- No fallback to a 440 Hz tone: the test reads the WAV files itself, so it
+  needs no `ffmpeg`.
+
+First run on 2026-10-10: passed in 46 s; Whisper returned all four snippets
+with every keyword.
