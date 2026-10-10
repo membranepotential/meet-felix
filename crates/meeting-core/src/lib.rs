@@ -24,7 +24,12 @@
 //!   longer recorded. A track stays wanted until a negotiation delivers it; a failed or
 //!   timed-out subscribe negotiation is retried after [`SUBSCRIBE_RETRY_MS`]. A publish offer
 //!   the SFU does not answer within [`NEGOTIATION_TIMEOUT_MS`] fails, so the client may offer
-//!   again.
+//!   again. Only the tracks the SFU accepted are published; the client hears which kinds it
+//!   rejected, and an answer that rejects all of them fails the offer.
+//! - SFU effects and replies name their session and, for a negotiation step, the
+//!   [`NegotiationId`]; a reply about a replaced session, or about a negotiation that is no
+//!   longer running on its session, changes nothing, except a failure that reports the session
+//!   gone.
 //! - A subscribe or publish session the SFU declares gone ([`FailureCause::SessionGone`]), or
 //!   whose peer connection the client reports failed ([`ClientMsg::ResetSession`]), is replaced
 //!   by a new one, not retried. A lost publish session takes its tracks with it, for everyone.
@@ -62,8 +67,8 @@ pub mod words;
 mod tests;
 
 pub use ids::{
-    DisplayName, InvalidDisplayName, InvalidMeetingId, MeetingId, Mid, Millis, ParticipantId,
-    ResumeToken, Sdp, SessionEpoch, SessionId, TrackName, TranscriptRef,
+    DisplayName, InvalidDisplayName, InvalidMeetingId, MeetingId, Mid, Millis, NegotiationId,
+    ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId, TrackName, TranscriptRef,
 };
 pub use protocol::{
     ClientMsg, ErrorCode, IncomingTrack, LocalTrack, ParticipantView, Phase, Presence, Recording,

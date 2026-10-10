@@ -15,6 +15,7 @@ import type {
 	ServerMsg,
 	SessionEpoch,
 	SessionEpochs,
+	TrackKind,
 	TranscriptRef
 } from './protocol.ts';
 import type { ToastTone } from './toasts.svelte.ts';
@@ -60,7 +61,8 @@ export type Command =
 	 * the room's current sessions; a connection made for an older one must be replaced.
 	 */
 	| { kind: 'welcomed'; fresh: boolean; epochs: SessionEpochs }
-	| { kind: 'publish-answer'; sdp: Sdp }
+	/** The answer to our publish offer; the SFU did not publish the `rejected` kinds. */
+	| { kind: 'publish-answer'; sdp: Sdp; rejected: TrackKind[] }
 	| { kind: 'publish-rejected' }
 	| { kind: 'subscribe-offer'; sdp: Sdp; tracks: IncomingTrack[] }
 	/** The room replaced our publish session: publish everything again on a new connection. */
@@ -180,7 +182,7 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 		case 'consentRequired':
 			return [{ ...state, consentAsked: true }, []];
 		case 'publishAnswer':
-			return [state, [{ kind: 'publish-answer', sdp: msg.sdp }]];
+			return [state, [{ kind: 'publish-answer', sdp: msg.sdp, rejected: msg.rejected ?? [] }]];
 		case 'subscribeOffer':
 			return [state, [{ kind: 'subscribe-offer', sdp: msg.sdp, tracks: msg.tracks }]];
 		case 'publishReset':

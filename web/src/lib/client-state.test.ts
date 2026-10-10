@@ -121,8 +121,11 @@ describe('reduce', () => {
 			{ kind: 'subscribe-offer', sdp: 'o', tracks }
 		]);
 		expect(reduce(welcomed(), { type: 'publishAnswer', sdp: 'a' })[1]).toEqual([
-			{ kind: 'publish-answer', sdp: 'a' }
+			{ kind: 'publish-answer', sdp: 'a', rejected: [] }
 		]);
+		expect(reduce(welcomed(), { type: 'publishAnswer', sdp: 'a', rejected: ['video'] })[1]).toEqual(
+			[{ kind: 'publish-answer', sdp: 'a', rejected: ['video'] }]
+		);
 	});
 
 	it("turns the room's session resets into new connections of that kind", () => {

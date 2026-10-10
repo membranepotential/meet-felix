@@ -94,7 +94,11 @@ the new state, and carries out the effects in order:
 - `Send` and `Broadcast` write to the hibernating WebSockets. A message to a
   participant without an open socket goes nowhere.
 - The `Sfu*` effects become HTTPS calls to the SFU through `worker::Fetch`;
-  each reply goes back into `step` as `Event::Sfu`.
+  each reply goes back into `step` as `Event::Sfu`. A reply names the
+  session it is about and, for `SfuPublish`, `SfuSubscribe` and
+  `SfuRenegotiate`, the effect's `NegotiationId`; `sfu-api` builds the
+  replies, so the shell only passes them on. `SfuReply::Published` lists the
+  offered kinds the SFU rejected with a per-track error (2026-10-10).
 - `CloseSocket` closes the socket and forgets it: the shell reports no
   `SocketClosed` for a socket the core closed.
 - `Rebind { socket, participant }` re-attaches the new socket to the
@@ -208,10 +212,18 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   with the new session's epoch once the new session exists. Replies name
   their session, and replies about a replaced session are ignored; a
   `ResetSession` with an old epoch is ignored too.
+- Each session counts its negotiations, and SFU effects and replies name
+  theirs (`NegotiationId`, 2026-10-10). A reply about a negotiation that is
+  not the session's running one (it failed or timed out, and perhaps a
+  newer one runs) changes nothing; only a failure that reports the session
+  gone counts, whichever negotiation it names.
 - One publish offer runs at a time; a second gets `NegotiationInProgress`.
   If the SFU does not answer within `NEGOTIATION_TIMEOUT_MS`, the room drops
   the offer and sends `Error { PublishFailed }`, so the client may offer again
-  (2026-10-09).
+  (2026-10-09). The SFU may reject some of the offered tracks (2026-10-10):
+  the room publishes only the accepted ones and lists the rejected kinds in
+  `PublishAnswer.rejected`; nobody pulls a rejected track. An answer that
+  rejects every track fails the offer with `Error { PublishFailed }`.
 - A joined participant whose socket closes without a `Leave` keeps their
   place, SFU sessions, tracks and recording for `LEAVE_GRACE_MS` (one
   minute), shown to the others as reconnecting; a client that resumes in
@@ -353,6 +365,13 @@ after every step that:
   that `Unpublish` closes the sender's own track on their publish session;
 - no negotiation older than `NEGOTIATION_TIMEOUT_MS`, publish or subscribe,
   survives an alarm at or after its deadline;
+- a reply about a negotiation other than the one running on its session
+  changes nothing, unless it reports the session gone; the simulated SFU
+  holds calls past their deadline and answers them later, so such replies
+  occur;
+- every track the room publishes, and every track it asks a subscriber's
+  session to pull, was accepted by the SFU; the simulated SFU rejects some
+  offered tracks;
 - no subscription is lost: every track of every other joined participant is
   received under its current name or still wanted;
 - recording is never on without a `State` broadcast or `Welcome` that tells

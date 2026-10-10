@@ -75,6 +75,15 @@ Every participant holds two SFU sessions, each with its own
   and the client answers (`ClientMsg::SubscribeAnswer`). One negotiation runs
   at a time per subscribe session.
 
+Each session counts its negotiations (2026-10-10): a publish offer, or a
+subscribe negotiation from the room's `tracks/new` to the SFU's confirmation
+of the client's answer, gets the next `NegotiationId`. The SFU effects carry
+it and `sfu-api` copies it into the reply, so the room applies a reply only
+to the negotiation that is still running. Without it, an answer that arrived
+after its offer timed out was taken for the client's next offer on the same
+session, with the wrong SDP and the wrong tracks. The browser protocol does
+not carry the id: the client never has two negotiations of one kind open.
+
 Why: each side always offers on its own connection, so the two sides never
 send offers at the same time. That situation, called glare, needs rollback
 logic in WebRTC; this design removes it. The SFU supports both one
@@ -108,6 +117,26 @@ Rules that follow from the SFU limits:
   it was recorded, and removes the kind from the participant's `tracks`.
 - When a participant leaves, the core closes their tracks on every
   subscriber (`Effect::SfuCloseTracks`), so no subscriber keeps a dead track.
+- A publish can succeed for some tracks only (2026-10-10). `tracks/new`
+  answers HTTP 200 with one result per track, and a rejected track's result
+  has `errorCode` and `errorDescription`; the API docs say to "preserve
+  successful allocations from partially successful requests"
+  ([HTTPS API](https://developers.cloudflare.com/realtime/sfu/https-api/);
+  the OpenAPI schema `realtime-api-2024-05-21.yaml` types each result as a
+  `TrackObject` plus those two fields and has no example of a failed one,
+  both checked 2026-10-10). `sfu-api` returns the kinds of the rejected
+  tracks in `SfuReply::Published.rejected`. The core publishes only the
+  accepted tracks: only they appear in the room view, reach subscribers and
+  are recorded. The client gets the whole SDP answer with the rejected kinds
+  (`ServerMsg::PublishAnswer.rejected`), stops their transceivers, and treats
+  them like a failed publish: it shows a notice and does not offer the same
+  track again until the device produces a new one, or until the socket
+  reconnects: then `retryFailed()` in `web/src/lib/sfu.ts` offers it once
+  more, so each reconnect brings at most one retry and one notice, not a
+  loop. If the SFU rejects every
+  track, the offer fails with `Error { PublishFailed }` as before. Until
+  then the core published every offered track, and subscribers kept pulling
+  tracks that did not exist.
 
 ## D11: Cameras send simulcast, and each subscriber picks a layer (2026-10-09)
 
@@ -278,7 +307,11 @@ What the room does (`meeting-core`, [D20](../core/README.md#d20-core-first-2026-
   (`PublishOffer`, `Unpublish`, `SubscribeAnswer`, `SetLayer`) are dropped
   without an error; the reset makes the client redo them. SFU replies carry
   the session they are about, so a late reply about the old session is
-  ignored.
+  ignored. Since 2026-10-10 they also carry the negotiation (see
+  [D10](#d10-each-participant-has-separate-publish-and-subscribe-sessions-2026-10-09)),
+  so a late reply on the same session is ignored too; only a failure that
+  reports the session gone counts, whichever negotiation it names, because
+  it is about the session.
 - If the SFU cannot create the new session, or does not answer within
   `NEGOTIATION_TIMEOUT_MS` (15 seconds), the participant stays in the
   meeting, gets `Error { SfuUnavailable }` once, and the room asks again

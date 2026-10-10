@@ -3,13 +3,15 @@
 use super::support::{Room, T0, local_track, meeting, session, track_name};
 use crate::{
     ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, LEAVE_GRACE_MS, Mid,
-    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Phase, Presence, RemoteTrack, Rid,
-    SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionKind, SfuReply, TrackKind, TrackRef,
+    NEGOTIATION_TIMEOUT_MS, NegotiationId, OfferedTrack, ParticipantId, Phase, Presence,
+    RemoteTrack, Rid, SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionKind, SfuReply, TrackKind, TrackRef,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
 const GUEST: ParticipantId = ParticipantId(2);
 const AV: [TrackKind; 2] = [TrackKind::Audio, TrackKind::Video];
+/// Every session in this meeting runs one negotiation, the first, which each session counts as 1.
+const FIRST: NegotiationId = NegotiationId(1);
 
 fn remote(owner: ParticipantId, kind: TrackKind) -> RemoteTrack {
     RemoteTrack {
@@ -33,6 +35,7 @@ fn complete_subscription(room: &mut Room, who: ParticipantId, owner: Participant
     let effects = room.sfu(SfuReply::SubscribeOffer {
         who,
         session: session(who, SessionKind::Subscribe),
+        negotiation: FIRST,
         sdp_offer: Sdp::new("sub-offer"),
         tracks,
     });
@@ -63,6 +66,7 @@ fn complete_subscription(room: &mut Room, who: ParticipantId, owner: Participant
         [Effect::SfuRenegotiate {
             who,
             session: session(who, SessionKind::Subscribe),
+            negotiation: FIRST,
             sdp_answer: Sdp::new("sub-answer")
         }]
     );
@@ -70,6 +74,7 @@ fn complete_subscription(room: &mut Room, who: ParticipantId, owner: Participant
         room.sfu(SfuReply::Renegotiated {
             who,
             session: session(who, SessionKind::Subscribe),
+            negotiation: FIRST,
         }),
         []
     );
@@ -92,6 +97,7 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
             Effect::SfuPublish {
                 who,
                 session: session(who, SessionKind::Publish),
+                negotiation: FIRST,
                 sdp_offer: Sdp::new("offer"),
                 tracks
             },
@@ -104,7 +110,9 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
     let effects = room.sfu(SfuReply::Published {
         who,
         session: session(who, SessionKind::Publish),
+        negotiation: FIRST,
         sdp_answer: Sdp::new("answer"),
+        rejected: Vec::new(),
     });
     let [
         Effect::Broadcast {
@@ -132,7 +140,8 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
         &Effect::Send {
             to: who,
             msg: ServerMsg::PublishAnswer {
-                sdp: Sdp::new("answer")
+                sdp: Sdp::new("answer"),
+                rejected: Vec::new()
             }
         }
     );
@@ -141,6 +150,7 @@ fn publish_av(room: &mut Room, who: ParticipantId, other: ParticipantId) {
         &Effect::SfuSubscribe {
             who: other,
             session: session(other, SessionKind::Subscribe),
+            negotiation: FIRST,
             tracks: AV.map(|kind| remote(who, kind)).to_vec()
         }
     );

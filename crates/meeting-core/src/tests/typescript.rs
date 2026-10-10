@@ -33,6 +33,9 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     );
     assert!(crate::SessionKind::DECL.contains(r#""publish" | "subscribe""#));
     assert!(ServerMsg::DECL.contains(r#"{ type: "subscribeReset"; epoch: SessionEpoch }"#));
+    assert!(
+        ServerMsg::DECL.contains(r#"{ type: "publishAnswer"; sdp: Sdp; rejected?: TrackKind[] }"#)
+    );
 }
 
 /// Every [`ServerMsg`] variant survives JSON, as `parseServerMsg` reads it.
@@ -77,6 +80,7 @@ fn every_server_msg_round_trips_through_json() {
         ServerMsg::Waiting,
         ServerMsg::PublishAnswer {
             sdp: Sdp::new("answer"),
+            rejected: vec![TrackKind::Video],
         },
         ServerMsg::SubscribeOffer {
             sdp: Sdp::new("offer"),
@@ -151,6 +155,16 @@ fn json_uses_camel_case_tags_and_omits_absent_options() {
     let ended =
         serde_json::to_string(&ServerMsg::Ended { transcript: None }).expect("serializable");
     assert_eq!(ended, r#"{"type":"ended"}"#);
+    let answer = ServerMsg::PublishAnswer {
+        sdp: crate::Sdp::new("a"),
+        rejected: Vec::new(),
+    };
+    let json = serde_json::to_string(&answer).expect("serializable");
+    assert_eq!(json, r#"{"type":"publishAnswer","sdp":"a"}"#);
+    assert_eq!(
+        serde_json::from_str::<ServerMsg>(&json).expect("valid"),
+        answer
+    );
     let msg: ClientMsg =
         serde_json::from_str(r#"{"type":"setConsent","consent":false}"#).expect("valid");
     assert_eq!(msg, ClientMsg::SetConsent { consent: false });

@@ -97,8 +97,11 @@ export function planPublish<T>(
 	return plan;
 }
 
-/** Why a publish offer did not go through. */
-export type PublishFailure = 'rejected' | 'timeout' | 'not-sent' | 'local';
+/**
+ * Why a publish offer, or some of its tracks, did not go through: `refused` names the tracks
+ * the SFU did not publish from an offer whose other tracks it published.
+ */
+export type PublishFailure = 'rejected' | 'refused' | 'timeout' | 'not-sent' | 'local';
 
 /** How long to wait for `PublishAnswer` before giving up on an offer. */
 const PUBLISH_TIMEOUT_MS = 20_000;
@@ -112,6 +115,22 @@ class PublishError extends Error {
 interface Published {
 	transceiver: RTCRtpTransceiver;
 	track: MediaStreamTrack;
+}
+
+/** Stops the transceiver of a track the room did not publish. */
+function stopTransceiver(transceiver: RTCRtpTransceiver): void {
+	try {
+		transceiver.stop();
+	} catch {
+		// Never negotiated, or the connection is closed: nothing to stop.
+	}
+}
+
+/** The room's answer to a publish offer (`ServerMsg::PublishAnswer`). */
+interface Answer {
+	sdp: Sdp;
+	/** The offered kinds the SFU did not publish. */
+	rejected: readonly TrackKind[];
 }
 
 /**
@@ -133,7 +152,8 @@ export class Publisher {
 	#generation = 0;
 	#running = false;
 	#closed = false;
-	#pendingAnswer: { resolve: (sdp: Sdp) => void; reject: (e: PublishError) => void } | null = null;
+	#pendingAnswer: { resolve: (answer: Answer) => void; reject: (e: PublishError) => void } | null =
+		null;
 
 	/**
 	 * `onFailed` hears about publish offers that did not go through; `onConnectionFailed` hears
@@ -166,9 +186,12 @@ export class Publisher {
 		void this.#run();
 	}
 
-	/** The room's answer to the offer in flight; ignored if none is (it timed out). */
-	answer(sdp: Sdp): void {
-		this.#pendingAnswer?.resolve(sdp);
+	/**
+	 * The room's answer to the offer in flight; ignored if none is (it timed out). The SFU did
+	 * not publish the `rejected` kinds: they count as failed, like a rejected offer.
+	 */
+	answer(sdp: Sdp, rejected: readonly TrackKind[] = []): void {
+		this.#pendingAnswer?.resolve({ sdp, rejected });
 		this.#pendingAnswer = null;
 	}
 
@@ -253,13 +276,20 @@ export class Publisher {
 				return { mid: transceiver.mid, kind, name: trackName(kind, ++this.#generation) };
 			});
 			const answer = await this.#exchange(sdp, tracks);
-			await this.#pc.setRemoteDescription({ type: 'answer', sdp: answer });
+			await this.#pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
 			for (const { kind, track, transceiver } of added) {
+				if (answer.rejected.includes(kind)) {
+					this.#failed.set(kind, track);
+					stopTransceiver(transceiver);
+					continue;
+				}
 				this.#published.set(kind, { transceiver, track });
 				this.#failed.delete(kind);
 				// The new track replaced the old one in the room; its `Unpublish` is moot.
 				this.#unsentUnpublish.delete(kind);
 			}
+			const refused = added.map((a) => a.kind).filter((kind) => answer.rejected.includes(kind));
+			if (refused.length > 0) this.#onFailed(refused, 'refused');
 		} catch (e) {
 			if (this.#closed) return;
 			if (this.#pc.signalingState === 'have-local-offer') {
@@ -267,11 +297,7 @@ export class Publisher {
 			}
 			for (const { kind, track, transceiver } of added) {
 				this.#failed.set(kind, track);
-				try {
-					transceiver.stop();
-				} catch {
-					// Never negotiated: nothing to stop.
-				}
+				stopTransceiver(transceiver);
 			}
 			this.#onFailed(
 				added.map((a) => a.kind),
@@ -281,8 +307,8 @@ export class Publisher {
 	}
 
 	/** Sends the offer and waits for the room's answer, its rejection, or the timeout. */
-	#exchange(sdp: Sdp, tracks: LocalTrack[]): Promise<Sdp> {
-		return new Promise<Sdp>((resolve, reject) => {
+	#exchange(sdp: Sdp, tracks: LocalTrack[]): Promise<Answer> {
+		return new Promise<Answer>((resolve, reject) => {
 			if (!this.#send({ type: 'publishOffer', sdp, tracks })) {
 				reject(new PublishError('not-sent'));
 				return;

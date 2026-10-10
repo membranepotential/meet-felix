@@ -4,10 +4,10 @@ use super::support::{Room, T0, name, session, track_name, transcript};
 use crate::recording::{ConsentRecord, RosterEntry};
 use crate::{
     ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FailureCause, LEAVE_GRACE_MS, Mid,
-    Millis, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, OfferedTrack, ParticipantId, Phase, Presence,
-    RecordingPolicy, RemoteTrack, ResumeToken, Role, RoomState, RoomView, SCHEDULED_TTL_MS,
-    SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpoch, SessionEpochs, SessionId, SessionKind,
-    SfuCall, SfuReply, TrackKind,
+    Millis, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, NegotiationId, OfferedTrack, ParticipantId,
+    Phase, Presence, RecordingPolicy, RemoteTrack, ResumeToken, Role, RoomState, RoomView,
+    SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpoch, SessionEpochs, SessionId,
+    SessionKind, SfuCall, SfuReply, TrackKind,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -834,6 +834,7 @@ fn a_failed_subscription_is_retried_after_a_pause() {
         who: GUEST,
         call: SfuCall::Subscribe {
             session: session(GUEST, SessionKind::Subscribe),
+            negotiation: NegotiationId(1),
         },
         cause: FailureCause::Transient,
     });
@@ -859,6 +860,7 @@ fn a_failed_subscription_is_retried_after_a_pause() {
             Effect::SfuSubscribe {
                 who: GUEST,
                 session: session(GUEST, SessionKind::Subscribe),
+                negotiation: NegotiationId(2),
                 tracks: vec![track]
             },
             Effect::SetAlarm {
@@ -876,6 +878,7 @@ fn an_unanswered_subscribe_offer_times_out_and_is_requested_again() {
     room.sfu(SfuReply::SubscribeOffer {
         who: GUEST,
         session: session(GUEST, SessionKind::Subscribe),
+        negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
         sdp_offer: Sdp::new("offer"),
         tracks: vec![OfferedTrack {
             mid: mid.clone(),
@@ -942,6 +945,7 @@ fn receives_audio(
     room.sfu(SfuReply::SubscribeOffer {
         who: subscriber,
         session: session(subscriber, SessionKind::Subscribe),
+        negotiation: room.negotiation(subscriber, SessionKind::Subscribe),
         sdp_offer: Sdp::new("offer"),
         tracks: vec![OfferedTrack {
             mid: mid.clone(),
@@ -957,6 +961,7 @@ fn receives_audio(
     room.sfu(SfuReply::Renegotiated {
         who: subscriber,
         session: session(subscriber, SessionKind::Subscribe),
+        negotiation: room.negotiation(subscriber, SessionKind::Subscribe),
     });
     (track, mid)
 }
@@ -1068,7 +1073,9 @@ fn an_unanswered_publish_offer_times_out_and_a_new_offer_goes_through() {
         room.sfu(SfuReply::Published {
             who: GUEST,
             session: session(GUEST, SessionKind::Publish),
-            sdp_answer: Sdp::new("late")
+            negotiation: room.negotiation(GUEST, SessionKind::Publish),
+            sdp_answer: Sdp::new("late"),
+            rejected: Vec::new(),
         }),
         []
     );
@@ -1076,6 +1083,274 @@ fn an_unanswered_publish_offer_times_out_and_a_new_offer_goes_through() {
         room.client(GUEST, offer()).as_slice(),
         [Effect::SfuPublish { .. }, Effect::SetAlarm { .. }]
     ));
+}
+
+#[test]
+fn a_partly_rejected_publish_publishes_only_the_accepted_kinds() {
+    let mut room = meeting_room();
+    let effects = room.publish_rejecting(
+        HOST,
+        &[TrackKind::Audio, TrackKind::Video],
+        &[TrackKind::Video],
+    );
+    assert!(effects.contains(&Effect::Send {
+        to: HOST,
+        msg: ServerMsg::PublishAnswer {
+            sdp: Sdp::new("answer"),
+            rejected: vec![TrackKind::Video],
+        }
+    }));
+    // Nobody is asked to pull the rejected video, and nobody sees it listed.
+    let pulled: Vec<_> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::SfuSubscribe { tracks, .. } => Some(tracks.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pulled,
+        [vec![RemoteTrack {
+            session: session(HOST, SessionKind::Publish),
+            name: track_name(HOST, TrackKind::Audio),
+        }]]
+    );
+    let host = room
+        .state
+        .view()
+        .participants
+        .into_iter()
+        .find(|p| p.id == HOST);
+    assert_eq!(host.map(|p| p.tracks), Some(vec![TrackKind::Audio]));
+    // The kind may be offered again. No new alarm: the guest's pull times out at the same moment.
+    assert!(matches!(
+        room.client(
+            HOST,
+            ClientMsg::PublishOffer {
+                sdp: Sdp::new("offer"),
+                tracks: vec![super::support::local_track(HOST, TrackKind::Video)],
+            }
+        )
+        .as_slice(),
+        [Effect::SfuPublish { .. }, ..]
+    ));
+}
+
+#[test]
+fn a_publish_answer_that_rejects_every_track_fails_the_offer() {
+    let mut room = meeting_room();
+    let before = room.state.view();
+    let both = [TrackKind::Audio, TrackKind::Video];
+    assert_eq!(
+        room.publish_rejecting(HOST, &both, &both),
+        error(HOST, ErrorCode::PublishFailed)
+    );
+    assert_eq!(room.state.view(), before);
+    // The offer is over: the client may offer again.
+    assert!(matches!(
+        room.client(
+            HOST,
+            ClientMsg::PublishOffer {
+                sdp: Sdp::new("offer"),
+                tracks: vec![super::support::local_track(HOST, TrackKind::Audio)],
+            }
+        )
+        .as_slice(),
+        [Effect::SfuPublish { .. }, Effect::SetAlarm { .. }]
+    ));
+}
+
+#[test]
+fn a_late_publish_answer_is_not_applied_to_a_newer_offer() {
+    let mut room = meeting_room();
+    let offer = |kind| ClientMsg::PublishOffer {
+        sdp: Sdp::new("offer"),
+        tracks: vec![super::support::local_track(GUEST, kind)],
+    };
+    room.client(GUEST, offer(TrackKind::Audio));
+    let first = room.negotiation(GUEST, SessionKind::Publish);
+    room.now = room.now.after(NEGOTIATION_TIMEOUT_MS);
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        error(GUEST, ErrorCode::PublishFailed)
+    );
+    room.client(GUEST, offer(TrackKind::Video));
+    let second = room.negotiation(GUEST, SessionKind::Publish);
+    assert_ne!(first, second);
+
+    // The answer and a failure for the first offer arrive while the second one is pending.
+    let pending = room.state.clone();
+    let publish = session(GUEST, SessionKind::Publish);
+    for late in [
+        SfuReply::Published {
+            who: GUEST,
+            session: publish.clone(),
+            negotiation: first,
+            sdp_answer: Sdp::new("late"),
+            rejected: Vec::new(),
+        },
+        SfuReply::Failed {
+            who: GUEST,
+            call: SfuCall::Publish {
+                session: publish.clone(),
+                negotiation: first,
+            },
+            cause: FailureCause::Transient,
+        },
+    ] {
+        assert_eq!(room.sfu(late), []);
+        assert_eq!(room.state, pending);
+    }
+
+    let effects = room.sfu(SfuReply::Published {
+        who: GUEST,
+        session: publish,
+        negotiation: second,
+        sdp_answer: Sdp::new("answer"),
+        rejected: Vec::new(),
+    });
+    assert!(effects.contains(&Effect::Send {
+        to: GUEST,
+        msg: ServerMsg::PublishAnswer {
+            sdp: Sdp::new("answer"),
+            rejected: Vec::new(),
+        }
+    }));
+    let guest = room
+        .state
+        .view()
+        .participants
+        .into_iter()
+        .find(|p| p.id == GUEST);
+    assert_eq!(guest.map(|p| p.tracks), Some(vec![TrackKind::Video]));
+}
+
+/// Lets `who`'s running subscribe negotiation time out and the retry go out; returns the ids of
+/// the timed-out negotiation and of the retry.
+fn time_out_and_retry_subscription(
+    room: &mut Room,
+    who: ParticipantId,
+) -> (NegotiationId, NegotiationId) {
+    let first = room.negotiation(who, SessionKind::Subscribe);
+    room.now = room.now.after(NEGOTIATION_TIMEOUT_MS);
+    room.apply(Event::AlarmFired);
+    room.now = room.now.after(SUBSCRIBE_RETRY_MS);
+    assert!(matches!(
+        room.apply(Event::AlarmFired).as_slice(),
+        [Effect::SfuSubscribe { .. }, Effect::SetAlarm { .. }]
+    ));
+    (first, room.negotiation(who, SessionKind::Subscribe))
+}
+
+#[test]
+fn a_late_subscribe_offer_is_not_applied_to_a_newer_request() {
+    let mut room = meeting_room();
+    let track = host_publishes_audio(&mut room);
+    let (first, second) = time_out_and_retry_subscription(&mut room, GUEST);
+    let offer = |negotiation, sdp: &str| SfuReply::SubscribeOffer {
+        who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
+        negotiation,
+        sdp_offer: Sdp::new(sdp),
+        tracks: vec![OfferedTrack {
+            mid: Mid::new("sub-audio"),
+            track: track.clone(),
+        }],
+    };
+
+    let pending = room.state.clone();
+    assert_eq!(room.sfu(offer(first, "late")), []);
+    assert_eq!(room.state, pending);
+    assert!(matches!(
+        room.sfu(offer(second, "offer")).as_slice(),
+        [Effect::Send {
+            msg: ServerMsg::SubscribeOffer { sdp, .. },
+            ..
+        }, ..] if *sdp == Sdp::new("offer")
+    ));
+}
+
+#[test]
+fn a_late_subscribe_failure_does_not_cancel_a_newer_request() {
+    let mut room = meeting_room();
+    host_publishes_audio(&mut room);
+    // The first request times out while it still waits for the SFU's offer.
+    let (first, second) = time_out_and_retry_subscription(&mut room, GUEST);
+
+    let pending = room.state.clone();
+    assert_eq!(
+        room.sfu(SfuReply::Failed {
+            who: GUEST,
+            call: SfuCall::Subscribe {
+                session: session(GUEST, SessionKind::Subscribe),
+                negotiation: first,
+            },
+            cause: FailureCause::Transient,
+        }),
+        []
+    );
+    assert_eq!(room.state, pending);
+    assert_eq!(room.negotiation(GUEST, SessionKind::Subscribe), second);
+}
+
+#[test]
+fn a_late_renegotiation_is_not_applied_to_a_newer_negotiation() {
+    let mut room = meeting_room();
+    let track = host_publishes_audio(&mut room);
+    let subscribe = session(GUEST, SessionKind::Subscribe);
+    // Offer, answer and renegotiation for one negotiation; the renegotiation is what the SFU
+    // confirms.
+    let negotiate = |room: &mut Room, mid: &str| {
+        room.sfu(SfuReply::SubscribeOffer {
+            who: GUEST,
+            session: subscribe.clone(),
+            negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
+            sdp_offer: Sdp::new("offer"),
+            tracks: vec![OfferedTrack {
+                mid: Mid::new(mid),
+                track: track.clone(),
+            }],
+        });
+        room.client(
+            GUEST,
+            ClientMsg::SubscribeAnswer {
+                sdp: Sdp::new("answer"),
+            },
+        );
+    };
+    negotiate(&mut room, "first");
+    let (first, second) = time_out_and_retry_subscription(&mut room, GUEST);
+    negotiate(&mut room, "second");
+
+    let pending = room.state.clone();
+    let renegotiated = |negotiation| SfuReply::Renegotiated {
+        who: GUEST,
+        session: subscribe.clone(),
+        negotiation,
+    };
+    assert_eq!(room.sfu(renegotiated(first)), []);
+    assert_eq!(room.state, pending);
+    assert_eq!(room.sfu(renegotiated(second)), []);
+    // Only the second negotiation's transceiver delivers the track.
+    assert_eq!(
+        room.client(
+            GUEST,
+            ClientMsg::SetLayer {
+                track: crate::TrackRef {
+                    owner: HOST,
+                    kind: TrackKind::Audio,
+                },
+                rid: crate::Rid::Low,
+            }
+        ),
+        [Effect::SfuUpdateLayer {
+            who: GUEST,
+            session: subscribe,
+            mid: Mid::new("second"),
+            track,
+            rid: crate::Rid::Low,
+        }]
+    );
 }
 
 fn session_gone(who: ParticipantId, call: SfuCall) -> SfuReply {
@@ -1102,7 +1377,8 @@ fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again()
         room.sfu(session_gone(
             GUEST,
             SfuCall::Subscribe {
-                session: old.clone()
+                session: old.clone(),
+                negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
             }
         )),
         [Effect::SfuNewSession {
@@ -1116,6 +1392,7 @@ fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again()
         room.sfu(SfuReply::SubscribeOffer {
             who: GUEST,
             session: old.clone(),
+            negotiation: NegotiationId(2),
             sdp_offer: Sdp::new("late"),
             tracks: Vec::new(),
         }),
@@ -1140,6 +1417,7 @@ fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again()
             Effect::SfuSubscribe {
                 who: GUEST,
                 session: new.clone(),
+                negotiation: NegotiationId(1),
                 tracks: vec![audio, video]
             },
         ]
@@ -1149,6 +1427,7 @@ fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again()
         SfuReply::SubscribeOffer {
             who: GUEST,
             session: old.clone(),
+            negotiation: NegotiationId(2),
             sdp_offer: Sdp::new("late"),
             tracks: Vec::new(),
         },
@@ -1156,6 +1435,7 @@ fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again()
             GUEST,
             SfuCall::Renegotiate {
                 session: old.clone(),
+                negotiation: NegotiationId(2),
             },
         ),
     ] {
@@ -1165,6 +1445,7 @@ fn a_subscribe_session_the_sfu_lost_is_replaced_and_receives_every_track_again()
         room.sfu(SfuReply::SubscribeOffer {
             who: GUEST,
             session: new,
+            negotiation: NegotiationId(1),
             sdp_offer: Sdp::new("offer"),
             tracks: Vec::new(),
         })
@@ -1197,6 +1478,7 @@ fn a_publish_session_the_sfu_lost_takes_its_tracks_with_it_and_is_replaced() {
         HOST,
         SfuCall::Publish {
             session: old.clone(),
+            negotiation: room.negotiation(HOST, SessionKind::Publish),
         },
     ));
     let [
@@ -1272,14 +1554,18 @@ fn a_publish_session_the_sfu_lost_takes_its_tracks_with_it_and_is_replaced() {
         room.sfu(SfuReply::Published {
             who: HOST,
             session: old,
+            negotiation: NegotiationId(2),
             sdp_answer: Sdp::new("late"),
+            rejected: Vec::new(),
         }),
         []
     );
     let effects = room.sfu(SfuReply::Published {
         who: HOST,
         session: new.clone(),
+        negotiation: NegotiationId(1),
         sdp_answer: Sdp::new("answer"),
+        rejected: Vec::new(),
     });
     let track = RemoteTrack {
         session: new,
@@ -1328,6 +1614,7 @@ fn a_late_report_about_a_replaced_sessions_connection_changes_nothing() {
         GUEST,
         SfuCall::Subscribe {
             session: session(GUEST, SessionKind::Subscribe),
+            negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
         },
     ));
     let effects = room.sfu(SfuReply::SessionCreated {
@@ -1620,6 +1907,7 @@ fn a_subscribe_offer_sent_during_the_grace_fails_on_resume_and_is_sent_again() {
     room.sfu(SfuReply::SubscribeOffer {
         who: GUEST,
         session: session(GUEST, SessionKind::Subscribe),
+        negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
         sdp_offer: Sdp::new("offer"),
         tracks: vec![OfferedTrack {
             mid: mid.clone(),

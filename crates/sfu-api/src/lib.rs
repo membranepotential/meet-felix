@@ -17,7 +17,7 @@ pub mod wire;
 mod tests;
 
 pub use client::{
-    AppId, AppSecret, BASE_URL, HttpRequest, HttpResponse, Method, SfuClient, SfuError,
-    SfuTransport, SubscribeOffer,
+    AppId, AppSecret, BASE_URL, HttpRequest, HttpResponse, Method, PublishAnswer, SfuClient,
+    SfuError, SfuTransport, SubscribeOffer,
 };
 pub use perform::{Failure, failure_reply};

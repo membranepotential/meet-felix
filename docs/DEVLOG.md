@@ -3,6 +3,70 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — A partial publish keeps only the accepted tracks; late SFU replies stay late
+
+STATUS Next item 2, core first (D20). Two correctness fixes in the handling
+of SFU replies.
+
+Partial publish: `tracks/new` can accept some tracks of a publish offer and
+reject others (HTTP 200, `errorCode` on the rejected results; the HTTPS API
+page says to preserve the successful ones). `sfu-api` returned only the SDP
+in that case, and `SfuReply::Published` meant "all offered tracks are
+published", so the core listed and pulled tracks the SFU never had.
+`Published` now carries `rejected: Vec<TrackKind>`, which `sfu-api` fills by
+matching each result to the offered track whose `trackName` or `mid` it
+carries; results that name no track are matched by position to the tracks
+no result names, but only if the counts are equal. An unnamed error that
+cannot be matched fails the call as `Decode` rather than guess, and a track
+without a result counts as published (the docs say neither which fields a
+failed result echoes nor whether the order is kept). The core publishes only the accepted tracks
+and sends `PublishAnswer { sdp, rejected }`; the field is omitted when
+empty, so the browser protocol stays compatible. A reply that rejects every
+offered kind fails the offer as before. I chose the rejected kinds over the
+accepted ones because the common case is then an empty list, and the core
+only intersects them with the pending offer. Web: the publisher applies the
+whole answer, stops the transceivers of the rejected kinds, counts them as
+failed (no retry with the same track) and shows the usual notice through
+the new `PublishFailure` reason `refused`.
+
+Late replies: a reply that arrived after its negotiation timed out was
+applied to the next negotiation on the same session (only a replaced
+session was caught, D33). Each session now counts its negotiations; the new
+`NegotiationId` goes into `SfuPublish`, `SfuSubscribe` and `SfuRenegotiate`,
+into the matching replies and into `SfuCall`, and `sfu-api` copies it
+across. The id of the running negotiation is the session's last one, so the
+state stores only the counter (`last_negotiation`, serde default; no
+`RECORD_VERSION` bump). A reply whose id is not the running negotiation's
+changes nothing; a `SessionGone` failure still replaces its session, as it
+reports on the session. The browser protocol is unchanged. The worker needed
+no change: it passes on the replies `sfu-api` builds.
+
+Tests: rules.rs gains a partial rejection, a total rejection, and late
+`Published`, `SubscribeOffer` and `Renegotiated` replies and late publish
+and subscribe failures while a newer negotiation runs; props.rs checks that
+every published or pulled track was accepted and that a reply for another
+negotiation changes nothing. Its simulated SFU rejects some tracks and can
+hold a call past its deadline (`Stall`/`Unstall`), and `Reoffer` plays a
+client that offers again after its held offer timed out, so the held reply
+arrives late. The coverage test runs 1,000 cases and counts each case
+separately: partial rejection 80, late publish reply 334, late subscribe
+reply 98 (floor 20). Mutation check: each of the six guards (the rejected
+kinds, and the negotiation check on `Published`, a publish failure,
+`SubscribeOffer`, `Renegotiated` and a subscribe or renegotiate failure)
+fails its own rules.rs test every time when removed. The property test adds
+random interleavings (stalls, re-offers, session replacement, the leave
+grace) around them: the deterministic coverage run fails for all six
+mutations, and the random 512-case run fails for five of them on every run
+and for the subscribe-failure guard on 2 of 3 runs. sfu-api tests the
+matching with reordered, shorter, all-named and all-unnamed responses, an
+inconsistent response, and the id round trip; a protocol e2e offers a mid the SDP lacks, which the mock
+SFU rejects, and checks `rejected`, the room view and the pulls. Counts:
+core 70, sfu-api 15, worker 55, web 143, e2e 64 passed and 3 skipped.
+
+Not verified against the real SFU: the shape of a failed publish result,
+and what a session does when the room ignores a late SFU offer (it may keep
+waiting for an answer until a later call fails and D33 replaces it).
+
 ## 2026-10-10 — A dropped socket gets a minute before it counts as leaving
 
 STATUS Next item 1, core first (D20), recorded as D35 in

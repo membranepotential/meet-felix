@@ -1,9 +1,10 @@
 //! Helpers that drive a room through events.
 
+use crate::state::{Connection, SessionSlot};
 use crate::{
-    ClientMsg, DisplayName, Effect, Event, LocalTrack, MeetingId, Mid, Millis, ParticipantId,
-    RecordingPolicy, ResumeToken, RoomState, Sdp, SessionId, SessionKind, SfuReply, TrackKind,
-    TrackName, TranscriptRef, step,
+    ClientMsg, DisplayName, Effect, Event, LocalTrack, MeetingId, Mid, Millis, NegotiationId,
+    ParticipantId, RecordingPolicy, ResumeToken, RoomState, Sdp, SessionId, SessionKind, SfuReply,
+    TrackKind, TrackName, TranscriptRef, step,
 };
 
 pub(super) const T0: Millis = Millis(1_700_000_000_000);
@@ -99,6 +100,27 @@ impl Room {
         })
     }
 
+    /// The id of the latest negotiation on `who`'s session of `kind`: the one a reply to the
+    /// last SFU call on that session names.
+    ///
+    /// # Panics
+    /// If `who` is not joined or the session is being replaced.
+    pub(super) fn negotiation(&self, who: ParticipantId, kind: SessionKind) -> NegotiationId {
+        let Connection::Joined {
+            publish, subscribe, ..
+        } = &self.state.participants[&who].connection
+        else {
+            panic!("{who:?} is not joined");
+        };
+        match (kind, publish, subscribe) {
+            (SessionKind::Publish, SessionSlot::Ready(publish), _) => publish.last_negotiation,
+            (SessionKind::Subscribe, _, SessionSlot::Ready(subscribe)) => {
+                subscribe.last_negotiation
+            }
+            _ => panic!("{who:?}'s {kind:?} session is being replaced"),
+        }
+    }
+
     pub(super) fn sfu(&mut self, reply: SfuReply) -> Vec<Effect> {
         self.apply(Event::Sfu(reply))
     }
@@ -138,8 +160,20 @@ impl Room {
         self.connect(who)
     }
 
-    /// Publishes tracks and delivers the SFU's answer; returns the effects of the answer.
+    /// Publishes tracks and delivers the SFU's answer, which accepts them all; returns the effects
+    /// of the answer.
     pub(super) fn publish(&mut self, who: ParticipantId, kinds: &[TrackKind]) -> Vec<Effect> {
+        self.publish_rejecting(who, kinds, &[])
+    }
+
+    /// Publishes tracks and delivers the SFU's answer, which rejects those of the `rejected`
+    /// kinds; returns the effects of the answer.
+    pub(super) fn publish_rejecting(
+        &mut self,
+        who: ParticipantId,
+        kinds: &[TrackKind],
+        rejected: &[TrackKind],
+    ) -> Vec<Effect> {
         let tracks = kinds.iter().map(|&k| local_track(who, k)).collect();
         self.client(
             who,
@@ -151,7 +185,9 @@ impl Room {
         self.sfu(SfuReply::Published {
             who,
             session: session(who, SessionKind::Publish),
+            negotiation: self.negotiation(who, SessionKind::Publish),
             sdp_answer: Sdp::new("answer"),
+            rejected: rejected.to_vec(),
         })
     }
 }

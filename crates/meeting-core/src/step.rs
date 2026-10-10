@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use crate::ids::{Millis, ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId};
+use crate::ids::{Millis, NegotiationId, ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId};
 use crate::protocol::{
     ClientMsg, ErrorCode, IncomingTrack, LocalTrack, Recording, RecordingPolicy, Rid, Role,
     RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind, TrackRef,
@@ -559,6 +559,7 @@ impl RoomState {
         fx.push(Effect::SfuPublish {
             who,
             session: publish.id.clone(),
+            negotiation: publish.next_negotiation(),
             sdp_offer: sdp,
             tracks,
         });
@@ -611,6 +612,7 @@ impl RoomState {
         fx.push(Effect::SfuRenegotiate {
             who,
             session: subscribe.id.clone(),
+            negotiation: subscribe.last_negotiation,
             sdp_answer: sdp,
         });
         Ok(())
@@ -705,15 +707,22 @@ impl RoomState {
             SfuReply::Published {
                 who,
                 session,
+                negotiation,
                 sdp_answer,
-            } => self.published(now, who, &session, sdp_answer, fx),
+                rejected,
+            } => self.published(now, who, &session, negotiation, sdp_answer, &rejected, fx),
             SfuReply::SubscribeOffer {
                 who,
                 session,
+                negotiation,
                 sdp_offer,
                 tracks,
-            } => self.subscribe_offer(now, who, &session, sdp_offer, tracks, fx),
-            SfuReply::Renegotiated { who, session } => self.renegotiated(now, who, &session, fx),
+            } => self.subscribe_offer(now, who, &session, negotiation, sdp_offer, tracks, fx),
+            SfuReply::Renegotiated {
+                who,
+                session,
+                negotiation,
+            } => self.renegotiated(now, who, &session, negotiation, fx),
             SfuReply::TrackClosed { who, kind } => self.withdraw(who, &[kind], fx),
             SfuReply::Failed { who, call, cause } => self.sfu_failed(now, who, call, cause, fx),
         }
@@ -900,17 +909,27 @@ impl RoomState {
         }
     }
 
+    /// The SFU answered `who`'s pending offer: the accepted tracks are published and reach every
+    /// other joined participant; the rejected ones stay unpublished, and the client hears which.
+    /// An answer that rejects every offered track fails the offer. Ignored unless `negotiation`
+    /// is the offer pending on `session`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of SfuReply::Published plus the step's context"
+    )]
     fn published(
         &mut self,
         now: Millis,
         who: ParticipantId,
         session: &SessionId,
+        negotiation: NegotiationId,
         sdp_answer: Sdp,
+        rejected: &[TrackKind],
         fx: &mut Effects,
     ) {
         let Some(publish) = self
             .publish_session_mut(who)
-            .filter(|publish| publish.id == *session)
+            .filter(|publish| publish.id == *session && publish.pending(negotiation))
         else {
             return;
         };
@@ -919,18 +938,35 @@ impl RoomState {
         else {
             return;
         };
-        let kinds: Vec<TrackKind> = tracks.iter().map(|t| t.kind).collect();
+        let (refused, accepted): (Vec<LocalTrack>, Vec<LocalTrack>) =
+            tracks.into_iter().partition(|t| rejected.contains(&t.kind));
+        if accepted.is_empty() {
+            fx.send(
+                who,
+                ServerMsg::Error {
+                    code: ErrorCode::PublishFailed,
+                },
+            );
+            return;
+        }
+        let kinds: Vec<TrackKind> = accepted.iter().map(|t| t.kind).collect();
         // A new track replaces the published track of its kind.
         self.withdraw(who, &kinds, fx);
         let publish = self.publish_session_mut(who).expect("checked above");
-        publish.published.extend(tracks.into_iter().map(|t| {
+        publish.published.extend(accepted.into_iter().map(|t| {
             let track = PublishedTrack {
                 name: t.name,
                 mid: t.mid,
             };
             (t.kind, track)
         }));
-        fx.send(who, ServerMsg::PublishAnswer { sdp: sdp_answer });
+        fx.send(
+            who,
+            ServerMsg::PublishAnswer {
+                sdp: sdp_answer,
+                rejected: refused.into_iter().map(|t| t.kind).collect(),
+            },
+        );
         let subscribers: Vec<_> = self
             .joined()
             .map(|(id, ..)| id)
@@ -951,16 +987,21 @@ impl RoomState {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of SfuReply::SubscribeOffer plus the step's context"
+    )]
     fn subscribe_offer(
         &mut self,
         now: Millis,
         who: ParticipantId,
         session: &SessionId,
+        negotiation: NegotiationId,
         sdp: Sdp,
         tracks: Vec<OfferedTrack>,
         fx: &mut Effects,
     ) {
-        let Some(subscribe) = self.current_subscribe_session(who, session) else {
+        let Some(subscribe) = self.running_negotiation(who, session, negotiation) else {
             return;
         };
         let SubscribeNegotiation::AwaitingOffer { requested, .. } = &subscribe.negotiation else {
@@ -1010,9 +1051,10 @@ impl RoomState {
         now: Millis,
         who: ParticipantId,
         session: &SessionId,
+        negotiation: NegotiationId,
         fx: &mut Effects,
     ) {
-        let Some(subscribe) = self.current_subscribe_session(who, session) else {
+        let Some(subscribe) = self.running_negotiation(who, session, negotiation) else {
             return;
         };
         let SubscribeNegotiation::Renegotiating { offered, .. } = &mut subscribe.negotiation else {
@@ -1059,8 +1101,22 @@ impl RoomState {
             .filter(|subscribe| subscribe.id == *session)
     }
 
-    /// A failed call on a session the SFU no longer serves replaces that session; any other
-    /// failed call is retried later. Failures about a replaced session are ignored.
+    /// `who`'s subscribe session if it is `session` and `negotiation` runs on it; `None` for a
+    /// reply about a replaced session, or about a negotiation that failed or timed out since.
+    fn running_negotiation(
+        &mut self,
+        who: ParticipantId,
+        session: &SessionId,
+        negotiation: NegotiationId,
+    ) -> Option<&mut SubscribeSession> {
+        self.current_subscribe_session(who, session)
+            .filter(|subscribe| subscribe.running(negotiation))
+    }
+
+    /// A failed call on a session the SFU no longer serves replaces that session, whichever
+    /// negotiation it belonged to; any other failed call ends its negotiation, which is retried
+    /// later. Failures about a replaced session, and other failures about a negotiation that is
+    /// no longer running, are ignored.
     fn sfu_failed(
         &mut self,
         now: Millis,
@@ -1088,37 +1144,51 @@ impl RoomState {
                     self.replacement_failed(now, who, kind, fx);
                 }
             }
-            SfuCall::Publish { session } => {
-                if self
+            SfuCall::Publish {
+                session,
+                negotiation,
+            } => {
+                let Some(publish) = self
                     .publish_session_mut(who)
-                    .is_none_or(|publish| publish.id != session)
-                {
+                    .filter(|publish| publish.id == session)
+                else {
                     return;
-                }
+                };
                 match cause {
                     FailureCause::SessionGone => {
                         self.replace_session(now, who, SessionKind::Publish, fx)
                     }
-                    FailureCause::Transient => self.publish_failed(who, fx),
+                    FailureCause::Transient if publish.pending(negotiation) => {
+                        self.publish_failed(who, fx)
+                    }
+                    FailureCause::Transient => {}
                 }
             }
-            SfuCall::Subscribe { ref session } | SfuCall::Renegotiate { ref session } => {
+            SfuCall::Subscribe {
+                ref session,
+                negotiation,
+            }
+            | SfuCall::Renegotiate {
+                ref session,
+                negotiation,
+            } => {
                 let Some(subscribe) = self.current_subscribe_session(who, session) else {
                     return;
                 };
                 if cause == FailureCause::SessionGone {
                     return self.replace_session(now, who, SessionKind::Subscribe, fx);
                 }
-                let running = matches!(
-                    (&call, &subscribe.negotiation),
-                    (
-                        SfuCall::Subscribe { .. },
-                        SubscribeNegotiation::AwaitingOffer { .. }
-                    ) | (
-                        SfuCall::Renegotiate { .. },
-                        SubscribeNegotiation::Renegotiating { .. }
-                    )
-                );
+                let running = subscribe.running(negotiation)
+                    && matches!(
+                        (&call, &subscribe.negotiation),
+                        (
+                            SfuCall::Subscribe { .. },
+                            SubscribeNegotiation::AwaitingOffer { .. }
+                        ) | (
+                            SfuCall::Renegotiate { .. },
+                            SubscribeNegotiation::Renegotiating { .. }
+                        )
+                    );
                 if running {
                     self.subscription_failed(now, who, fx);
                     self.request_wanted(now, who, fx);
@@ -1225,6 +1295,7 @@ impl RoomState {
             fx.push(Effect::SfuSubscribe {
                 who,
                 session: subscribe.id.clone(),
+                negotiation: subscribe.next_negotiation(),
                 tracks,
             });
             subscribe.negotiation = SubscribeNegotiation::AwaitingOffer {

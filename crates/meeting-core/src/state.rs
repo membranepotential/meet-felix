@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{
-    DisplayName, MeetingId, Mid, Millis, ParticipantId, ResumeToken, SessionId, TrackName,
-    TranscriptRef,
+    DisplayName, MeetingId, Mid, Millis, NegotiationId, ParticipantId, ResumeToken, SessionId,
+    TrackName, TranscriptRef,
 };
 use crate::protocol::{
     LocalTrack, ParticipantView, Phase, Presence, Recording, RecordingPolicy, Rid, Role, RoomView,
@@ -161,6 +161,10 @@ pub(crate) struct PublishSession {
     pub(crate) id: SessionId,
     pub(crate) published: BTreeMap<TrackKind, PublishedTrack>,
     pub(crate) negotiation: PublishNegotiation,
+    /// The id of the latest offer on this session: the pending one, if any. Records stored
+    /// before the field existed load with 0, so their first new offer gets 1.
+    #[serde(default)]
+    pub(crate) last_negotiation: NegotiationId,
 }
 
 /// A track the SFU accepted on a publish session.
@@ -192,6 +196,10 @@ pub(crate) struct SubscribeSession {
     #[serde(with = "pairs")]
     pub(crate) wanted: BTreeMap<TrackRef, Millis>,
     pub(crate) negotiation: SubscribeNegotiation,
+    /// The id of the latest negotiation on this session: the running one, if any. Records
+    /// stored before the field existed load with 0.
+    #[serde(default)]
+    pub(crate) last_negotiation: NegotiationId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,7 +584,19 @@ impl PublishSession {
             id,
             published: BTreeMap::new(),
             negotiation: PublishNegotiation::Idle,
+            last_negotiation: NegotiationId::default(),
         }
+    }
+
+    /// Counts a new offer on this session; returns its id.
+    pub(crate) fn next_negotiation(&mut self) -> NegotiationId {
+        self.last_negotiation = self.last_negotiation.next();
+        self.last_negotiation
+    }
+
+    /// Whether `negotiation` names the offer pending on this session.
+    pub(crate) fn pending(&self, negotiation: NegotiationId) -> bool {
+        self.negotiation != PublishNegotiation::Idle && self.last_negotiation == negotiation
     }
 
     /// The kinds of the published tracks, sorted.
@@ -603,7 +623,19 @@ impl SubscribeSession {
             receiving: BTreeMap::new(),
             wanted,
             negotiation: SubscribeNegotiation::Idle,
+            last_negotiation: NegotiationId::default(),
         }
+    }
+
+    /// Counts a new negotiation on this session; returns its id.
+    pub(crate) fn next_negotiation(&mut self) -> NegotiationId {
+        self.last_negotiation = self.last_negotiation.next();
+        self.last_negotiation
+    }
+
+    /// Whether `negotiation` names the negotiation running on this session.
+    pub(crate) fn running(&self, negotiation: NegotiationId) -> bool {
+        self.negotiation != SubscribeNegotiation::Idle && self.last_negotiation == negotiation
     }
 
     /// When the running negotiation times out or, while idle, when the earliest wanted track

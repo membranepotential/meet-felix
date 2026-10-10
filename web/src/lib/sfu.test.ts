@@ -110,10 +110,14 @@ function fakePeerConnection() {
 describe('Publisher', () => {
 	const camera = { kind: 'video' } as MediaStreamTrack;
 
-	/** A publisher whose offers the room answers right away while `connected` is true. */
-	function setup() {
+	/**
+	 * A publisher whose offers the room answers right away while `connected` is true; the answer
+	 * says the SFU did not publish the `rejected` kinds.
+	 */
+	function setup(rejected: TrackKind[] = []) {
 		const { pc, transceivers, fail } = fakePeerConnection();
 		const sent: ClientMsg[] = [];
+		const publishFailed = vi.fn();
 		const connectionFailed = vi.fn();
 		let connected = true;
 		const publisher: Publisher = new Publisher(
@@ -121,14 +125,16 @@ describe('Publisher', () => {
 			(msg) => {
 				if (!connected) return false;
 				sent.push(msg);
-				if (msg.type === 'publishOffer') queueMicrotask(() => publisher.answer('answer'));
+				if (msg.type === 'publishOffer') {
+					queueMicrotask(() => publisher.answer('answer', rejected));
+				}
 				return true;
 			},
-			() => {},
+			publishFailed,
 			connectionFailed
 		);
 		const setConnected = (on: boolean) => (connected = on);
-		return { publisher, sent, transceivers, setConnected, fail, connectionFailed };
+		return { publisher, sent, transceivers, setConnected, fail, publishFailed, connectionFailed };
 	}
 
 	it('reports a failed connection once', () => {
@@ -136,6 +142,20 @@ describe('Publisher', () => {
 		fail();
 		fail();
 		expect(connectionFailed).toHaveBeenCalledOnce();
+	});
+
+	it('counts a kind the SFU rejected as failed and does not offer it again', async () => {
+		const microphone = { kind: 'audio' } as MediaStreamTrack;
+		const { publisher, sent, transceivers, publishFailed } = setup(['video']);
+		const both = { ...NO_OUTGOING, audio: microphone, video: camera };
+		publisher.sync(both);
+		await vi.waitFor(() => expect(publishFailed).toHaveBeenCalledWith(['video'], 'refused'));
+		expect(transceivers[0]?.stop).not.toHaveBeenCalled();
+		expect(transceivers[1]?.stop).toHaveBeenCalledOnce();
+		// The same camera track is not offered again; a new one would be.
+		publisher.sync(both);
+		await Promise.resolve();
+		expect(sent.filter((m) => m.type === 'publishOffer')).toHaveLength(1);
 	});
 
 	it('unpublishes a camera turned off and stops its transceiver', async () => {

@@ -8,8 +8,8 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use meeting_core::{
-    Effect, FailureCause, LocalTrack, Mid, OfferedTrack, ParticipantId, RemoteTrack, Rid, Sdp,
-    SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
+    Effect, FailureCause, LocalTrack, Mid, NegotiationId, OfferedTrack, ParticipantId, RemoteTrack,
+    Rid, Sdp, SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
 };
 use serde_json::{Value, json};
 
@@ -207,6 +207,8 @@ fn ready<F: Future>(future: F) -> F::Output {
 }
 
 const ALICE: ParticipantId = ParticipantId(1);
+/// The negotiation the effects name; every reply must carry it back.
+const NEGOTIATION: NegotiationId = NegotiationId(7);
 
 #[test]
 fn new_session_effect_creates_a_session() {
@@ -233,10 +235,11 @@ fn new_session_effect_creates_a_session() {
 }
 
 #[test]
-fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
+fn publish_effect_returns_the_answer_and_the_rejected_kinds_unless_every_track_is_rejected() {
     let effect = Effect::SfuPublish {
         who: ALICE,
         session: SessionId::new(PUBLISHER),
+        negotiation: NEGOTIATION,
         sdp_offer: Sdp::new("offer"),
         tracks: vec![LocalTrack {
             mid: Mid::new("0"),
@@ -257,7 +260,9 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
         Ok(Some(SfuReply::Published {
             who: ALICE,
             session: SessionId::new(PUBLISHER),
+            negotiation: NEGOTIATION,
             sdp_answer: Sdp::new("answer"),
+            rejected: Vec::new(),
         }))
     );
     assert_eq!(
@@ -268,6 +273,7 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
     let two_tracks = Effect::SfuPublish {
         who: ALICE,
         session: SessionId::new(PUBLISHER),
+        negotiation: NEGOTIATION,
         sdp_offer: Sdp::new("offer"),
         tracks: vec![
             LocalTrack {
@@ -282,25 +288,57 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
             },
         ],
     };
-    let partly = Canned::new([(
-        200,
-        json!({
-          "requiresImmediateRenegotiation": false,
-          "tracks": [
-            { "trackName": "mic", "mid": "0" },
-            { "trackName": "camera", "errorCode": "invalid_params", "errorDescription": "bad mid" }
-          ],
-          "sessionDescription": { "sdp": "answer", "type": "answer" }
-        }),
-    )]);
-    assert_eq!(
-        ready(client(&partly).perform(&two_tracks)),
-        Ok(Some(SfuReply::Published {
-            who: ALICE,
-            session: SessionId::new(PUBLISHER),
-            sdp_answer: Sdp::new("answer"),
-        }))
-    );
+    // An entry belongs to the track whose `trackName` or `mid` it carries, whatever the order;
+    // the entries that name no track belong to the tracks no entry names, by position, if their
+    // counts are equal.
+    let camera_error = json!({ "errorCode": "invalid_params", "errorDescription": "bad mid" });
+    let named_camera_error = json!({
+        "trackName": "camera", "errorCode": "invalid_params", "errorDescription": "bad mid"
+    });
+    let rejects_camera = [
+        // Reordered: a named success, then an unnamed error.
+        json!([camera_error, { "trackName": "mic", "mid": "0" }]),
+        // Shorter: only the rejected track has a result.
+        json!([named_camera_error]),
+        // All named.
+        json!([named_camera_error, { "trackName": "mic", "mid": "0" }]),
+        // All unnamed, as many as the offered tracks.
+        json!([{}, camera_error]),
+    ];
+    let partly = |tracks: &Value| {
+        Canned::new([(
+            200,
+            json!({
+              "requiresImmediateRenegotiation": false,
+              "tracks": tracks,
+              "sessionDescription": { "sdp": "answer", "type": "answer" }
+            }),
+        )])
+    };
+    for tracks in &rejects_camera {
+        assert_eq!(
+            ready(client(&partly(tracks)).perform(&two_tracks)),
+            Ok(Some(SfuReply::Published {
+                who: ALICE,
+                session: SessionId::new(PUBLISHER),
+                negotiation: NEGOTIATION,
+                sdp_answer: Sdp::new("answer"),
+                rejected: vec![TrackKind::Video],
+            })),
+            "{tracks}"
+        );
+    }
+    // An unnamed error with no unambiguous track fails the call rather than guess.
+    assert!(matches!(
+        ready(client(&partly(&json!([camera_error]))).perform(&two_tracks)),
+        Err(Failure {
+            error: SfuError::Decode(_),
+            reply: Some(SfuReply::Failed {
+                cause: FailureCause::Transient,
+                ..
+            }),
+        })
+    ));
 
     let rejected = Canned::new([(
         200,
@@ -320,6 +358,7 @@ fn publish_effect_returns_the_answer_unless_every_track_is_rejected() {
                 who: ALICE,
                 call: SfuCall::Publish {
                     session: SessionId::new(PUBLISHER),
+                    negotiation: NEGOTIATION,
                 },
                 cause: FailureCause::Transient,
             }),
@@ -352,6 +391,7 @@ fn subscribe_effect_maps_mids_and_drops_rejected_tracks() {
     let effect = Effect::SfuSubscribe {
         who: ALICE,
         session: SessionId::new(SUBSCRIBER),
+        negotiation: NEGOTIATION,
         tracks: vec![camera.clone(), gone],
     };
     assert_eq!(
@@ -359,6 +399,7 @@ fn subscribe_effect_maps_mids_and_drops_rejected_tracks() {
         Ok(Some(SfuReply::SubscribeOffer {
             who: ALICE,
             session: SessionId::new(SUBSCRIBER),
+            negotiation: NEGOTIATION,
             sdp_offer: Sdp::new("offer"),
             tracks: vec![OfferedTrack {
                 mid: Mid::new("5"),
@@ -387,6 +428,7 @@ fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
     let effect = Effect::SfuSubscribe {
         who: ALICE,
         session: SessionId::new(SUBSCRIBER),
+        negotiation: NEGOTIATION,
         tracks: vec![RemoteTrack {
             session: SessionId::new(PUBLISHER),
             name: TrackName::new("camera"),
@@ -397,6 +439,7 @@ fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
         Ok(Some(SfuReply::SubscribeOffer {
             who: ALICE,
             session: SessionId::new(SUBSCRIBER),
+            negotiation: NEGOTIATION,
             sdp_offer: Sdp::new("offer"),
             tracks: Vec::new(),
         }))
@@ -420,6 +463,7 @@ fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
                 who: ALICE,
                 call: SfuCall::Subscribe {
                     session: SessionId::new(SUBSCRIBER),
+                    negotiation: NEGOTIATION,
                 },
                 cause: FailureCause::Transient,
             }),
@@ -469,6 +513,7 @@ fn api_and_http_errors_become_failed_replies() {
     let effect = Effect::SfuRenegotiate {
         who: ALICE,
         session: SessionId::new(SUBSCRIBER),
+        negotiation: NEGOTIATION,
         sdp_answer: Sdp::new("answer"),
     };
     let accepted = Canned::new([(200, json!({}))]);
@@ -477,6 +522,7 @@ fn api_and_http_errors_become_failed_replies() {
         Ok(Some(SfuReply::Renegotiated {
             who: ALICE,
             session: SessionId::new(SUBSCRIBER),
+            negotiation: NEGOTIATION,
         }))
     );
 
@@ -496,6 +542,7 @@ fn api_and_http_errors_become_failed_replies() {
                 who: ALICE,
                 call: SfuCall::Renegotiate {
                     session: SessionId::new(SUBSCRIBER),
+                    negotiation: NEGOTIATION,
                 },
                 cause: FailureCause::Transient,
             }),
@@ -519,6 +566,7 @@ fn a_session_the_sfu_declares_gone_is_reported_as_such() {
     let effect = Effect::SfuSubscribe {
         who: ALICE,
         session: SessionId::new(SUBSCRIBER),
+        negotiation: NEGOTIATION,
         tracks: vec![RemoteTrack {
             session: SessionId::new(PUBLISHER),
             name: TrackName::new("camera"),
@@ -537,6 +585,7 @@ fn a_session_the_sfu_declares_gone_is_reported_as_such() {
             who: ALICE,
             call: SfuCall::Subscribe {
                 session: SessionId::new(SUBSCRIBER),
+                negotiation: NEGOTIATION,
             },
             cause: FailureCause::SessionGone,
         }))

@@ -358,10 +358,18 @@ pub enum ServerMsg {
     /// Wait outside: the room is locked and a host must admit you, or the meeting is scheduled
     /// and you enter when the first host joins.
     Waiting,
-    /// The SFU's answer to your publish offer.
+    /// The SFU's answer to your publish offer. Apply it whole: it covers every offered track,
+    /// the rejected ones too.
     PublishAnswer {
         /// The answer.
         sdp: Sdp,
+        /// The kinds of the offered tracks the SFU did not publish: nobody receives them, and
+        /// the room does not list them. Stop their transceivers; a later
+        /// [`ClientMsg::PublishOffer`] may try the kind again. Absent if every track was
+        /// published.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "wasm", tsify(optional))]
+        rejected: Vec<TrackKind>,
     },
     /// New remote tracks for your subscribe session; reply with [`ClientMsg::SubscribeAnswer`].
     SubscribeOffer {

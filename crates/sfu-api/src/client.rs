@@ -2,7 +2,9 @@
 
 use std::fmt;
 
-use meeting_core::{FailureCause, LocalTrack, Mid, OfferedTrack, RemoteTrack, Rid, Sdp, SessionId};
+use meeting_core::{
+    FailureCause, LocalTrack, Mid, OfferedTrack, RemoteTrack, Rid, Sdp, SessionId, TrackKind,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -131,6 +133,14 @@ impl SfuError {
     }
 }
 
+/// The SFU's answer to a publish offer and the kinds of the offered tracks it rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishAnswer {
+    pub sdp: Sdp,
+    /// Empty if the SFU published every offered track.
+    pub rejected: Vec<TrackKind>,
+}
+
 /// The SFU's offer for a subscribe session and the tracks it adds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscribeOffer {
@@ -174,9 +184,15 @@ impl<T: SfuTransport> SfuClient<T> {
     }
 
     /// `POST sessions/{id}/tracks/new` with the client's offer and local tracks; returns the
-    /// SFU's answer. Fails only if the SFU rejected every track: the API docs say to keep the
-    /// successful tracks of a partly successful request, and the answer covers the whole offer,
+    /// SFU's answer and the kinds of the tracks it rejected with a per-track `errorCode`. Fails
+    /// only if the SFU rejected every track: the API docs say to "preserve successful
+    /// allocations from partially successful requests", and the answer covers the whole offer,
     /// so the client must apply it either way.
+    ///
+    /// Neither the docs nor the OpenAPI schema say whether the SFU echoes `trackName` or `mid`
+    /// in a failed entry or keeps the request's order (checked 2026-10-10), so
+    /// [`publish_errors`] matches results to tracks by name first and by position only where
+    /// that is unambiguous.
     ///
     /// The SFU answers an endpoint's offer with an answer and
     /// `requiresImmediateRenegotiation: false` (OpenAPI example `local_tracks`); a response
@@ -187,7 +203,7 @@ impl<T: SfuTransport> SfuClient<T> {
         session: &SessionId,
         offer: &Sdp,
         tracks: &[LocalTrack],
-    ) -> Result<Sdp, SfuError> {
+    ) -> Result<PublishAnswer, SfuError> {
         let request = TracksRequest {
             session_description: Some(SessionDescription {
                 kind: SdpType::Offer,
@@ -208,14 +224,16 @@ impl<T: SfuTransport> SfuClient<T> {
                 Some(&request),
             )
             .await?;
-        let published = response
-            .tracks
-            .iter()
-            .any(|result| result.error_code.is_none());
-        match response.tracks.iter().find_map(track_error) {
-            Some(error) if !published => Err(error),
-            _ => sdp_of(response.session_description, SdpType::Answer),
+        let errors = publish_errors(tracks, &response.tracks)?;
+        if errors.len() == tracks.len()
+            && let Some((_, error)) = errors.first()
+        {
+            return Err(error.clone());
         }
+        Ok(PublishAnswer {
+            sdp: sdp_of(response.session_description, SdpType::Answer)?,
+            rejected: errors.into_iter().map(|(kind, _)| kind).collect(),
+        })
     }
 
     /// `POST sessions/{id}/tracks/new` with remote tracks; returns the SFU's offer and the tracks
@@ -475,6 +493,60 @@ pub(crate) fn decode<R: DeserializeOwned>(response: &HttpResponse) -> Result<R, 
         return Err(SfuError::Status { status });
     }
     serde_json::from_str(body).map_err(|e| SfuError::Decode(e.to_string()))
+}
+
+/// The offered tracks a publish response rejects, in offer order, each with its error.
+///
+/// An entry whose `trackName` or `mid` matches an offered track belongs to that track. The
+/// remaining (unnamed) entries belong to the tracks no entry names, by position, but only if
+/// there are as many of them as there are such tracks. A track without a result counts as
+/// published, so unnamed entries without an error need no match. Unnamed errors that cannot be
+/// matched make the response inconsistent: that fails with [`SfuError::Decode`] rather than
+/// guess which track the SFU rejected.
+fn publish_errors(
+    tracks: &[LocalTrack],
+    results: &[TrackResult],
+) -> Result<Vec<(TrackKind, SfuError)>, SfuError> {
+    let named_track = |result: &TrackResult| {
+        tracks.iter().position(|track| {
+            result.track_name.as_ref() == Some(&track.name)
+                || result.mid.as_ref() == Some(&track.mid)
+        })
+    };
+    let named: Vec<(usize, &TrackResult)> = results
+        .iter()
+        .filter_map(|result| Some((named_track(result)?, result)))
+        .collect();
+    let unnamed: Vec<&TrackResult> = results
+        .iter()
+        .filter(|result| named_track(result).is_none())
+        .collect();
+    let unmatched: Vec<usize> = (0..tracks.len())
+        .filter(|i| named.iter().all(|(j, _)| j != i))
+        .collect();
+    let positional: Vec<(usize, &TrackResult)> = if unnamed.len() == unmatched.len() {
+        unmatched.into_iter().zip(unnamed).collect()
+    } else if unnamed.iter().all(|result| result.error_code.is_none()) {
+        Vec::new()
+    } else {
+        return Err(SfuError::Decode(format!(
+            "{} track results name no offered track, but {} offered tracks have no result",
+            unnamed.len(),
+            unmatched.len()
+        )));
+    };
+    let attributed = [named, positional].concat();
+    Ok(tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, track)| {
+            let error = attributed
+                .iter()
+                .filter(|(j, _)| *j == i)
+                .find_map(|(_, result)| track_error(result))?;
+            Some((track.kind, error))
+        })
+        .collect())
 }
 
 fn track_error(result: &TrackResult) -> Option<SfuError> {

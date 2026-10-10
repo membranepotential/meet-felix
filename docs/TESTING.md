@@ -11,7 +11,7 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Core unit tests | Single rules of `step`, whole meetings, ids, the word list | `cargo test -p meeting-core` | Exist; growing with the core |
 | Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 200 actions) |
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
-| SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer); core SFU effects to replies | `cargo test -p sfu-api` | Exist |
+| SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer); core SFU effects to replies, with the negotiation id carried through and a publish answer's per-track errors turned into rejected kinds | `cargo test -p sfu-api` | Exist |
 | Worker unit tests | Storage record, socket attachment with the owner flag, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules; the owner's session cookie (valid, expired, tampered, foreign, missing) and password; `/api/new` and `/api/login` input checks | `cargo test -p meet-worker` | Exist |
 | E2E protocol tests | The real `RoomObject` running the core under `wrangler dev`, driven over raw WebSockets, with a mock SFU: owner session, HTTP routes, the meeting lifecycle, consent and recording state, negotiation, host controls, SFU failures and session recovery, the meetings list | `pnpm test:e2e` (project `protocol`) | Exist (Playwright Test, `web/e2e/protocol/`) |
 | E2E browser tests | The UI flows in Chromium and Firefox with fake devices against the same local stack: login, pre-join, lobby, tiles, controls, screen share, leave and end, past meetings, recovery | `pnpm test:e2e` (projects `chromium`, `firefox`) | Exist (`web/e2e/browser/`) |
@@ -57,10 +57,18 @@ until they resume, and it checks the grace-period invariants of
 [D35](core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)
 (a drop only marks a joined participant, the mark never moves later, no
 grace outlives its alarm, a resume changes nothing else, and the room shows
-exactly the dropped participants as reconnecting). A second test
+exactly the dropped participants as reconnecting). Since 2026-10-10 the
+simulated SFU also rejects some offered tracks in its publish answers, and
+it can hold a call past its negotiation's deadline and answer it later
+(`Stall`, `Unstall`); a simulated client offers again after its held offer
+timed out (`Reoffer`), so the held answer arrives late for the new offer.
+The tests check that every published or pulled track
+was accepted by the SFU, and that a reply about a negotiation other than the
+running one changes nothing. A second test (1,000 cases)
 checks that the random sequences actually reach rooms that receive tracks,
-record, end, and lose, resume and expire sockets in the grace period,
-since otherwise the properties would prove little. There is
+record, end, lose, resume and expire sockets in the grace period, get a
+publish answer that rejects some tracks, and get a late publish reply and a
+late subscribe reply while a newer negotiation runs, since otherwise the properties would prove little. There is
 no CI yet; phase 1 adds it, running these tests on every push.
 
 ## End-to-end tests (Playwright)
@@ -202,7 +210,7 @@ Protocol layer (`web/e2e/protocol/`, Node only, about 25 s):
 | `http-routes.spec.ts` | `POST /api/new` (401 without or with a wrong secret, 201 with the secret or the cookie, three words and nothing else), `GET /api/meeting/{words}` (policy, `scheduled`, case-insensitive, 404), 426 without upgrade, `GET /api/ice` (STUN for a known meeting, 404 otherwise) |
 | `lifecycle.spec.ts` | A guest waits in a scheduled room despite a forged `x-meet-owner`; the owner joins as host, the room goes live, the guest is let in; ping and pong; a malformed frame; leaving; a dropped socket keeps the participant and its tracks, shown `reconnecting`, until the resume with the token brings it back with the same id and epochs; a knocking guest whose socket closes is gone at once; resume with the token; "join as host" with the cookie; `End` closes every socket, refuses the next one and releases the words; the room keeps its participants through an idle phase |
 | `consent-recording.spec.ts` | Recording from the host's arrival in a `fromStart` meeting, the transcript token in `Ended`; a guest without consent waits in `awaitingConsent` until `SetConsent`; `hostDecides`: recording on and off by the host, `ConsentRequired` and `Muted` for a guest without consent; a guest cannot record |
-| `negotiation.spec.ts` | `PublishAnswer` from the SFU; the first pull's `not_found_track_error` reaches the guest as a `SubscribeOffer` without tracks, the retry delivers the track; answers reach `renegotiate`; `Unpublish` closes the track on the publish and the subscribe session; a third participant's track reaches everyone |
+| `negotiation.spec.ts` | `PublishAnswer` from the SFU; a track the SFU rejects (an offered mid missing from the SDP) is listed in `PublishAnswer.rejected`, not shown in the room view and never pulled; the first pull's `not_found_track_error` reaches the guest as a `SubscribeOffer` without tracks, the retry delivers the track; answers reach `renegotiate`; `Unpublish` closes the track on the publish and the subscribe session; a third participant's track reaches everyone |
 | `host-controls.spec.ts` | Lock, knock, admit; kick (with the SFU holding `tracks/close` while the kicked client sends `Join` on the same socket, which must not bring it back); a guest cannot kick; a host's mute |
 | `failures.spec.ts` | A pull answered with 410 makes the room create a new session, send `SubscribeReset` with epoch 1, deliver the track on the new session and make no further call on the lost one; `ResetSession` answered with `PublishReset` or `SubscribeReset`, a stale epoch ignored; with the SFU down, joining fails with `SfuUnavailable` and the socket closes |
 | `meetings-list.spec.ts` | `GET /api/meetings`: 401 without or with a wrong secret, 200 with the cookie; newest first; an ended meeting with its transcript token, a never-joined one as `scheduled` |

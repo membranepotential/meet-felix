@@ -2,7 +2,7 @@
 
 use meeting_core::{Effect, FailureCause, SfuCall, SfuReply};
 
-use crate::client::{SfuClient, SfuError, SfuTransport, SubscribeOffer};
+use crate::client::{PublishAnswer, SfuClient, SfuError, SfuTransport, SubscribeOffer};
 
 /// An SFU effect whose call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,22 +34,26 @@ impl<T: SfuTransport> SfuClient<T> {
             Effect::SfuPublish {
                 who,
                 session,
+                negotiation,
                 sdp_offer,
                 tracks,
             } => {
-                let sdp_answer = self
+                let PublishAnswer { sdp, rejected } = self
                     .publish(session, sdp_offer, tracks)
                     .await
                     .map_err(failed)?;
                 Some(SfuReply::Published {
                     who: *who,
                     session: session.clone(),
-                    sdp_answer,
+                    negotiation: *negotiation,
+                    sdp_answer: sdp,
+                    rejected,
                 })
             }
             Effect::SfuSubscribe {
                 who,
                 session,
+                negotiation,
                 tracks,
             } => {
                 let SubscribeOffer { sdp, tracks } =
@@ -57,6 +61,7 @@ impl<T: SfuTransport> SfuClient<T> {
                 Some(SfuReply::SubscribeOffer {
                     who: *who,
                     session: session.clone(),
+                    negotiation: *negotiation,
                     sdp_offer: sdp,
                     tracks,
                 })
@@ -64,6 +69,7 @@ impl<T: SfuTransport> SfuClient<T> {
             Effect::SfuRenegotiate {
                 who,
                 session,
+                negotiation,
                 sdp_answer,
             } => {
                 self.renegotiate(session, sdp_answer)
@@ -72,6 +78,7 @@ impl<T: SfuTransport> SfuClient<T> {
                 Some(SfuReply::Renegotiated {
                     who: *who,
                     session: session.clone(),
+                    negotiation: *negotiation,
                 })
             }
             Effect::SfuCloseTracks { session, mids, .. } => {
@@ -101,22 +108,40 @@ impl<T: SfuTransport> SfuClient<T> {
 pub fn failure_reply(effect: &Effect, cause: FailureCause) -> Option<SfuReply> {
     let (who, call) = match effect {
         Effect::SfuNewSession { who, kind } => (who, SfuCall::NewSession(*kind)),
-        Effect::SfuPublish { who, session, .. } => (
+        Effect::SfuPublish {
+            who,
+            session,
+            negotiation,
+            ..
+        } => (
             who,
             SfuCall::Publish {
                 session: session.clone(),
+                negotiation: *negotiation,
             },
         ),
-        Effect::SfuSubscribe { who, session, .. } => (
+        Effect::SfuSubscribe {
+            who,
+            session,
+            negotiation,
+            ..
+        } => (
             who,
             SfuCall::Subscribe {
                 session: session.clone(),
+                negotiation: *negotiation,
             },
         ),
-        Effect::SfuRenegotiate { who, session, .. } => (
+        Effect::SfuRenegotiate {
+            who,
+            session,
+            negotiation,
+            ..
+        } => (
             who,
             SfuCall::Renegotiate {
                 session: session.clone(),
+                negotiation: *negotiation,
             },
         ),
         _ => return None,

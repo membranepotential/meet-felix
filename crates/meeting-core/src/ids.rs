@@ -87,6 +87,21 @@ impl SessionEpoch {
     }
 }
 
+/// Names one negotiation on an SFU session: a publish offer, or a subscribe negotiation from the
+/// room's request for tracks to the SFU's confirmation of the client's answer. Each session
+/// counts its negotiations from 1, and the SFU effects and replies carry the id, so a reply that
+/// arrives after its negotiation timed out is not applied to a newer one on the same session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NegotiationId(pub u32);
+
+impl NegotiationId {
+    /// The id of the session's next negotiation.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
 /// The secret that lets a client whose socket dropped take its place in the room again. The
 /// room hands it out in [`crate::ServerMsg::Welcome`]; the client sends it back in
 /// [`crate::ClientMsg::Join`]. Its `Debug` output hides the value.

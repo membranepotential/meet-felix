@@ -244,7 +244,7 @@ export class Session {
 				this.#welcomed(command.fresh, command.epochs);
 				return;
 			case 'publish-answer':
-				void this.#publisher?.then((publisher) => publisher.answer(command.sdp));
+				void this.#publisher?.then((publisher) => publisher.answer(command.sdp, command.rejected));
 				return;
 			case 'publish-rejected':
 				void this.#publisher?.then((publisher) => publisher.rejected());

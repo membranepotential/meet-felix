@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{MeetingId, Mid, Millis, ParticipantId, ResumeToken, Sdp, SessionId, TrackName};
+use crate::ids::{
+    MeetingId, Mid, Millis, NegotiationId, ParticipantId, ResumeToken, Sdp, SessionId, TrackName,
+};
 use crate::protocol::{ClientMsg, LocalTrack, Rid, ServerMsg, SessionKind, TrackKind};
 use crate::recording::{ConsentRecord, RosterEntry};
 
@@ -55,7 +57,7 @@ pub struct OfferedTrack {
 }
 
 /// The SFU call that failed, named after the effect that requested it, with the session it was
-/// made on.
+/// made on and, for a negotiation step, the negotiation it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SfuCall {
     /// [`Effect::SfuNewSession`].
@@ -64,16 +66,22 @@ pub enum SfuCall {
     Publish {
         /// The publish session.
         session: SessionId,
+        /// The publish offer.
+        negotiation: NegotiationId,
     },
     /// [`Effect::SfuSubscribe`].
     Subscribe {
         /// The subscribe session.
         session: SessionId,
+        /// The subscribe negotiation.
+        negotiation: NegotiationId,
     },
     /// [`Effect::SfuRenegotiate`].
     Renegotiate {
         /// The subscribe session.
         session: SessionId,
+        /// The subscribe negotiation.
+        negotiation: NegotiationId,
     },
 }
 
@@ -88,8 +96,10 @@ pub enum FailureCause {
     Transient,
 }
 
-/// The outcome of an SFU call. Replies about participants who left meanwhile, or about a session
-/// the room has replaced since, are ignored.
+/// The outcome of an SFU call. Replies about participants who left meanwhile, about a session
+/// the room has replaced since, or about a negotiation that is no longer the session's running
+/// one (it timed out, and perhaps a newer one started) are ignored; only a failure that reports
+/// the session gone counts whatever negotiation it names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SfuReply {
     /// Reply to [`Effect::SfuNewSession`].
@@ -101,14 +111,21 @@ pub enum SfuReply {
         /// The new session's id.
         session: SessionId,
     },
-    /// Reply to [`Effect::SfuPublish`]: all offered tracks are published.
+    /// Reply to [`Effect::SfuPublish`]: the SFU published the offered tracks except those of the
+    /// `rejected` kinds, for which it returned a per-track error. If it rejected every track,
+    /// the call failed instead ([`SfuReply::Failed`]); a reply that rejects every offered kind
+    /// anyway counts as such a failure.
     Published {
         /// The publisher.
         who: ParticipantId,
         /// Their publish session.
         session: SessionId,
-        /// The SFU's answer for the client.
+        /// The publish offer.
+        negotiation: NegotiationId,
+        /// The SFU's answer for the client; it covers the whole offer.
         sdp_answer: Sdp,
+        /// The kinds of the offered tracks the SFU did not publish; empty if it published all.
+        rejected: Vec<TrackKind>,
     },
     /// Reply to [`Effect::SfuSubscribe`]: the SFU needs the client to answer this offer.
     SubscribeOffer {
@@ -116,6 +133,8 @@ pub enum SfuReply {
         who: ParticipantId,
         /// Their subscribe session.
         session: SessionId,
+        /// The subscribe negotiation.
+        negotiation: NegotiationId,
         /// The SFU's offer for the client.
         sdp_offer: Sdp,
         /// The tracks the offer adds.
@@ -127,6 +146,8 @@ pub enum SfuReply {
         who: ParticipantId,
         /// Their subscribe session.
         session: SessionId,
+        /// The subscribe negotiation.
+        negotiation: NegotiationId,
     },
     /// The SFU no longer serves one of a participant's published tracks.
     TrackClosed {
@@ -193,6 +214,8 @@ pub enum Effect {
         who: ParticipantId,
         /// Their publish session.
         session: SessionId,
+        /// Names this offer; the reply carries it back.
+        negotiation: NegotiationId,
         /// The client's offer.
         sdp_offer: Sdp,
         /// The tracks to publish.
@@ -204,6 +227,8 @@ pub enum Effect {
         who: ParticipantId,
         /// Their subscribe session.
         session: SessionId,
+        /// Names the negotiation this request starts; the reply carries it back.
+        negotiation: NegotiationId,
         /// The tracks to receive.
         tracks: Vec<RemoteTrack>,
     },
@@ -213,6 +238,8 @@ pub enum Effect {
         who: ParticipantId,
         /// Their subscribe session.
         session: SessionId,
+        /// The negotiation the answer belongs to; the reply carries it back.
+        negotiation: NegotiationId,
         /// The client's answer.
         sdp_answer: Sdp,
     },

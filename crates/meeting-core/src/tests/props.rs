@@ -8,12 +8,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use super::support::{Room, name, token};
-use crate::state::{AlarmReason, Connection, Lifecycle, SessionSlot, SubscribeNegotiation};
+use crate::state::{
+    AlarmReason, Connection, Lifecycle, PublishNegotiation, SessionSlot, SubscribeNegotiation,
+};
 use crate::{
     ClientMsg, Effect, ErrorCode, Event, FailureCause, LEAVE_GRACE_MS, LocalTrack, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken,
-    Rid, Role, RoomState, RoomView, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg,
-    SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
+    NEGOTIATION_TIMEOUT_MS, NegotiationId, OfferedTrack, ParticipantId, RecordingPolicy,
+    RemoteTrack, ResumeToken, Rid, Role, RoomState, RoomView, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
+    Sdp, ServerMsg, SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
+    TrackRef,
 };
 
 const POOL: u32 = 6;
@@ -39,10 +42,28 @@ enum Action {
         whose: u32,
         owner: bool,
     },
-    /// Answer a pending SFU call, or fail it.
+    /// Answer a pending SFU call, or fail it. An answer to a publish offer rejects the offered
+    /// tracks whose bit is set in `refuse` (bit 0 for the first track).
     Reply {
         pick: usize,
         fail: Option<FailureCause>,
+        refuse: u8,
+    },
+    /// The SFU holds a pending call past the room's next negotiation deadline: `Reply` and `Lose`
+    /// no longer pick it, time passes as for [`Action::NegotiationDue`], and the alarm fires.
+    Stall {
+        pick: usize,
+    },
+    /// The SFU answers the call it held longest, which by now may belong to a negotiation that
+    /// timed out while a newer one runs on the same session.
+    Unstall,
+    /// A client offers `kinds`, the SFU holds the publish call until the offer times out, the
+    /// client offers `kinds` again (as after a device change), and only then does the SFU answer
+    /// the held call, or fail it: a late reply while the new offer is pending.
+    Reoffer {
+        who: u32,
+        kinds: Vec<TrackKind>,
+        fail: bool,
     },
     /// The reply to a pending SFU call is lost.
     Lose {
@@ -132,14 +153,18 @@ fn action() -> impl Strategy<Value = Action> {
         4 => (who(), any::<bool>(), (0..4u8).prop_map(|n| n != 0))
             .prop_map(|(who, owner, consent)| Action::Join { who, owner, consent }),
         8 => (who(), msg()).prop_map(|(who, msg)| Action::Send { who, msg }),
-        1 => (who(), who(), (0..4u8).prop_map(|n| n == 0))
+        2 => (who(), who(), (0..4u8).prop_map(|n| n == 0))
             .prop_map(|(socket, whose, owner)| Action::Resume { socket, whose, owner }),
         16 => (any::<usize>(), (0..40u8).prop_map(|n| match n {
             0 | 1 => Some(FailureCause::Transient),
             2 => Some(FailureCause::SessionGone),
             _ => None,
-        }))
-            .prop_map(|(pick, fail)| Action::Reply { pick, fail }),
+        }), prop_oneof![3 => Just(0u8), 1 => 1..8u8])
+            .prop_map(|(pick, fail, refuse)| Action::Reply { pick, fail, refuse }),
+        2 => any::<usize>().prop_map(|pick| Action::Stall { pick }),
+        2 => Just(Action::Unstall),
+        1 => (who(), proptest::sample::subsequence(KINDS.to_vec(), 1..=3), (0..4u8).prop_map(|n| n == 0))
+            .prop_map(|(who, kinds, fail)| Action::Reoffer { who, kinds, fail }),
         1 => any::<usize>().prop_map(|pick| Action::Lose { pick }),
         6 => any::<usize>().prop_map(|pick| Action::Answer { pick }),
         1 => (who(), kind()).prop_map(|(who, kind)| Action::TrackClosed { who, kind }),
@@ -155,6 +180,8 @@ struct Sim {
     room: Room,
     /// SFU calls the room requested and nobody answered yet.
     pending: Vec<Effect>,
+    /// SFU calls the SFU holds, oldest first (see [`Action::Stall`]).
+    stalled: Vec<Effect>,
     /// Clients holding a subscribe offer.
     offers: Vec<ParticipantId>,
     /// Sessions the SFU created, with the participant and whether it is a publish session.
@@ -165,6 +192,16 @@ struct Sim {
     tokens: BTreeMap<ParticipantId, ResumeToken>,
     /// Tracks recorded since the recorder last started.
     recorded: Vec<RemoteTrack>,
+    /// Tracks the SFU accepted in an answer to a publish offer.
+    accepted: Vec<RemoteTrack>,
+    /// How many publish answers the room applied with some offered tracks rejected and some
+    /// accepted.
+    partly_rejected: usize,
+    /// How many publish replies about a negotiation other than the running one, on a session in
+    /// use while a newer negotiation runs, reached the room.
+    late_publish_replies: usize,
+    /// The same for subscribe and renegotiate replies.
+    late_subscribe_replies: usize,
     /// The alarm the shell holds.
     alarm: Option<Millis>,
     /// How many clients resumed on a new socket.
@@ -205,11 +242,16 @@ impl Sim {
         Self {
             room,
             pending: Vec::new(),
+            stalled: Vec::new(),
             offers: Vec::new(),
             created: BTreeSet::new(),
             seen: BTreeMap::new(),
             tokens: BTreeMap::new(),
             recorded: Vec::new(),
+            accepted: Vec::new(),
+            partly_rejected: 0,
+            late_publish_replies: 0,
+            late_subscribe_replies: 0,
             alarm,
             rebinds: 0,
             detached: BTreeSet::new(),
@@ -344,7 +386,7 @@ impl Sim {
                 };
                 self.client(id(who), msg, false)
             }
-            Action::Reply { pick, fail } => {
+            Action::Reply { pick, fail, refuse } => {
                 if self.pending.is_empty() {
                     return None;
                 }
@@ -359,18 +401,54 @@ impl Sim {
                     (Effect::SfuNewSession { who, kind }, Some(cause)) => {
                         failed(who, SfuCall::NewSession(kind), cause)
                     }
-                    (Effect::SfuPublish { who, session, .. }, None) => SfuReply::Published {
-                        who,
-                        session,
-                        sdp_answer: Sdp::new("a"),
-                    },
-                    (Effect::SfuPublish { who, session, .. }, Some(cause)) => {
-                        failed(who, SfuCall::Publish { session }, cause)
+                    (
+                        Effect::SfuPublish {
+                            who,
+                            session,
+                            negotiation,
+                            tracks,
+                            ..
+                        },
+                        None,
+                    ) => {
+                        let (rejected, accepted): (Vec<_>, Vec<_>) = tracks
+                            .into_iter()
+                            .enumerate()
+                            .partition(|&(i, _)| refuse & (1 << i) != 0);
+                        self.accepted
+                            .extend(accepted.into_iter().map(|(_, t)| RemoteTrack {
+                                session: session.clone(),
+                                name: t.name,
+                            }));
+                        SfuReply::Published {
+                            who,
+                            session,
+                            negotiation,
+                            sdp_answer: Sdp::new("a"),
+                            rejected: rejected.into_iter().map(|(_, t)| t.kind).collect(),
+                        }
                     }
+                    (
+                        Effect::SfuPublish {
+                            who,
+                            session,
+                            negotiation,
+                            ..
+                        },
+                        Some(cause),
+                    ) => failed(
+                        who,
+                        SfuCall::Publish {
+                            session,
+                            negotiation,
+                        },
+                        cause,
+                    ),
                     (
                         Effect::SfuSubscribe {
                             who,
                             session,
+                            negotiation,
                             tracks,
                         },
                         None,
@@ -382,22 +460,79 @@ impl Sim {
                         SfuReply::SubscribeOffer {
                             who,
                             session,
+                            negotiation,
                             sdp_offer: Sdp::new("o"),
                             tracks: tracks.collect(),
                         }
                     }
-                    (Effect::SfuSubscribe { who, session, .. }, Some(cause)) => {
-                        failed(who, SfuCall::Subscribe { session }, cause)
-                    }
-                    (Effect::SfuRenegotiate { who, session, .. }, None) => {
-                        SfuReply::Renegotiated { who, session }
-                    }
-                    (Effect::SfuRenegotiate { who, session, .. }, Some(cause)) => {
-                        failed(who, SfuCall::Renegotiate { session }, cause)
-                    }
+                    (
+                        Effect::SfuSubscribe {
+                            who,
+                            session,
+                            negotiation,
+                            ..
+                        },
+                        Some(cause),
+                    ) => failed(
+                        who,
+                        SfuCall::Subscribe {
+                            session,
+                            negotiation,
+                        },
+                        cause,
+                    ),
+                    (
+                        Effect::SfuRenegotiate {
+                            who,
+                            session,
+                            negotiation,
+                            ..
+                        },
+                        None,
+                    ) => SfuReply::Renegotiated {
+                        who,
+                        session,
+                        negotiation,
+                    },
+                    (
+                        Effect::SfuRenegotiate {
+                            who,
+                            session,
+                            negotiation,
+                            ..
+                        },
+                        Some(cause),
+                    ) => failed(
+                        who,
+                        SfuCall::Renegotiate {
+                            session,
+                            negotiation,
+                        },
+                        cause,
+                    ),
                     (other, _) => unreachable!("not an SFU call: {other:?}"),
                 })
             }
+            Action::Stall { pick } => {
+                if !self.pending.is_empty() {
+                    let call = self.pending.remove(pick % self.pending.len());
+                    self.stalled.push(call);
+                }
+                return self.event(Action::NegotiationDue);
+            }
+            Action::Unstall => {
+                if self.stalled.is_empty() {
+                    return None;
+                }
+                let call = self.stalled.remove(0);
+                self.pending.insert(0, call);
+                return self.event(Action::Reply {
+                    pick: 0,
+                    fail: None,
+                    refuse: 0,
+                });
+            }
+            Action::Reoffer { .. } => unreachable!("`run` plays it as several events"),
             Action::Lose { pick } => {
                 if !self.pending.is_empty() {
                     self.pending.remove(pick % self.pending.len());
@@ -453,6 +588,9 @@ impl Sim {
     }
 
     fn run(&mut self, action: Action) -> Result<(), TestCaseError> {
+        if let Action::Reoffer { who, kinds, fail } = action {
+            return self.reoffer(who, kinds, fail);
+        }
         let Some(event) = self.event(action) else {
             return Ok(());
         };
@@ -464,6 +602,24 @@ impl Sim {
         let effects = self.room.apply(event.clone());
         self.check(&before, &event, &effects)?;
         let after = &self.room.state;
+        if let Event::Sfu(reply) = &event
+            && let Some((who, kind, session, Some(negotiation))) = reply_session(reply)
+            && current_session(&before, who, kind).as_ref() == Some(session)
+            && running_negotiation(&before, who, kind).is_some_and(|running| running != negotiation)
+        {
+            match kind {
+                SessionKind::Publish => self.late_publish_replies += 1,
+                SessionKind::Subscribe => self.late_subscribe_replies += 1,
+            }
+        }
+        let partly = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::Send { msg: ServerMsg::PublishAnswer { rejected, .. }, .. }
+                    if !rejected.is_empty()
+            )
+        });
+        self.partly_rejected += usize::from(partly);
         if let Event::SocketClosed { who } = event
             && matches!(
                 before.participants.get(&who).map(|p| &p.connection),
@@ -571,6 +727,46 @@ impl Sim {
         self.check_views()?;
         self.check_recorded()?;
         self.check_alarm()
+    }
+
+    /// Plays [`Action::Reoffer`] as the events it consists of.
+    fn reoffer(
+        &mut self,
+        who: u32,
+        kinds: Vec<TrackKind>,
+        fail: bool,
+    ) -> Result<(), TestCaseError> {
+        let offer = |kinds: &Vec<TrackKind>| Action::Send {
+            who,
+            msg: Msg::Publish(kinds.clone()),
+        };
+        self.run(offer(&kinds))?;
+        let Some(held) = self.pending.iter().rposition(
+            |call| matches!(call, Effect::SfuPublish { who: w, .. } if *w == ParticipantId(who)),
+        ) else {
+            return Ok(());
+        };
+        let held = self.pending.remove(held);
+        let offered = self
+            .room
+            .state
+            .joined()
+            .find(|&(owner, ..)| owner == ParticipantId(who))
+            .and_then(|(_, publish, _)| match publish.ready()?.negotiation {
+                PublishNegotiation::OfferPending { since, .. } => Some(since),
+                PublishNegotiation::Idle => None,
+            });
+        if let Some(since) = offered {
+            self.room.now = self.room.now.max(since.after(NEGOTIATION_TIMEOUT_MS));
+            self.run(Action::Alarm)?;
+        }
+        self.run(offer(&kinds))?;
+        self.pending.insert(0, held);
+        self.run(Action::Reply {
+            pick: 0,
+            fail: fail.then_some(FailureCause::Transient),
+            refuse: 0,
+        })
     }
 
     fn receive(&mut self, to: &[ParticipantId], msg: ServerMsg) {
@@ -707,11 +903,36 @@ impl Sim {
 
         // A reply about a session the participant no longer uses changes nothing.
         if let Event::Sfu(reply) = event
-            && let Some((who, kind, session)) = reply_session(reply)
+            && let Some((who, kind, session, _)) = reply_session(reply)
             && current_session(before, who, kind).as_ref() != Some(session)
         {
             prop_assert_eq!(before, after);
             prop_assert!(effects.is_empty(), "{effects:?}");
+        }
+
+        // A reply about a negotiation that is not the one running on its session (it failed or
+        // timed out, and perhaps a newer one runs) changes nothing, unless it reports the session
+        // gone.
+        if let Event::Sfu(reply) = event
+            && let Some((who, kind, _, Some(negotiation))) = reply_session(reply)
+            && running_negotiation(before, who, kind) != Some(negotiation)
+            && !matches!(
+                reply,
+                SfuReply::Failed {
+                    cause: FailureCause::SessionGone,
+                    ..
+                }
+            )
+        {
+            prop_assert_eq!(before, after);
+            prop_assert!(effects.is_empty(), "{effects:?}");
+        }
+
+        // Every track the room publishes was accepted by the SFU, so no subscriber pulls a track
+        // the SFU rejected.
+        for track in after.published_tracks() {
+            let remote = after.resolve(track).expect("published");
+            prop_assert!(self.accepted.contains(&remote), "{remote:?} was rejected");
         }
         for effect in effects {
             match effect {
@@ -795,6 +1016,7 @@ impl Sim {
                     who,
                     session,
                     tracks,
+                    ..
                 } => {
                     prop_assert_eq!(
                         session_of(who, SessionKind::Subscribe),
@@ -802,8 +1024,9 @@ impl Sim {
                         "{:?}",
                         effect
                     );
-                    // Every requested track is published right now.
+                    // Every requested track is published right now, and the SFU accepted it.
                     for track in tracks {
+                        prop_assert!(self.accepted.contains(track), "{track:?} was rejected");
                         let published = after.joined().any(|(_, publish, _)| {
                             publish.ready().is_some_and(|publish| {
                                 publish.id == track.session
@@ -1278,22 +1501,80 @@ fn current_epochs(state: &RoomState, who: ParticipantId) -> Option<SessionEpochs
     }
 }
 
-/// The participant, kind and id of the session a reply is about, for replies that name one.
-fn reply_session(reply: &SfuReply) -> Option<(ParticipantId, SessionKind, &SessionId)> {
+/// The id of the negotiation running on `who`'s session of `kind`, if they are joined, the session
+/// is in use and a negotiation runs on it.
+fn running_negotiation(
+    state: &RoomState,
+    who: ParticipantId,
+    kind: SessionKind,
+) -> Option<NegotiationId> {
+    match &state.participants.get(&who)?.connection {
+        Connection::Joined {
+            publish, subscribe, ..
+        } => match kind {
+            SessionKind::Publish => publish
+                .ready()
+                .filter(|p| p.negotiation != PublishNegotiation::Idle)
+                .map(|p| p.last_negotiation),
+            SessionKind::Subscribe => subscribe
+                .ready()
+                .filter(|s| s.negotiation != SubscribeNegotiation::Idle)
+                .map(|s| s.last_negotiation),
+        },
+        _ => None,
+    }
+}
+
+/// The participant, kind and id of the session a reply is about, for replies that name one,
+/// with the negotiation it names, if any.
+fn reply_session(
+    reply: &SfuReply,
+) -> Option<(
+    ParticipantId,
+    SessionKind,
+    &SessionId,
+    Option<NegotiationId>,
+)> {
     match reply {
-        SfuReply::Published { who, session, .. }
+        SfuReply::Published {
+            who,
+            session,
+            negotiation,
+            ..
+        }
         | SfuReply::Failed {
             who,
-            call: SfuCall::Publish { session },
+            call:
+                SfuCall::Publish {
+                    session,
+                    negotiation,
+                },
             ..
-        } => Some((*who, SessionKind::Publish, session)),
-        SfuReply::SubscribeOffer { who, session, .. }
-        | SfuReply::Renegotiated { who, session }
+        } => Some((*who, SessionKind::Publish, session, Some(*negotiation))),
+        SfuReply::SubscribeOffer {
+            who,
+            session,
+            negotiation,
+            ..
+        }
+        | SfuReply::Renegotiated {
+            who,
+            session,
+            negotiation,
+        }
         | SfuReply::Failed {
             who,
-            call: SfuCall::Subscribe { session } | SfuCall::Renegotiate { session },
+            call:
+                SfuCall::Subscribe {
+                    session,
+                    negotiation,
+                }
+                | SfuCall::Renegotiate {
+                    session,
+                    negotiation,
+                },
             ..
-        } => Some((*who, SessionKind::Subscribe, session)),
+        } => Some((*who, SessionKind::Subscribe, session, Some(*negotiation))),
         SfuReply::SessionCreated { .. }
         | SfuReply::TrackClosed { .. }
         | SfuReply::Failed {
@@ -1341,7 +1622,8 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
     let (mut unpublished, mut publish_timeouts) = (0, 0);
     let (mut released, mut expired, mut promoted, mut replaced) = (0, 0, 0, 0);
     let (mut graced, mut resumed_in_grace, mut grace_expired) = (0, 0, 0);
-    for case in 0..500 {
+    let (mut partly_rejected, mut late_publish, mut late_subscribe) = (0, 0, 0);
+    for case in 0..1000 {
         let actions = proptest::collection::vec(action(), 1..250)
             .new_tree(&mut runner)
             .expect("tree")
@@ -1385,6 +1667,9 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
         graced += usize::from(sim.graced > 0);
         resumed_in_grace += usize::from(sim.resumed_in_grace > 0);
         grace_expired += usize::from(sim.grace_expired > 0);
+        partly_rejected += usize::from(sim.partly_rejected > 0);
+        late_publish += usize::from(sim.late_publish_replies > 0);
+        late_subscribe += usize::from(sim.late_subscribe_replies > 0);
     }
     assert!(
         [
@@ -1403,6 +1688,9 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
             graced,
             resumed_in_grace,
             grace_expired,
+            partly_rejected,
+            late_publish,
+            late_subscribe,
         ]
         .iter()
         .all(|&n| n >= 20),
@@ -1412,6 +1700,8 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
          waiting guests let in by the first host {released}, expired unused {expired}, \
          promoted by the owner {promoted}, session replaced {replaced}, \
          socket lost in grace {graced}, resumed in grace {resumed_in_grace}, \
-         left when the grace ended {grace_expired}"
+         left when the grace ended {grace_expired}, publish partly rejected {partly_rejected}, \
+         late publish reply during a newer offer {late_publish}, \
+         late subscribe reply during a newer negotiation {late_subscribe}"
     );
 }
