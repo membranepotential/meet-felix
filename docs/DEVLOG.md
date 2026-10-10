@@ -40,6 +40,8 @@ nothing arms their alarm any more and no request reaches them once the words
 are released. That is about 12 KB of SQLite metadata each for the 14 meetings
 held so far.
 
+Deployed as version 4ed4cdfc (commit ec55203) with no meeting live.
+
 ## 2026-10-10 — A partial publish keeps only the accepted tracks; late SFU replies stay late
 
 STATUS Next item 2, core first (D20). Two correctness fixes in the handling
