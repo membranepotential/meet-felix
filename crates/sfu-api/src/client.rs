@@ -328,7 +328,8 @@ impl<T: SfuTransport> SfuClient<T> {
         }
     }
 
-    /// `PUT sessions/{id}/tracks/update`: receive layer `rid` of the track on transceiver `mid`.
+    /// `PUT sessions/{id}/tracks/update`: receive layer `rid` of the track on transceiver `mid`,
+    /// and keep it while the publisher sends it.
     pub async fn update_layer(
         &self,
         session: &SessionId,
@@ -343,12 +344,13 @@ impl<T: SfuTransport> SfuClient<T> {
                 mid: Some(mid.clone()),
                 simulcast: Some(Simulcast {
                     preferred_rid: rid,
-                    // In a–z order (f, h, q) a layer the link cannot carry, or one the
-                    // publisher dropped, falls back to the next smaller one. Both must be
-                    // set: with `priorityOrdering: none` the SFU keeps sending the preferred
-                    // layer however weak the link (Cloudflare simulcast docs, research 11,
-                    // 2026-10-09).
-                    priority_ordering: LayerFallback::Asciibetical,
+                    // `none`: the SFU keeps sending `rid` even when bandwidth is short.
+                    // With `asciibetical` it ranks the layers a–z, `f` first, and against
+                    // the real SFU it went back to `f` about 12 s after a switch to `h`
+                    // (2026-10-10, D11), so a small tile cost the full layer's egress.
+                    priority_ordering: LayerFallback::None,
+                    // A layer the publisher stops sending falls back to the next one in
+                    // a–z order (f, h, q).
                     rid_not_available: LayerFallback::Asciibetical,
                 }),
             }],

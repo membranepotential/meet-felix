@@ -44,6 +44,24 @@ export function growing(before: readonly Inbound[], after: readonly Inbound[]): 
 	return after.filter((s) => s.bytesReceived > (bytes.get(s.id) ?? Infinity));
 }
 
+/** The track ids of the video streams whose bytes and decoded frames both grew between samples. */
+export function decodingVideo(before: readonly Inbound[], after: readonly Inbound[]): Set<string> {
+	const was = new Map(before.map((s) => [s.id, s]));
+	return new Set(
+		after
+			.filter((s) => {
+				const old = was.get(s.id);
+				return (
+					s.kind === 'video' &&
+					old !== undefined &&
+					s.bytesReceived > old.bytesReceived &&
+					(s.framesDecoded ?? 0) > (old.framesDecoded ?? Infinity)
+				);
+			})
+			.map((s) => s.trackIdentifier)
+	);
+}
+
 /** Samples twice, `ms` apart, and returns the streams that grew in between. */
 export async function growingOver(page: Page, ms: number): Promise<Inbound[]> {
 	const before = await inbound(page);

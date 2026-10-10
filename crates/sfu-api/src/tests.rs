@@ -509,6 +509,45 @@ fn close_effect_treats_already_closed_tracks_as_closed() {
 }
 
 #[test]
+fn layer_effect_holds_the_layer_and_falls_back_only_when_the_publisher_drops_it() {
+    let effect = Effect::SfuUpdateLayer {
+        who: ALICE,
+        session: SessionId::new(SUBSCRIBER),
+        mid: Mid::new("2"),
+        track: RemoteTrack {
+            session: SessionId::new(PUBLISHER),
+            name: TrackName::new("camera"),
+        },
+        rid: Rid::Mid,
+    };
+    let sfu = Canned::new([(
+        200,
+        json!({ "requiresImmediateRenegotiation": false, "tracks": [{ "mid": "2" }] }),
+    )]);
+    assert_eq!(ready(client(&sfu).perform(&effect)), Ok(None));
+    let sent = sfu.sent.borrow();
+    let (method, url, body) = &sent[0];
+    assert_eq!(*method, Method::Put);
+    assert!(url.ends_with(&format!("sessions/{SUBSCRIBER}/tracks/update")));
+    assert_eq!(
+        body.as_ref(),
+        Some(&json!({
+          "tracks": [{
+            "location": "remote",
+            "sessionId": PUBLISHER,
+            "trackName": "camera",
+            "mid": "2",
+            "simulcast": {
+              "preferredRid": "h",
+              "priorityOrdering": "none",
+              "ridNotAvailable": "asciibetical"
+            }
+          }]
+        }))
+    );
+}
+
+#[test]
 fn api_and_http_errors_become_failed_replies() {
     let effect = Effect::SfuRenegotiate {
         who: ALICE,

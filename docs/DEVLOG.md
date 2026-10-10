@@ -3,6 +3,42 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — A smaller simulcast layer holds; a five-party run
+
+STATUS Next item 1. Against the real SFU a subscriber that asked for the
+half layer got the full one back about 12 s later. The cause is the
+fallback field `priorityOrdering: "asciibetical"` that research 11 had
+added to every layer switch.
+
+- **What the docs say.** The simulcast page defines `priorityOrdering` as
+  what the SFU does when bandwidth does not suffice for `preferredRid`:
+  `none` keeps sending that layer "even if there is not enough bandwidth",
+  `asciibetical` uses a–z order, "`a` is most desirable and `z` is least
+  desirable". `ridNotAvailable` covers a layer the publisher stops sending:
+  `none` selects no other layer, `asciibetical` switches "to the next
+  available RID". Both default to `none`. Neither the page nor the OpenAPI
+  schema says whether the SFU switches up when bandwidth suffices
+  ([Simulcast](https://developers.cloudflare.com/realtime/sfu/features/simulcast/),
+  last updated 2026-09-22; `calls-api-2024-05-21.yaml`; both read
+  2026-10-10).
+- **Measured.** `real-sfu.spec.ts` now samples the decoded width every
+  second for 25 s after the switch and prints the samples. With both fields
+  `asciibetical`: 640 px up to 11 s, then 1280 px (the full layer) from
+  12 s on, with no new `SetLayer`; the test failed. With
+  `priorityOrdering: "none"`: 640 px at all 25 samples; passed.
+- **Changed.** `sfu-api`'s `update_layer` sends `priorityOrdering: "none"`
+  and keeps `ridNotAvailable: "asciibetical"`; a new unit test checks the
+  request body. The price: on a weak link the SFU no longer steps down by
+  itself. D11 has an as-built note; research 11 item 1 is reversed by
+  measurement.
+- **Five people.** A second `@real` test: host and four guests, each must
+  receive and decode every other tile's video in each of three 10 s
+  rounds. Passed in 40 s, on one machine with five Chromium contexts.
+
+Next: a subscriber-side step down on a weak link (the browser lowers the
+layer when its inbound stats show loss or a low bitrate), if real use
+shows frozen video; deploy when no meeting runs.
+
 ## 2026-10-10 — The recorder e2e is a Playwright test; testids for the UI
 
 STATUS Next item 1. The standalone script `crates/worker/recorder-e2e/run.mjs`

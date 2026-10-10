@@ -5,10 +5,22 @@
  */
 import { createMeeting } from '../fixtures/api.ts';
 import { OWNER_NAME, startCall } from '../fixtures/call.ts';
-import { growingOver, inbound, tileTrackId, tileVideoWidth } from '../fixtures/media-stats.ts';
+import {
+	decodingVideo,
+	growingOver,
+	inbound,
+	tileTrackId,
+	tileVideoWidth
+} from '../fixtures/media-stats.ts';
 import type { Participant } from '../fixtures/participant.ts';
 import { hasRealSfuSecrets } from '../fixtures/stack.ts';
 import { expect, test } from '../fixtures/test.ts';
+
+/** How long a subscriber's smaller layer must hold after `SetLayer`; a climb back took ~12 s. */
+const LAYER_HOLD_MS = 25_000;
+/** The five-party call checks every tile's video in rounds of this length, 30 s in all. */
+const ROUND_MS = 10_000;
+const ROUNDS = 3;
 
 test.describe('real SFU', { tag: '@real' }, () => {
 	test.skip(
@@ -16,7 +28,7 @@ test.describe('real SFU', { tag: '@real' }, () => {
 		'needs CREATE_SECRET, CALLS_APP_ID and CALLS_APP_SECRET in .dev.vars'
 	);
 
-	test('a three-party call: media both ways, a screen share, a layer change, and a 60 s hold', async ({
+	test('a three-party call: media both ways, a screen share, a layer change that holds, and a 60 s hold', async ({
 		api,
 		owner,
 		host,
@@ -51,7 +63,7 @@ test.describe('real SFU', { tag: '@real' }, () => {
 			}
 		});
 
-		await test.step('a layer change: a small window gets a smaller layer', async () => {
+		await test.step('a layer change: a small window gets a smaller layer, and keeps it', async () => {
 			const tile = ada.tile(OWNER_NAME);
 			const track = await tileTrackId(tile);
 			const hostId = (await ada.waitForReceived('welcome')).state.participants.find(
@@ -73,6 +85,24 @@ test.describe('real SFU', { tag: '@real' }, () => {
 			await expect.poll(layer).not.toBe('f');
 			// Half (`h`) or a quarter (`q`) of the full layer's width.
 			await expect.poll(width, { timeout: 20_000 }).toBeLessThanOrEqual(large / 2);
+
+			// The SFU keeps the smaller layer: no climb back to full without a new `SetLayer`.
+			const asked = ada.sent('setLayer').length;
+			const samples: { at: number; width: number }[] = [];
+			const start = Date.now();
+			while (Date.now() - start < LAYER_HOLD_MS) {
+				samples.push({ at: Date.now() - start, width: await width() });
+				await ada.page.waitForTimeout(1_000);
+			}
+			// The trace goes to the run's output: a climb back shows when it happened.
+			console.log(
+				`layer hold (${layer()}, full ${large} px): ${samples.map((s) => `${s.at}ms=${s.width}`).join(' ')}`
+			);
+			expect(ada.sent('setLayer').length, 'Ada asked for no other layer').toBe(asked);
+			expect(
+				samples.filter((s) => s.width > large / 2),
+				`decoded widths over ${LAYER_HOLD_MS / 1000} s stay at most ${large / 2}`
+			).toEqual([]);
 			await ada.page.setViewportSize({ width: 1280, height: 800 });
 		});
 
@@ -102,5 +132,54 @@ test.describe('real SFU', { tag: '@real' }, () => {
 				expect(grew.filter((s) => s.kind === 'audio')).toHaveLength(others.length);
 			}
 		});
+	});
+
+	test('a five-party call: everyone decodes everyone else’s video for 30 s', async ({
+		api,
+		owner,
+		host,
+		people
+	}) => {
+		test.setTimeout(240_000);
+		const names = ['Ada', 'Bo', 'Cy', 'Di'];
+		const guests = await Promise.all(names.map((name) => people.open(name.toLowerCase())));
+		const meeting = await createMeeting(api, owner.headers, 'hostDecides');
+		await startCall(
+			meeting,
+			host,
+			guests.map((who, i) => ({ who, name: names[i] ?? '' }))
+		);
+		const everyone: { who: Participant; others: string[] }[] = [
+			{ who: host, others: names },
+			...guests.map((who, i) => ({
+				who,
+				others: [OWNER_NAME, ...names.filter((_, j) => j !== i)]
+			}))
+		];
+		for (const { who, others } of everyone)
+			for (const name of others)
+				await expect
+					.poll(() => tileVideoWidth(who.tile(name)), { timeout: 30_000 })
+					.toBeGreaterThan(0);
+
+		for (let round = 1; round <= ROUNDS; round++) {
+			await test.step(`round ${round}: every tile's video grew over ${ROUND_MS / 1000} s`, async () => {
+				const tracks = await Promise.all(
+					everyone.map(({ who, others }) =>
+						Promise.all(others.map((name) => tileTrackId(who.tile(name))))
+					)
+				);
+				const before = await Promise.all(everyone.map(({ who }) => inbound(who.page)));
+				await host.page.waitForTimeout(ROUND_MS);
+				const after = await Promise.all(everyone.map(({ who }) => inbound(who.page)));
+				for (const [i, { who, others }] of everyone.entries()) {
+					const decoding = decodingVideo(before[i] ?? [], after[i] ?? []);
+					expect(
+						others.filter((_, j) => !decoding.has(tracks[i]?.[j] ?? '')),
+						`${who.label}: tiles whose video did not grow`
+					).toEqual([]);
+				}
+			});
+		}
 	});
 });

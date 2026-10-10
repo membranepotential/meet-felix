@@ -165,6 +165,26 @@ and `high` sort as `high` < `low` < `mid`, so a missing `high` fell back to
 ([Simulcast](https://developers.cloudflare.com/realtime/sfu/simulcast/),
 checked 2026-10-09).
 
+As built (2026-10-10): a layer switch (`tracks/update`) sends
+`priorityOrdering: "none"` and `ridNotAvailable: "asciibetical"`. The
+simulcast docs define `priorityOrdering` as what the SFU does when bandwidth
+does not suffice for `preferredRid`: `none` keeps sending that layer,
+`asciibetical` ranks the layers a–z with `a` the most desirable; they say
+nothing about switching up when bandwidth suffices
+([Simulcast](https://developers.cloudflare.com/realtime/sfu/features/simulcast/),
+last updated 2026-09-22; the OpenAPI schema `calls-api-2024-05-21.yaml`
+says the same; both checked 2026-10-10). Measured against the real SFU
+with `asciibetical` for both fields: after `setLayer h` the decoded width
+was 640 px for 11 s, then 1280 px (`f`) from 12 s on, with no new
+`SetLayer`. With `none` it stayed 640 px at every sample for 25 s. So
+`asciibetical` makes the SFU climb back to `f`, and a small tile costs the
+full layer's egress, which defeats the point of this decision. The price of
+`none`: on a weak link the SFU no longer steps down by itself; the layer
+follows the tile size only. `ridNotAvailable: "asciibetical"` stays, so a
+layer the publisher stops sending still falls back to the next one. This
+reverses item 1 of [research 11](../research/11-gotchas-on-cloudflare.md),
+which had set both fields to `asciibetical` on 2026-10-09.
+
 A screen share uses one or two layers, a low maximum frame rate, and
 `contentHint = "detail"`, which keeps text sharp.
 
