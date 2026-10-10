@@ -217,6 +217,23 @@ words must say what the press means.
   a pick only records the choice for the next Start video. Why: in the test
   meeting of 2026-10-10 the owner looked for this control, and devices could
   only be chosen on the pre-join page.
+- **A guest can join as host from inside the meeting.** For everyone who
+  is not a host, the control bar has a quiet "Join as host" control (the
+  host icon on an outlined face) where hosts have the "Host" group. Without
+  an owner session it opens a dialog, "Join as host", with the login form of
+  [D24](#d24-the-owners-password-is-never-stored-on-the-device-the-password-manager-fills-it-every-time-2026-10-09);
+  the form exists only while the dialog is open, so closing it drops a typed
+  password. After the login, or at once if the browser already holds the
+  session, the client connects again with a new socket that carries the
+  cookie and the resume token, and the room makes the same participant a
+  host ([D32](../architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)):
+  same participant id, same peer connections, and the host controls appear
+  with the room's next view. The participant keeps the name they joined
+  with; the core has no rename message, and the owner can pick the name on
+  the pre-join anyway. If the owner's other browser is in the call too, the
+  room then has two hosts, both the owner. Why: STATUS of 2026-10-10; the
+  owner on a phone browser without the cookie could become host only by
+  leaving, and only from the pre-join or the lobby.
 
 ## D29: A shared screen keeps people in a column on desktops and in round chips on phones (2026-10-09)
 

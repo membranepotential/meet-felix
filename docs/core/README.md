@@ -255,6 +255,14 @@ place the owner's socket takes becomes a host (2026-10-09, see
 [Phases](#phases)). Otherwise, for example after the shell reported
 `SocketClosed` for the old socket, the `Join` is a fresh join.
 
+The Worker reports a closed socket as `SocketClosed` at once, so a client
+that replaces its socket on purpose ("Join as host" after a login) must not
+close the old one first: the room would often see that close before the new
+`Join` and let the participant leave. The web client's
+`SignalingClient.reconnect()` keeps the old socket open, the resuming `Join`
+makes the room close it, and the client closes it itself once the room's
+first answer arrives on the new socket (2026-10-10).
+
 After every `Welcome`, the web client makes its microphone switch and the
 room's mute flag agree, and muting wins: if the room shows it muted (a host
 muted it while the socket was down, or the room records without its

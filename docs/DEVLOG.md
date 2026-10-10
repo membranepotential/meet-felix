@@ -3,6 +3,44 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — "Join as host" inside a live meeting
+
+STATUS Next item 1. The owner who joined as a guest, for example from a
+phone browser without the session cookie, could become host only from the
+pre-join or the lobby, not inside the meeting. Now the control bar shows
+non-hosts a quiet "Join as host" control. Without a session it opens a
+dialog with the existing `LoginForm` (D24: the form exists only while the
+dialog is open); after the login, or at once when the browser already holds
+the session (`hostOffer` says `host`), it calls `Session.reconnect()`. The
+room makes the same participant a host, and the bar switches to the host
+controls with the next view. `MeetingFlow` passes its `OwnerSession` through
+`Meeting` to `ControlBar`, as it does to the lobby. The participant keeps
+the name they joined with; the core has no rename message, and none was
+added. If the owner's other browser is in the call as host, the room has
+two hosts; the core allows any number of host participants.
+
+The e2e test found a bug in `SignalingClient.reconnect()`: it closed the old
+socket before opening the new one. The Worker reports a close as
+`SocketClosed` at once, so the room let the participant leave before the
+new `Join` arrived, and the resume token found nobody: the owner came back
+as a new participant with a new id and new peer connections, and the
+others saw them leave and join. The lobby's "Join as host" had the same
+race, unnoticed because a waiting participant has nothing to lose. Now the
+old socket stays open until the room answers on the new one: the resuming
+`Join` makes the room close it, and the client closes it on the first
+answer as well. A second `reconnect()` while one is under way does nothing.
+Recorded under D28 in docs/ui/README.md and in the Reconnecting section of
+docs/core/README.md.
+
+Tests: a browser test in `owner.spec.ts`: the owner hosts in one browser
+and joins as a guest from another without the cookie, logs in through the
+dialog, and gets the host controls with the same participant id, the same
+two peer connections, the typed name, and no view on the host's side
+without them.
+
+Next: STATUS Next item 2, the grace period before a dropped socket counts
+as Leave.
+
 ## 2026-10-10 — Hosts see who has not accepted the recording
 
 STATUS Next item 1. When a host starts recording, everyone without consent

@@ -105,7 +105,7 @@
 	{/if}
 {:else if end === null}
 	{#if session.stage.kind === 'in'}
-		<Meeting {meeting} {media} {session} />
+		<Meeting {meeting} {media} {session} {owner} />
 	{:else}
 		<Lobby {meeting} {session} {owner} {scheduled} />
 	{/if}

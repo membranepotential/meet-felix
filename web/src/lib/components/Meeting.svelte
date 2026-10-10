@@ -4,6 +4,7 @@
 	import { AudioLevels } from '../media/audio-levels.svelte.ts';
 	import { isLive, streamFor } from '../media/remote.ts';
 	import type { Voices } from '../media/remote-audio.svelte.ts';
+	import type { OwnerSession } from '../owner-session.svelte.ts';
 	import {
 		trackKey,
 		type MeetingId,
@@ -17,8 +18,12 @@
 	import type { TileModel } from './Tile.svelte';
 	import Toasts from './Toasts.svelte';
 
-	let { meeting, media, session }: { meeting: MeetingId; media: LocalMedia; session: Session } =
-		$props();
+	let {
+		meeting,
+		media,
+		session,
+		owner
+	}: { meeting: MeetingId; media: LocalMedia; session: Session; owner: OwnerSession } = $props();
 
 	/** Voice levels for the speaking ring, keyed like the camera tiles. */
 	const SELF = 'self';
@@ -223,7 +228,7 @@
 	<!-- Notices hang above the bar, over the stage's lower edge, so the tiles never jump. -->
 	<div class="dock">
 		<Toasts {session} />
-		<ControlBar {media} {session} />
+		<ControlBar {media} {session} {owner} />
 	</div>
 </div>
 

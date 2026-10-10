@@ -1,4 +1,7 @@
-/** The owner's pages: login on `/`, creating a meeting, past meetings, logout. */
+/**
+ * The owner's pages: login on `/`, creating a meeting, past meetings, logout; and the owner
+ * becoming the host from inside a meeting they joined as a guest.
+ */
 import { createMeeting } from '../fixtures/api.ts';
 import { startCall } from '../fixtures/call.ts';
 import { expect, test } from '../fixtures/test.ts';
@@ -56,4 +59,48 @@ test('past meetings show each meeting’s phase and the transcript link once end
 		'href',
 		/^\/t\/[0-9a-f]{32}$/
 	);
+});
+
+test('join as host inside a live meeting: the owner, joined as a guest, logs in and keeps their place', async ({
+	api,
+	owner,
+	host,
+	guest,
+	stack
+}) => {
+	// The owner created the meeting and hosts it; then joins again from a browser without the
+	// session cookie (a phone), so the room sees a guest.
+	const meeting = await createMeeting(api, owner.headers, 'hostDecides');
+	await startCall(meeting, host, [{ who: guest, name: 'Phone' }]);
+	const you = (await guest.waitForReceived('welcome')).you;
+	const peerConnections = () => guest.page.evaluate(() => window.__e2ePeerConnections?.length);
+	const connectionsBefore = await peerConnections();
+	await expect(guest.control('End for all')).toHaveCount(0);
+	await expect(host.control('Join as host')).toHaveCount(0);
+
+	const since = Date.now();
+	await guest.control('Join as host').click();
+	const dialog = guest.page.getByRole('dialog', { name: 'Join as host' });
+	await dialog.getByLabel('Password').fill(stack.ownerPassword);
+	await dialog.getByRole('button', { name: 'Log in' }).click();
+	await expect(dialog).toBeHidden();
+
+	// A desktop viewport: the host controls sit in the bar, unfolded.
+	await expect(guest.control('End for all')).toBeVisible();
+	await expect(guest.control('Join as host')).toHaveCount(0);
+	// The same participant on a new socket: no second welcome under another id, no new SFU
+	// sessions, and the host never saw the guest leave. The name stays the one typed.
+	await expect.poll(() => guest.received('welcome').map((w) => w.you)).toEqual([you, you]);
+	expect(guest.sockets).toBe(2);
+	expect(await peerConnections()).toBe(connectionsBefore);
+	await host.waitForReceived('state', (m) =>
+		m.state.participants.some((p) => p.id === you && p.role === 'host')
+	);
+	const hostSaw = host.frames.flatMap((f) =>
+		f.at >= since && f.dir === 'received' && f.msg.type === 'state' ? [f.msg.state] : []
+	);
+	expect(hostSaw.every((state) => state.participants.some((p) => p.id === you))).toBe(true);
+	await expect(guest.tile('Phone (you)')).toBeVisible();
+	await expect(host.tile('Phone')).toBeVisible();
+	for (const p of [host, guest]) await expect(p.tiles).toHaveCount(2);
 });

@@ -1,16 +1,25 @@
 <script lang="ts">
+	import { flushSync } from 'svelte';
 	import type { LocalMedia } from '../local-media.svelte.ts';
 	import { canShareScreen, describeSwitchError } from '../media/capture.ts';
+	import type { OwnerSession } from '../owner-session.svelte.ts';
+	import { hostOffer } from '../owner-state.ts';
 	import type { Session } from '../session.svelte.ts';
 	import DevicePickers from './DevicePickers.svelte';
 	import Icon from './Icon.svelte';
+	import LoginForm from './LoginForm.svelte';
 
-	let { media, session }: { media: LocalMedia; session: Session } = $props();
+	let { media, session, owner }: { media: LocalMedia; session: Session; owner: OwnerSession } =
+		$props();
 
 	const shareable = canShareScreen();
 	let hostOpen = $state(false);
 	let confirmEnd: HTMLDialogElement | undefined = $state();
 	let devicesDialog: HTMLDialogElement | undefined = $state();
+	let hostDialog: HTMLDialogElement | undefined = $state();
+	/** The "Join as host" dialog is open; the form inside exists only then (D24). */
+	let hostFormOpen = $state(false);
+	let offer = $derived(hostOffer(owner.state, hostFormOpen));
 
 	let locked = $derived(session.room?.locked ?? false);
 	let recording = $derived(session.room?.recording !== undefined);
@@ -39,6 +48,29 @@
 	function openDevices() {
 		media.error = null;
 		devicesDialog?.showModal();
+	}
+
+	/**
+	 * A guest who is the owner becomes the host without leaving: a new socket carries the
+	 * session cookie and the resume token, and the room makes this participant a host (D32).
+	 * Without a session the dialog asks for the password first.
+	 */
+	function joinAsHost() {
+		if (offer.kind === 'host') {
+			session.reconnect();
+			return;
+		}
+		hostFormOpen = true;
+		// Mount the form before the dialog opens, so its password field gets the focus.
+		flushSync();
+		hostDialog?.showModal();
+	}
+
+	/** A login whose dialog was cancelled while it ran does not make us host. */
+	function loggedIn() {
+		if (!hostFormOpen) return;
+		hostDialog?.close();
+		session.reconnect();
 	}
 
 	function endForEveryone() {
@@ -132,6 +164,12 @@
 				<span class="label">End for all</span>
 			</button>
 		</div>
+	{:else if offer.kind !== 'none'}
+		<!-- Quiet on purpose: only the owner needs it. -->
+		<button type="button" class="control quiet" onclick={joinAsHost}>
+			<Icon name="host" />
+			<span class="label">Join as host</span>
+		</button>
 	{/if}
 
 	<button type="button" class="control leave" onclick={() => session.leave()}>
@@ -154,6 +192,25 @@
 	{/if}
 	<div class="dialog-actions">
 		<button class="button quiet" type="button" onclick={() => devicesDialog?.close()}>Done</button>
+	</div>
+</dialog>
+
+<!-- The form leaves the page with the dialog, so a typed password is not kept (D24). -->
+<dialog
+	class="dialog"
+	bind:this={hostDialog}
+	aria-labelledby="host-title"
+	onclose={() => (hostFormOpen = false)}
+>
+	<h2 id="host-title">Join as host</h2>
+	<p>Log in with the owner’s password. You stay in the meeting and get the host controls.</p>
+	{#if offer.kind === 'form'}
+		<div class="host-login">
+			<LoginForm {owner} onlogin={loggedIn} />
+		</div>
+	{/if}
+	<div class="dialog-actions">
+		<button class="button quiet" type="button" onclick={() => hostDialog?.close()}>Cancel</button>
 	</div>
 </dialog>
 
@@ -245,6 +302,16 @@
 		box-shadow: 0 0 0 2px var(--lake);
 	}
 
+	/* Only the owner needs it: an outline instead of a filled face. */
+	.control.quiet > :global(svg) {
+		background: none;
+		color: var(--lichen);
+	}
+
+	.control.quiet:hover > :global(svg) {
+		background: var(--reed);
+	}
+
 	.control:disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
@@ -252,6 +319,10 @@
 
 	.pickers {
 		display: grid;
+		margin-top: 1.25rem;
+	}
+
+	.host-login {
 		margin-top: 1.25rem;
 	}
 

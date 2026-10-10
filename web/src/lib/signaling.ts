@@ -88,6 +88,8 @@ export class SignalingClient {
 	readonly #url: string;
 	readonly #handlers: SignalingHandlers;
 	#socket: WebSocket | null = null;
+	/** The socket `reconnect()` replaced, open until the room answers on its successor. */
+	#replaced: WebSocket | null = null;
 	#attempt = 0;
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
 	#keepalive: ReturnType<typeof setInterval> | undefined;
@@ -125,15 +127,21 @@ export class SignalingClient {
 	 * Replaces the socket with a new one at once, as after a lost connection: `onOpen` runs
 	 * again and the caller's `Join` carries the resume token. The new upgrade request carries
 	 * the cookies the browser holds now, such as an owner session from a login since.
+	 *
+	 * The old socket stays open until the room has answered on the new one. The room counts a
+	 * closed socket as its participant leaving, and it would often see that close before the
+	 * new socket's `Join`, which then could not resume and would join as someone new. A
+	 * resuming `Join` makes the room close the old socket itself; the client closes it too,
+	 * once the room's first answer arrives. A second call while a replacement is under way
+	 * does nothing: the new socket already carries the cookies.
 	 */
 	reconnect(): void {
-		if (this.#stopped) return;
+		if (this.#stopped || this.#replaced !== null) return;
 		clearTimeout(this.#retryTimer);
 		clearInterval(this.#keepalive);
-		const old = this.#socket;
-		// Cleared first, so the old socket's `close` event is ignored.
+		// Detached first, so the old socket's messages and `close` event are ignored.
+		this.#replaced = this.#socket;
 		this.#socket = null;
-		old?.close(1000, 'reconnect');
 		this.#attempt = 0;
 		this.#open();
 	}
@@ -147,6 +155,7 @@ export class SignalingClient {
 		window.removeEventListener('online', this.#retryNow);
 		this.#socket?.close(1000, 'client closed');
 		this.#socket = null;
+		this.#closeReplaced();
 		this.#handlers.onStatus({ kind: 'closed', code: 1000, reason: 'client closed' });
 	}
 
@@ -169,6 +178,7 @@ export class SignalingClient {
 		});
 		socket.addEventListener('message', (event) => {
 			if (socket !== this.#socket || typeof event.data !== 'string') return;
+			this.#closeReplaced();
 			const msg = decodeFrame(event.data);
 			if (msg) this.#handlers.onMessage(msg);
 		});
@@ -178,12 +188,18 @@ export class SignalingClient {
 			clearInterval(this.#keepalive);
 			if (isTerminalClose(event.code)) {
 				this.#stopped = true;
+				this.#closeReplaced();
 				this.#handlers.onStatus({ kind: 'closed', code: event.code, reason: event.reason });
 				return;
 			}
 			this.#scheduleRetry();
 		});
 		// `error` is always followed by `close`, which handles the retry.
+	}
+
+	#closeReplaced(): void {
+		this.#replaced?.close(1000, 'replaced');
+		this.#replaced = null;
 	}
 
 	#scheduleRetry(): void {
