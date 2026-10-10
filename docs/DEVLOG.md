@@ -3,6 +3,60 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — A dropped socket gets a minute before it counts as leaving
+
+STATUS Next item 1, core first (D20), recorded as D35 in
+docs/core/README.md. Until now `Event::SocketClosed` was a `Leave`: a phone
+whose socket dropped for a moment lost its tracks for everyone, the
+recorder closed its adapter, and the client came back as a new participant
+with new SFU sessions, unless its new `Join` reached the room before the
+close did.
+
+Core: `Connection::Joined` has `socket_lost: Option<Millis>` (serde default,
+so stored rooms load; no `RECORD_VERSION` bump). A `SocketClosed` for a
+joined participant only sets it; the participant keeps place, sessions,
+tracks and recording, and `ParticipantView.reconnecting` shows it. A second
+report keeps the first time. A participant not yet joined leaves at once:
+their client has no resume token before its `Welcome`, so a grace could
+never end in a resume (the plan also graced `Connecting`; the code says
+otherwise). The new `AlarmReason::Grace` makes the participant leave after
+`LEAVE_GRACE_MS` (60 s, exported); the empty-room time starts then. A resume
+clears the mark and, if a subscribe offer went to the lost socket, fails it
+at once so the tracks are offered again after 3 s instead of 15. `greet`
+now sends `ConsentRequired` after the `Welcome` of a joined participant the
+room records without consent, so a recording started during the grace is
+announced on the resume. The `State` broadcast skips participants without a
+socket. The mark lives in `Connection::Joined`, not on `Participant` as the
+plan had it, so "marked only while joined" holds by construction and every
+way of leaving clears it.
+
+Worker: no logic change; the DO alarm follows the core's next alarm.
+`websocket_close` logs the close code and `was_clean`, `websocket_error`
+the error, to learn which codes phones send. Web: `TileView.reconnecting`
+(caption "Reconnecting…", picture or initials dimmed and grey), mapped from
+the room view for other people's camera tiles; `Session.start()` sends
+`Leave` on `pagehide` unless the page goes into the back/forward cache, so
+a closed tab does not linger for a minute.
+
+Found on the way: the browser test that drops the guest's socket closed the
+server side with code 1001 from inside the page, where `WebSocket.close`
+accepts only 1000 and 3000–4999, so the room never saw that close and the
+test passed only because the old socket stayed open. It now uses 4000, and
+the Worker logged `code 4000, clean true`. Local `wrangler dev` reported
+otherwise 1000 and 1001, both clean.
+
+Tests: core rules for the drop, the second report, the resume, the subscribe
+offer failed on resume, the grace alarm, drops before joining, kick and end
+during the grace, a recording announced on resume, and storage; `flow.rs`
+now expects the empty timer after the grace; the property simulator models
+detached sockets with five new invariants and reaches drops, resumes and
+expiries in the grace; a worker record test for the grace alarm; protocol
+e2e for drop and resume and for a knocking guest's drop; the browser drop
+test checks the host's tile.
+
+Next: code review, then deploy when no meeting is live; then the cleanup of
+ended-room storage.
+
 ## 2026-10-10 — "Join as host" inside a live meeting
 
 STATUS Next item 1. The owner who joined as a guest, for example from a

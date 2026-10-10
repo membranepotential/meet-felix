@@ -8,12 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use super::support::{Room, name, token};
-use crate::state::{AlarmReason, Connection, Lifecycle, SessionSlot};
+use crate::state::{AlarmReason, Connection, Lifecycle, SessionSlot, SubscribeNegotiation};
 use crate::{
-    ClientMsg, Effect, ErrorCode, Event, FailureCause, LocalTrack, Mid, Millis,
+    ClientMsg, Effect, ErrorCode, Event, FailureCause, LEAVE_GRACE_MS, LocalTrack, Mid, Millis,
     NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken,
-    Rid, Role, RoomState, RoomView, SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionEpochs, SessionId,
-    SessionKind, SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
+    Rid, Role, RoomState, RoomView, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg,
+    SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
 };
 
 const POOL: u32 = 6;
@@ -143,7 +143,7 @@ fn action() -> impl Strategy<Value = Action> {
         1 => any::<usize>().prop_map(|pick| Action::Lose { pick }),
         6 => any::<usize>().prop_map(|pick| Action::Answer { pick }),
         1 => (who(), kind()).prop_map(|(who, kind)| Action::TrackClosed { who, kind }),
-        1 => who().prop_map(|who| Action::SocketClosed { who }),
+        2 => who().prop_map(|who| Action::SocketClosed { who }),
         1 => (0..8u8).prop_map(|n| if n == 0 { Action::Expire } else { Action::Alarm }),
         1 => Just(Action::NegotiationDue),
         1 => prop_oneof![0..20_000u64, 0..90_000u64].prop_map(|ms| Action::Wait { ms }),
@@ -169,6 +169,15 @@ struct Sim {
     alarm: Option<Millis>,
     /// How many clients resumed on a new socket.
     rebinds: usize,
+    /// Joined participants whose socket closed and who have not resumed: the shell delivers
+    /// nothing to them, and their client sends nothing until it resumes.
+    detached: BTreeSet<ParticipantId>,
+    /// How many joined participants lost their socket.
+    graced: usize,
+    /// How many of them resumed during the grace.
+    resumed_in_grace: usize,
+    /// How many of them left because the grace ended.
+    grace_expired: usize,
     /// How many tracks were unpublished.
     unpublished: usize,
     /// How many publish offers timed out.
@@ -203,6 +212,10 @@ impl Sim {
             recorded: Vec::new(),
             alarm,
             rebinds: 0,
+            detached: BTreeSet::new(),
+            graced: 0,
+            resumed_in_grace: 0,
+            grace_expired: 0,
             unpublished: 0,
             publish_timeouts: 0,
             host_joined: false,
@@ -233,6 +246,14 @@ impl Sim {
     /// Turns an action into an event, or `None` if it does not apply right now.
     fn event(&mut self, action: Action) -> Option<Event> {
         let id = ParticipantId;
+        // A closed socket sends nothing.
+        if let Action::Join { who, .. }
+        | Action::Send { who, .. }
+        | Action::Resume { socket: who, .. } = action
+            && self.detached.contains(&id(who))
+        {
+            return None;
+        }
         Some(match action {
             Action::Join {
                 who,
@@ -384,10 +405,13 @@ impl Sim {
                 return None;
             }
             Action::Answer { pick } => {
-                if self.offers.is_empty() {
+                let connected: Vec<usize> = (0..self.offers.len())
+                    .filter(|&i| !self.detached.contains(&self.offers[i]))
+                    .collect();
+                if connected.is_empty() {
                     return None;
                 }
-                let from = self.offers.remove(pick % self.offers.len());
+                let from = self.offers.remove(connected[pick % connected.len()]);
                 self.client(
                     from,
                     ClientMsg::SubscribeAnswer {
@@ -440,6 +464,28 @@ impl Sim {
         let effects = self.room.apply(event.clone());
         self.check(&before, &event, &effects)?;
         let after = &self.room.state;
+        if let Event::SocketClosed { who } = event
+            && matches!(
+                before.participants.get(&who).map(|p| &p.connection),
+                Some(Connection::Joined {
+                    socket_lost: None,
+                    ..
+                })
+            )
+        {
+            self.detached.insert(who);
+            self.graced += 1;
+        }
+        if event == Event::AlarmFired {
+            self.grace_expired += before
+                .participants
+                .iter()
+                .filter(|&(who, p)| {
+                    p.connection.socket_lost().is_some()
+                        && after.participants[who].connection == Connection::Left
+                })
+                .count();
+        }
         self.host_joined |= after
             .joined()
             .any(|(id, ..)| after.participants[&id].role == Role::Host);
@@ -498,7 +544,10 @@ impl Sim {
                 Effect::Send { to, msg } => self.receive(&[to], msg),
                 Effect::Broadcast { to, msg } => self.receive(&to, msg),
                 Effect::SetAlarm { at } => self.alarm = Some(at),
-                Effect::Rebind { .. } => self.rebinds += 1,
+                Effect::Rebind { participant, .. } => {
+                    self.rebinds += 1;
+                    self.resumed_in_grace += usize::from(self.detached.remove(&participant));
+                }
                 Effect::EndMeeting => self.ended = true,
                 Effect::StartRecording { .. } => self.recorded.clear(),
                 Effect::RecordTrack { track, .. } => {
@@ -512,13 +561,20 @@ impl Sim {
                 _ => {}
             }
         }
+        let after = &self.room.state;
+        self.detached.retain(|who| {
+            after
+                .participants
+                .get(who)
+                .is_some_and(|p| p.connection.presence().is_some())
+        });
         self.check_views()?;
         self.check_recorded()?;
         self.check_alarm()
     }
 
     fn receive(&mut self, to: &[ParticipantId], msg: ServerMsg) {
-        for &who in to {
+        for &who in to.iter().filter(|who| !self.detached.contains(who)) {
             match &msg {
                 ServerMsg::Welcome { state, resume, .. } => {
                     self.seen.insert(who, state.clone());
@@ -562,7 +618,11 @@ impl Sim {
                 .iter()
                 .position(|e| matches!(e, Effect::StartRecording { .. }));
             prop_assert!(started.is_some(), "{effects:?}");
-            for (who, ..) in after.joined() {
+            // A client waiting to resume hears of it in its welcome.
+            let connected = after
+                .joined()
+                .filter(|(who, ..)| after.participants[who].connection.socket_lost().is_none());
+            for (who, ..) in connected {
                 let announced = effects[..started.unwrap_or(0)].iter().any(|e| match e {
                     Effect::Send {
                         to,
@@ -670,11 +730,16 @@ impl Sim {
                         Some(*socket) == sender && present(participant),
                         "{effect:?}"
                     );
+                    let mut expected = resumed(before, *participant, self.room.now);
                     if owner_join {
                         prop_assert_eq!(after.participants[participant].role, Role::Host);
-                    } else {
-                        prop_assert_eq!(before, after);
+                        expected
+                            .participants
+                            .get_mut(participant)
+                            .expect("present")
+                            .role = Role::Host;
                     }
+                    prop_assert_eq!(&expected, after);
                 }
                 Effect::SfuNewSession { who, .. } => prop_assert!(present(who), "{effect:?}"),
                 Effect::SfuPublish { who, session, .. } => {
@@ -704,6 +769,13 @@ impl Sim {
                     };
                     prop_assert_eq!(Some(mids.clone()), unpublished.map(|mid| vec![mid]));
                 }
+                // Several participants whose grace ended leave in one alarm: one who leaves
+                // later in the step may still have the earlier ones' tracks closed on their
+                // session.
+                Effect::SfuCloseTracks { who, session, .. }
+                    if !present(who)
+                        && current_session(before, *who, SessionKind::Subscribe).as_ref()
+                            == Some(session) => {}
                 Effect::SfuRenegotiate { who, session, .. }
                 | Effect::SfuCloseTracks { who, session, .. }
                 | Effect::SfuUpdateLayer { who, session, .. } => {
@@ -885,6 +957,8 @@ impl Sim {
             }
         }
 
+        self.check_grace(before, event, effects)?;
+
         // No negotiation older than the timeout, and no due request for a replacement session,
         // survives an alarm at or after its deadline.
         if *event == Event::AlarmFired {
@@ -918,6 +992,87 @@ impl Sim {
         }
 
         self.check_phases(before, event, effects)
+    }
+
+    /// A joined participant whose socket closes keeps everything for the grace period: the step
+    /// only marks them, closes no track and stops no recording. The mark never moves later, and
+    /// no grace outlives an alarm at or after its end. Anyone else whose socket closes leaves.
+    fn check_grace(
+        &self,
+        before: &RoomState,
+        event: &Event,
+        effects: &[Effect],
+    ) -> Result<(), TestCaseError> {
+        let after = &self.room.state;
+        let now = self.room.now;
+        for (who, p) in &after.participants {
+            if let Some(lost) = before
+                .participants
+                .get(who)
+                .and_then(|w| w.connection.socket_lost())
+            {
+                let still = p.connection.socket_lost();
+                prop_assert!(
+                    still.is_none_or(|t| t == lost),
+                    "{who:?}'s grace moved: {still:?}"
+                );
+            }
+        }
+        if let Event::SocketClosed { who } = event
+            && after.ended().is_none()
+        {
+            match before.participants.get(who).map(|p| &p.connection) {
+                Some(Connection::Joined {
+                    socket_lost: Some(_),
+                    ..
+                }) => {
+                    prop_assert_eq!(before, after);
+                    prop_assert!(effects.is_empty(), "{effects:?}");
+                }
+                Some(Connection::Joined {
+                    socket_lost: None, ..
+                }) => {
+                    let mut expected = before.clone();
+                    if let Connection::Joined { socket_lost, .. } = &mut expected
+                        .participants
+                        .get_mut(who)
+                        .expect("joined")
+                        .connection
+                    {
+                        *socket_lost = Some(now);
+                    }
+                    prop_assert_eq!(&expected, after);
+                    for effect in effects {
+                        let allowed = match effect {
+                            Effect::Broadcast {
+                                to,
+                                msg: ServerMsg::State { .. },
+                            } => !to.contains(who),
+                            Effect::SetAlarm { .. } => true,
+                            _ => false,
+                        };
+                        prop_assert!(allowed, "{effect:?} for {who:?}'s lost socket");
+                    }
+                }
+                _ => prop_assert!(
+                    after
+                        .participants
+                        .get(who)
+                        .is_none_or(|p| p.connection == Connection::Left)
+                ),
+            }
+        }
+        if *event == Event::AlarmFired {
+            for (who, p) in &after.participants {
+                if let Some(lost) = p.connection.socket_lost() {
+                    prop_assert!(
+                        lost.after(LEAVE_GRACE_MS) > now,
+                        "{who:?}'s grace since {lost:?} survived the alarm at {now:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A room is scheduled until its first host joins, then live, and never goes back. Its
@@ -1043,13 +1198,29 @@ impl Sim {
         Ok(())
     }
 
-    /// Every joined client's last snapshot is the current view.
+    /// Every connected joined client's last snapshot is the current view. The room counts as
+    /// reconnecting exactly the participants whose socket the shell lost.
     fn check_views(&self) -> Result<(), TestCaseError> {
         if self.ended {
             return Ok(());
         }
-        let view = self.room.state.view();
-        for (who, ..) in self.room.state.joined() {
+        let state = &self.room.state;
+        let view = state.view();
+        let lost: BTreeSet<_> = state
+            .participants
+            .iter()
+            .filter(|(_, p)| p.connection.socket_lost().is_some())
+            .map(|(&who, _)| who)
+            .collect();
+        prop_assert_eq!(&lost, &self.detached);
+        let shown: BTreeSet<_> = view
+            .participants
+            .iter()
+            .filter(|p| p.reconnecting)
+            .map(|p| p.id)
+            .collect();
+        prop_assert_eq!(&shown, &lost);
+        for (who, ..) in state.joined().filter(|(who, ..)| !lost.contains(who)) {
             prop_assert_eq!(
                 self.seen.get(&who),
                 Some(&view),
@@ -1059,6 +1230,31 @@ impl Sim {
         }
         Ok(())
     }
+}
+
+/// `before` as a resume of `who` at `now` leaves it: their wait to resume is over, and a subscribe
+/// offer sent to them meanwhile failed, so its tracks are requested again after a pause.
+fn resumed(before: &RoomState, who: ParticipantId, now: Millis) -> RoomState {
+    let mut expected = before.clone();
+    let p = expected.participants.get_mut(&who).expect("present");
+    if let Connection::Joined {
+        socket_lost,
+        subscribe,
+        ..
+    } = &mut p.connection
+        && socket_lost.take().is_some()
+        && let SessionSlot::Ready(subscribe) = subscribe
+        && let SubscribeNegotiation::AwaitingAnswer { offered, .. } = &subscribe.negotiation
+    {
+        let retry = now.after(SUBSCRIBE_RETRY_MS);
+        for o in offered {
+            if let Some(due) = subscribe.wanted.get_mut(&o.track) {
+                *due = retry;
+            }
+        }
+        subscribe.negotiation = SubscribeNegotiation::Idle;
+    }
+    expected
 }
 
 /// The id of `who`'s session of `kind`, if they are joined and it is in use.
@@ -1144,6 +1340,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
     let (mut awaiting, mut resumed, mut retried) = (0, 0, 0);
     let (mut unpublished, mut publish_timeouts) = (0, 0);
     let (mut released, mut expired, mut promoted, mut replaced) = (0, 0, 0, 0);
+    let (mut graced, mut resumed_in_grace, mut grace_expired) = (0, 0, 0);
     for case in 0..500 {
         let actions = proptest::collection::vec(action(), 1..250)
             .new_tree(&mut runner)
@@ -1185,6 +1382,9 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
         expired += usize::from(sim.expired);
         promoted += usize::from(sim.promoted > 0);
         replaced += usize::from(saw[5]);
+        graced += usize::from(sim.graced > 0);
+        resumed_in_grace += usize::from(sim.resumed_in_grace > 0);
+        grace_expired += usize::from(sim.grace_expired > 0);
     }
     assert!(
         [
@@ -1200,6 +1400,9 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
             expired,
             promoted,
             replaced,
+            graced,
+            resumed_in_grace,
+            grace_expired,
         ]
         .iter()
         .all(|&n| n >= 20),
@@ -1207,6 +1410,8 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
          awaiting consent {awaiting}, resumed {resumed}, retry pending {retried}, \
          unpublished {unpublished}, publish timed out {publish_timeouts}, \
          waiting guests let in by the first host {released}, expired unused {expired}, \
-         promoted by the owner {promoted}, session replaced {replaced}"
+         promoted by the owner {promoted}, session replaced {replaced}, \
+         socket lost in grace {graced}, resumed in grace {resumed_in_grace}, \
+         left when the grace ended {grace_expired}"
     );
 }

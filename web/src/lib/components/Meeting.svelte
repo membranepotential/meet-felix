@@ -61,6 +61,7 @@
 				stream: media.cameraStream,
 				micOn: media.micOn,
 				unrecorded: false,
+				reconnecting: false,
 				level: () => levelOf(SELF),
 				layerTrack: null,
 				actions: null
@@ -76,6 +77,7 @@
 				stream: media.screenStream,
 				micOn: true,
 				unrecorded: false,
+				reconnecting: false,
 				level: () => 0,
 				layerTrack: null,
 				actions: null
@@ -93,6 +95,7 @@
 					stream: camera,
 					micOn: p.tracks.includes('audio') && !p.muted,
 					unrecorded: unrecorded.has(p.id),
+					reconnecting: p.reconnecting,
 					level: () => levelOf(String(p.id)),
 					layerTrack: camera ? { owner: p.id, kind: 'video' } : null,
 					actions: session.isHost
@@ -112,6 +115,7 @@
 								stream: screen,
 								micOn: true,
 								unrecorded: false,
+								reconnecting: false,
 								level: () => 0,
 								layerTrack: null
 							}

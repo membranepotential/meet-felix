@@ -27,7 +27,7 @@ use worker::wasm_bindgen::JsCast;
 use worker::{
     DurableObject, Env, Method, Request, RequestInit, Response, Result, State, WebSocket,
     WebSocketIncomingMessage, WebSocketPair, WebSocketRequestResponsePair, console_error,
-    console_warn, durable_object,
+    console_log, console_warn, durable_object,
 };
 
 use crate::internal::{
@@ -119,13 +119,18 @@ impl DurableObject for RoomObject {
     // Workers with compatibility date >= 2026-04-07 reply to Close frames themselves
     // (`web_socket_auto_reply_to_close`; calling `close` stays safe), but local `wrangler dev`
     // 4.147.0 does not, and clients then wait for the Close frame forever.
+    //
+    // Logs the close code: which codes a closing tab, a phone that drops a backgrounded socket,
+    // and a lost network produce is undocumented, and decides whether a close could ever skip
+    // the grace period (D35 in docs/core).
     async fn websocket_close(
         &self,
         ws: WebSocket,
-        _code: usize,
+        code: usize,
         _reason: String,
-        _was_clean: bool,
+        was_clean: bool,
     ) -> Result<()> {
+        console_log!("websocket_close: code {code}, clean {was_clean}");
         let gone = self.socket_gone(&ws).await;
         if let Err(e) = ws.close(Some(CLOSE_NORMAL), Some("bye")) {
             console_warn!("websocket_close: close failed: {e}");
@@ -133,7 +138,8 @@ impl DurableObject for RoomObject {
         gone
     }
 
-    async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+    async fn websocket_error(&self, ws: WebSocket, error: worker::Error) -> Result<()> {
+        console_log!("websocket_error: {error}");
         self.socket_gone(&ws).await
     }
 
@@ -154,8 +160,11 @@ impl DurableObject for RoomObject {
                 },
                 close_stale: Some(ws),
             });
-        let inputs: VecDeque<Input> = std::iter::once(Input::from(Event::AlarmFired))
-            .chain(stale)
+        // The stale reports go first: they make no SFU call, while `AlarmFired` may (a grace
+        // that expires closes tracks), and a client could resume on a new socket during that
+        // call. `run` also drops a report whose socket the resume closed meanwhile.
+        let inputs: VecDeque<Input> = stale
+            .chain(std::iter::once(Input::from(Event::AlarmFired)))
             .collect();
         self.run(inputs).await?;
         match self.load().await? {
@@ -212,7 +221,8 @@ impl RoomObject {
     /// Reports a socket that closed or failed to the core, unless the room closed it itself.
     /// The socket is marked closed only once the report is stored, so a failed store leaves it
     /// to be reported again. The runtime may report both an error and a close for the same
-    /// socket; a second report in between is harmless, because the participant already left.
+    /// socket; a second report in between is harmless, because the core ignores it: the participant
+    /// left already, or waits to resume since the first report.
     async fn socket_gone(&self, ws: &WebSocket) -> Result<()> {
         let Some(Attachment::Open(socket)) = attachment(ws)? else {
             return Ok(());
@@ -237,6 +247,13 @@ impl RoomObject {
         let mut queue = inputs;
         let mut sfu_calls = 0;
         while let Some(Input { event, close_stale }) = queue.pop_front() {
+            // A stale socket that a resume on a new socket closed meanwhile (`CloseSocket`
+            // marks it `Closed`) must not report the resumed participant as lost.
+            if let Some(ws) = &close_stale
+                && !matches!(attachment(ws)?, Some(Attachment::Open(_)))
+            {
+                continue;
+            }
             let Some(Record::Open(open)) = self.load().await? else {
                 // Ended, or never initialised: nothing listens any more.
                 return Ok(());

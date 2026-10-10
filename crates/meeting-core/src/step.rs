@@ -20,7 +20,8 @@ use crate::state::{
 ///
 /// The effects start with a [`ServerMsg::Welcome`] for each participant who just joined and,
 /// whenever the public [`RoomView`] changed, a [`ServerMsg::State`] broadcast to every other
-/// joined participant, so no client misses a change (in particular a recording start). They end
+/// joined participant whose socket is up, so no client misses a change (in particular a recording
+/// start); a client that resumes gets the current view in its welcome. They end
 /// with an [`Effect::SetAlarm`] whenever the room's next alarm time changed, and after every
 /// alarm. After the meeting ended, every event is ignored.
 pub fn step(mut state: RoomState, now: Millis, event: Event) -> (RoomState, Vec<Effect>) {
@@ -45,7 +46,7 @@ pub fn step(mut state: RoomState, now: Millis, event: Event) -> (RoomState, Vec<
             }
         }
         Event::Sfu(reply) => state.on_sfu(now, reply, &mut fx),
-        Event::SocketClosed { who } => state.leave(now, who, &mut fx),
+        Event::SocketClosed { who } => state.socket_closed(now, who, &mut fx),
         Event::AlarmFired => state.on_alarm(now, &mut fx),
     }
     let effects = fx.finish(&state, before);
@@ -81,8 +82,8 @@ impl Effects {
         }
     }
 
-    /// Prepends the welcomes and, if the view changed, the state broadcast to everyone not
-    /// welcomed in this step; appends the alarm.
+    /// Prepends the welcomes and, if the view changed, the state broadcast to everyone with a
+    /// socket who was not welcomed in this step; appends the alarm.
     fn finish(self, state: &RoomState, before: Before) -> Vec<Effect> {
         if state.ended().is_some() {
             return self.list;
@@ -105,6 +106,7 @@ impl Effects {
             let to: Vec<_> = state
                 .joined()
                 .map(|(id, ..)| id)
+                .filter(|id| state.participants[id].connection.socket_lost().is_none())
                 .filter(|id| !self.welcomed.contains(id) && !greeted(id))
                 .collect();
             if !to.is_empty() {
@@ -163,7 +165,7 @@ impl RoomState {
                     resume,
                 } => {
                     if let Some(old) = resume.and_then(|token| self.holder_of(&token)) {
-                        self.resume(from, old, owner, fx);
+                        self.resume(now, from, old, owner, fx);
                         return Ok(());
                     }
                     let role = if owner { Role::Host } else { Role::Guest };
@@ -304,17 +306,41 @@ impl RoomState {
     }
 
     /// Moves participant `old` to the new socket `socket`, keeping consent and tracks, and the
-    /// role unless the owner's socket takes a guest's place.
-    fn resume(&mut self, socket: ParticipantId, old: ParticipantId, owner: bool, fx: &mut Effects) {
+    /// role unless the owner's socket takes a guest's place. Ends their wait to resume, if their
+    /// old socket is gone (D35). Everything sent to them meanwhile went nowhere: the welcome and
+    /// a repeated consent request catch up on the room, and a subscribe offer still waiting for
+    /// its answer fails at once, so its tracks are offered again after [`SUBSCRIBE_RETRY_MS`]
+    /// instead of after its timeout.
+    fn resume(
+        &mut self,
+        now: Millis,
+        socket: ParticipantId,
+        old: ParticipantId,
+        owner: bool,
+        fx: &mut Effects,
+    ) {
         fx.push(Effect::CloseSocket { who: old });
         fx.push(Effect::Rebind {
             socket,
             participant: old,
         });
+        let was_lost = match &mut self.participants.get_mut(&old).expect("holder").connection {
+            Connection::Joined { socket_lost, .. } => socket_lost.take().is_some(),
+            _ => false,
+        };
         if owner {
             self.promote(old, fx);
         }
         self.greet(old, fx);
+        let unanswered = self.subscribe_session_mut(old).is_some_and(|subscribe| {
+            matches!(
+                subscribe.negotiation,
+                SubscribeNegotiation::AwaitingAnswer { .. }
+            )
+        });
+        if was_lost && unanswered {
+            self.subscription_failed(now, old, fx);
+        }
     }
 
     /// The owner's socket took `who`'s place: a guest becomes a host and, if they wait outside,
@@ -350,10 +376,17 @@ impl RoomState {
         }
     }
 
-    /// Answers a `Join` from a participant already in the room: tells them where they stand.
+    /// Answers a `Join` from a participant already in the room: tells them where they stand,
+    /// and asks a joined participant again for consent the room records without, in case the
+    /// first request went to a socket that was gone.
     fn greet(&self, who: ParticipantId, fx: &mut Effects) {
         match self.participants.get(&who).map(|p| &p.connection) {
-            Some(Connection::Joined { .. }) => fx.send(who, self.welcome(who)),
+            Some(Connection::Joined { .. }) => {
+                fx.send(who, self.welcome(who));
+                if self.lacks_consent(who) {
+                    fx.send(who, ServerMsg::ConsentRequired);
+                }
+            }
             Some(Connection::WaitingForHost) => fx.send(who, ServerMsg::Waiting),
             Some(Connection::Knocking) => {
                 fx.send(who, ServerMsg::Waiting);
@@ -719,6 +752,7 @@ impl RoomState {
             publish: SessionSlot::Ready(PublishSession::new(publish)),
             subscribe: SessionSlot::Ready(SubscribeSession::new(subscribe, wanted)),
             epochs: SessionEpochs::default(),
+            socket_lost: None,
         };
         fx.welcomed.push(who);
         if role == Role::Host && matches!(self.lifecycle, Lifecycle::Scheduled { .. }) {
@@ -1256,6 +1290,21 @@ impl RoomState {
         }
     }
 
+    /// `who`'s socket closed without a `Leave`. A joined participant keeps their place, sessions
+    /// and tracks until their client resumes or [`crate::LEAVE_GRACE_MS`] pass (D35); a second
+    /// report keeps the first time. Anyone else leaves at once: they publish nothing, and their
+    /// client holds no resume token, as only the welcome carries it.
+    fn socket_closed(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
+        match self.participants.get_mut(&who).map(|p| &mut p.connection) {
+            Some(Connection::Joined { socket_lost, .. }) => {
+                socket_lost.get_or_insert(now);
+            }
+            _ => self.leave(now, who, fx),
+        }
+    }
+
+    /// `who` leaves: their tracks stop reaching everyone and stop being recorded, and the empty
+    /// timer starts if nobody admitted is left.
     fn leave(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
         let Some(p) = self.participants.get(&who) else {
             return;
@@ -1297,6 +1346,7 @@ impl RoomState {
         for reason in due {
             match reason {
                 AlarmReason::Expire | AlarmReason::EmptyRoom => return self.end(now, fx),
+                AlarmReason::Grace(who) => self.leave(now, who, fx),
                 // Due only once the pending offer timed out.
                 AlarmReason::Publish(who) => self.publish_failed(who, fx),
                 AlarmReason::Subscribe(who) => {

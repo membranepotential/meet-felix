@@ -14,6 +14,7 @@ const person = (
 	presence: 'joined',
 	tracks: [],
 	muted: false,
+	reconnecting: false,
 	...extra
 });
 

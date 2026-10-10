@@ -2,9 +2,9 @@
 
 use super::support::{Room, T0, local_track, meeting, session, track_name};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, Mid, NEGOTIATION_TIMEOUT_MS,
-    OfferedTrack, ParticipantId, Phase, Presence, RemoteTrack, Rid, SCHEDULED_TTL_MS, Sdp,
-    ServerMsg, SessionKind, SfuReply, TrackKind, TrackRef,
+    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, LEAVE_GRACE_MS, Mid,
+    NEGOTIATION_TIMEOUT_MS, OfferedTrack, ParticipantId, Phase, Presence, RemoteTrack, Rid,
+    SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionKind, SfuReply, TrackKind, TrackRef,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -259,11 +259,21 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
         }
     );
 
-    // The host's socket drops; the room is empty and arms the alarm.
+    // The host's socket drops: the host keeps their place for the grace period, so the room is
+    // not empty yet; the alarm waits for the grace to end.
     room.now = room.now.after(60_000);
-    let left_at = room.now;
+    let grace_ends = room.now.after(LEAVE_GRACE_MS);
     assert_eq!(
         room.apply(Event::SocketClosed { who: HOST }),
+        [Effect::SetAlarm { at: grace_ends }]
+    );
+
+    // No client takes the place: the host leaves when the grace ends, and the empty time starts
+    // then.
+    room.now = grace_ends;
+    let left_at = room.now;
+    assert_eq!(
+        room.apply(Event::AlarmFired),
         [Effect::SetAlarm {
             at: left_at.after(EMPTY_ROOM_TIMEOUT_MS)
         }]

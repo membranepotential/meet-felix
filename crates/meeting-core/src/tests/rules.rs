@@ -3,10 +3,11 @@
 use super::support::{Room, T0, name, session, track_name, transcript};
 use crate::recording::{ConsentRecord, RosterEntry};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FailureCause, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, OfferedTrack, ParticipantId, Phase, Presence,
-    RecordingPolicy, RemoteTrack, Role, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp,
-    ServerMsg, SessionEpoch, SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind,
+    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FailureCause, LEAVE_GRACE_MS, Mid,
+    Millis, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, OfferedTrack, ParticipantId, Phase, Presence,
+    RecordingPolicy, RemoteTrack, ResumeToken, Role, RoomState, RoomView, SCHEDULED_TTL_MS,
+    SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpoch, SessionEpochs, SessionId, SessionKind,
+    SfuCall, SfuReply, TrackKind,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -718,6 +719,23 @@ fn state_survives_a_json_round_trip() {
     }
     let loaded: RoomState = serde_json::from_value(stored).expect("deserializable");
     assert!(!loaded.participants[&GUEST].muted);
+
+    // A participant waiting to resume survives storage; one stored before the grace period
+    // existed loads as connected.
+    room.apply(Event::SocketClosed { who: GUEST });
+    let json = serde_json::to_string(&room.state).expect("serializable");
+    assert_eq!(
+        serde_json::from_str::<RoomState>(&json).expect("deserializable"),
+        room.state
+    );
+    let mut stored = serde_json::to_value(&room.state).expect("serializable");
+    stored["participants"][GUEST.0.to_string()]["connection"]["Joined"]
+        .as_object_mut()
+        .expect("joined")
+        .remove("socket_lost")
+        .expect("stored");
+    let loaded: RoomState = serde_json::from_value(stored).expect("deserializable");
+    assert_eq!(loaded.participants[&GUEST].connection.socket_lost(), None);
 }
 
 #[test]
@@ -905,11 +923,25 @@ fn an_unanswered_subscribe_offer_times_out_and_is_requested_again() {
 
 /// The host publishes audio and the guest receives it; returns the track and the guest's mid.
 fn guest_receives_host_audio(room: &mut Room) -> (RemoteTrack, Mid) {
-    let track = host_publishes_audio(room);
+    receives_audio(room, HOST, GUEST)
+}
+
+/// `owner` publishes audio and `subscriber` receives it; returns the track and the subscriber's
+/// mid.
+fn receives_audio(
+    room: &mut Room,
+    owner: ParticipantId,
+    subscriber: ParticipantId,
+) -> (RemoteTrack, Mid) {
+    room.publish(owner, &[TrackKind::Audio]);
+    let track = RemoteTrack {
+        session: session(owner, SessionKind::Publish),
+        name: track_name(owner, TrackKind::Audio),
+    };
     let mid = Mid::new("sub-audio");
     room.sfu(SfuReply::SubscribeOffer {
-        who: GUEST,
-        session: session(GUEST, SessionKind::Subscribe),
+        who: subscriber,
+        session: session(subscriber, SessionKind::Subscribe),
         sdp_offer: Sdp::new("offer"),
         tracks: vec![OfferedTrack {
             mid: mid.clone(),
@@ -917,14 +949,14 @@ fn guest_receives_host_audio(room: &mut Room) -> (RemoteTrack, Mid) {
         }],
     });
     room.client(
-        GUEST,
+        subscriber,
         ClientMsg::SubscribeAnswer {
             sdp: Sdp::new("answer"),
         },
     );
     room.sfu(SfuReply::Renegotiated {
-        who: GUEST,
-        session: session(GUEST, SessionKind::Subscribe),
+        who: subscriber,
+        session: session(subscriber, SessionKind::Subscribe),
     });
     (track, mid)
 }
@@ -1482,4 +1514,284 @@ fn the_roster_keeps_everyone_who_left_and_the_consents_only_standing_ones() {
         [HOST, GUEST],
         "joined without consent: no record"
     );
+}
+
+/// `view` with `who` shown as reconnecting.
+fn reconnecting(mut view: RoomView, who: ParticipantId) -> RoomView {
+    for p in &mut view.participants {
+        p.reconnecting |= p.id == who;
+    }
+    view
+}
+
+/// A meeting room that records, where the host receives the guest's recorded audio.
+fn recorded_guest() -> (Room, RemoteTrack, Mid) {
+    let mut room = meeting_room();
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    let (track, mid) = receives_audio(&mut room, GUEST, HOST);
+    (room, track, mid)
+}
+
+fn resume_join(token: ResumeToken) -> ClientMsg {
+    ClientMsg::Join {
+        name: name("Guest"),
+        consent: true,
+        resume: Some(token),
+    }
+}
+
+#[test]
+fn a_dropped_socket_keeps_the_participant_and_its_tracks_for_a_grace_period() {
+    let (mut room, ..) = recorded_guest();
+    let before = room.state.view();
+    let dropped = room.now;
+    let grace_ends = dropped.after(LEAVE_GRACE_MS);
+
+    // No track is closed and the recording goes on; the others see the guest reconnecting.
+    assert_eq!(
+        room.apply(Event::SocketClosed { who: GUEST }),
+        [
+            Effect::Broadcast {
+                to: vec![HOST],
+                msg: ServerMsg::State {
+                    state: reconnecting(before.clone(), GUEST)
+                }
+            },
+            Effect::SetAlarm { at: grace_ends },
+        ]
+    );
+    assert_eq!(presence(&room, GUEST), Some(Presence::Joined));
+
+    // The runtime may report the same socket twice; the grace keeps its first time.
+    room.now = dropped.after(5_000);
+    let in_grace = room.state.clone();
+    assert_eq!(room.apply(Event::SocketClosed { who: GUEST }), []);
+    assert_eq!(room.state, in_grace);
+    assert_eq!(room.state.next_alarm(), Some(grace_ends));
+}
+
+#[test]
+fn a_client_that_resumes_during_the_grace_keeps_its_place_sessions_and_tracks() {
+    const NEW_SOCKET: ParticipantId = ParticipantId(9);
+    let (mut room, ..) = recorded_guest();
+    let before = room.state.clone();
+    let token = before.participants[&GUEST].resume.clone();
+    room.apply(Event::SocketClosed { who: GUEST });
+
+    room.now = room.now.after(LEAVE_GRACE_MS - 1);
+    assert_eq!(
+        room.client(NEW_SOCKET, resume_join(token.clone())),
+        [
+            Effect::Broadcast {
+                to: vec![HOST],
+                msg: ServerMsg::State {
+                    state: before.view()
+                }
+            },
+            Effect::CloseSocket { who: GUEST },
+            Effect::Rebind {
+                socket: NEW_SOCKET,
+                participant: GUEST
+            },
+            Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::Welcome {
+                    you: GUEST,
+                    state: before.view(),
+                    resume: token,
+                    epochs: SessionEpochs::default(),
+                }
+            },
+        ]
+    );
+    assert_eq!(room.state, before);
+    assert_eq!(room.state.next_alarm(), None);
+}
+
+#[test]
+fn a_subscribe_offer_sent_during_the_grace_fails_on_resume_and_is_sent_again() {
+    const NEW_SOCKET: ParticipantId = ParticipantId(9);
+    let mut room = meeting_room();
+    let token = room.state.participants[&GUEST].resume.clone();
+    room.apply(Event::SocketClosed { who: GUEST });
+    // The host publishes during the grace; the offer for the guest goes nowhere.
+    let track = host_publishes_audio(&mut room);
+    let mid = Mid::new("sub-audio");
+    room.sfu(SfuReply::SubscribeOffer {
+        who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
+        sdp_offer: Sdp::new("offer"),
+        tracks: vec![OfferedTrack {
+            mid: mid.clone(),
+            track: track.clone(),
+        }],
+    });
+
+    let effects = room.client(NEW_SOCKET, resume_join(token));
+    let [
+        ..,
+        Effect::Send {
+            to: GUEST,
+            msg: ServerMsg::Welcome { .. },
+        },
+        close,
+        failed,
+        alarm,
+    ] = effects.as_slice()
+    else {
+        panic!("unexpected effects {effects:#?}");
+    };
+    assert_eq!(
+        [close, failed, alarm],
+        [
+            &Effect::SfuCloseTracks {
+                who: GUEST,
+                session: session(GUEST, SessionKind::Subscribe),
+                mids: vec![mid]
+            },
+            &Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::Error {
+                    code: ErrorCode::SubscribeFailed
+                }
+            },
+            &Effect::SetAlarm {
+                at: room.now.after(SUBSCRIBE_RETRY_MS)
+            },
+        ]
+    );
+    room.now = room.now.after(SUBSCRIBE_RETRY_MS);
+    assert!(matches!(
+        room.apply(Event::AlarmFired).as_slice(),
+        [Effect::SfuSubscribe { tracks, .. }, Effect::SetAlarm { .. }] if tracks == &[track]
+    ));
+}
+
+#[test]
+fn the_grace_alarm_makes_the_dropped_participant_leave() {
+    const NEW_SOCKET: ParticipantId = ParticipantId(9);
+    let (mut room, track, mid) = recorded_guest();
+    let token = room.state.participants[&GUEST].resume.clone();
+    let dropped = room.now;
+    let grace_ends = dropped.after(LEAVE_GRACE_MS);
+    room.apply(Event::SocketClosed { who: GUEST });
+
+    room.now = dropped.after(LEAVE_GRACE_MS - 1);
+    assert_eq!(
+        room.apply(Event::AlarmFired),
+        [Effect::SetAlarm { at: grace_ends }]
+    );
+
+    room.now = grace_ends;
+    let effects = room.apply(Event::AlarmFired);
+    let [
+        Effect::Broadcast {
+            to,
+            msg: ServerMsg::State { state },
+        },
+        rest @ ..,
+    ] = effects.as_slice()
+    else {
+        panic!("unexpected effects {effects:#?}");
+    };
+    assert_eq!(to, &[HOST]);
+    assert!(state.participants.iter().all(|p| p.id != GUEST));
+    assert_eq!(
+        rest,
+        [
+            Effect::StopRecordingTrack { who: GUEST, track },
+            Effect::SfuCloseTracks {
+                who: HOST,
+                session: session(HOST, SessionKind::Subscribe),
+                mids: vec![mid]
+            },
+        ]
+    );
+
+    // The token no longer resumes: the client starts a fresh join.
+    let effects = room.client(NEW_SOCKET, resume_join(token));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Rebind { .. })));
+    assert_eq!(presence(&room, NEW_SOCKET), Some(Presence::Connecting));
+}
+
+#[test]
+fn a_socket_lost_before_joining_leaves_at_once() {
+    // Waiting for the host of a scheduled room.
+    let (mut room, _) = Room::new();
+    room.join(GUEST, false, true);
+    assert_eq!(room.apply(Event::SocketClosed { who: GUEST }), []);
+    assert_eq!(presence(&room, GUEST), None);
+
+    // Knocking on a locked room.
+    room.enter(HOST, true);
+    room.client(HOST, ClientMsg::Lock { on: true });
+    room.join(OTHER, false, true);
+    room.apply(Event::SocketClosed { who: OTHER });
+    assert_eq!(presence(&room, OTHER), None);
+
+    // Awaiting consent to a recording.
+    room.client(HOST, ClientMsg::Lock { on: false });
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    room.join(GUEST, false, false);
+    assert_eq!(presence(&room, GUEST), Some(Presence::AwaitingConsent));
+    room.apply(Event::SocketClosed { who: GUEST });
+    assert_eq!(presence(&room, GUEST), None);
+
+    // Connecting: the client has no resume token before its welcome.
+    room.join(OTHER, false, true);
+    assert_eq!(presence(&room, OTHER), Some(Presence::Connecting));
+    room.apply(Event::SocketClosed { who: OTHER });
+    assert_eq!(presence(&room, OTHER), None);
+}
+
+#[test]
+fn kick_and_end_during_the_grace_end_it() {
+    let mut room = meeting_room();
+    room.apply(Event::SocketClosed { who: GUEST });
+    let effects = room.client(HOST, ClientMsg::Kick { who: GUEST });
+    assert!(effects.contains(&Effect::CloseSocket { who: GUEST }));
+    assert_eq!(presence(&room, GUEST), None);
+    assert_eq!(room.state.next_alarm(), None);
+
+    let mut room = meeting_room();
+    room.apply(Event::SocketClosed { who: GUEST });
+    let effects = room.client(HOST, ClientMsg::End);
+    assert_eq!(effects.last(), Some(&Effect::EndMeeting));
+    assert_eq!(room.state.view().phase, Phase::Ended);
+}
+
+#[test]
+fn a_recording_started_during_the_grace_is_announced_on_resume() {
+    const NEW_SOCKET: ParticipantId = ParticipantId(9);
+    let (mut room, _) = Room::new();
+    room.enter(HOST, true);
+    room.join(GUEST, false, false);
+    room.connect(GUEST);
+    let token = room.state.participants[&GUEST].resume.clone();
+    room.apply(Event::SocketClosed { who: GUEST });
+    // The consent request and the mute go to the lost socket.
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    assert_eq!(muted(&room, GUEST), Some(true));
+
+    let effects = room.client(NEW_SOCKET, resume_join(token));
+    let [
+        Effect::Broadcast { to, .. },
+        Effect::CloseSocket { who: GUEST },
+        Effect::Rebind { .. },
+        Effect::Send {
+            to: GUEST,
+            msg: ServerMsg::Welcome { state, .. },
+        },
+        Effect::Send {
+            to: GUEST,
+            msg: ServerMsg::ConsentRequired,
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("unexpected effects {effects:#?}");
+    };
+    assert_eq!(to, &[HOST]);
+    assert!(state.recording.is_some());
+    let guest = state.participants.iter().find(|p| p.id == GUEST);
+    assert!(guest.is_some_and(|p| p.muted && !p.reconnecting));
 }

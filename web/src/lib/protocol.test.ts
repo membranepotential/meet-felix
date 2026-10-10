@@ -32,7 +32,8 @@ const room: RoomView = {
 			consentRecording: true,
 			presence: 'joined',
 			tracks: ['audio', 'video'],
-			muted: true
+			muted: true,
+			reconnecting: true
 		}
 	]
 };

@@ -22,6 +22,7 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     assert!(RoomView::DECL.contains("recording?: Recording;"));
     assert!(RoomView::DECL.contains("recordingPolicy: RecordingPolicy;"));
     assert!(RoomView::DECL.contains("phase: Phase;"));
+    assert!(crate::ParticipantView::DECL.contains("reconnecting: boolean;"));
     assert!(crate::Phase::DECL.contains(r#""scheduled" | "live" | "ended""#));
     assert!(crate::Presence::DECL.contains(r#""waitingForHost""#));
     assert!(ClientMsg::DECL.contains(r#"{ type: "unpublish"; kind: TrackKind }"#));
@@ -62,6 +63,7 @@ fn every_server_msg_round_trips_through_json() {
             presence: Presence::Joined,
             tracks: vec![TrackKind::Audio, TrackKind::Video],
             muted: true,
+            reconnecting: true,
         }],
     };
     let all = [

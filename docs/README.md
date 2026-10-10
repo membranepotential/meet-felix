@@ -13,7 +13,7 @@ is tested, and what changed when.
 
 | Document | Read it for |
 |---|---|
-| [Design decisions](#design-decisions) | The decision records, D1–D33, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
+| [Design decisions](#design-decisions) | The decision records, D1–D35, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
 | [architecture/](architecture/README.md) | The cross-cutting decisions: platform, core and shells, browser stack, backend, EU location; plus goal, non-goals, component map, phases and risks. |
 | [cost/](cost/README.md) | What it costs per month and per meeting-hour, against Google Workspace. |
 | [DEVLOG.md](DEVLOG.md) | The running log, newest first: what changed, why, what's next. |
@@ -28,7 +28,8 @@ in the repo.
 ## Design decisions
 
 Each decision lives with the feature it shapes. The IDs are stable; cite them
-as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
+as "D12" in code comments, commits and docs. All were taken on 2026-10-09,
+except D35 (2026-10-10).
 
 | # | Decision | Home |
 |---|---|---|
@@ -66,6 +67,7 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [D32](architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09) | One owner is the only host; everyone else is a guest | [architecture/](architecture/README.md) |
 | [D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09) | A dead SFU session is replaced, not retried | [media/](media/README.md) |
 | [D34](ui/README.md#d34-cards-have-no-coloured-bar-on-their-left-edge-2026-10-09) | Cards have no coloured bar on their left edge | [ui/](ui/README.md) |
+| [D35](core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10) | A dropped socket gets a minute before it counts as leaving | [core/](core/README.md) |
 
 ## Features with their own docs
 
@@ -74,7 +76,7 @@ as "D12" in code comments, commits and docs. All were taken on 2026-10-09.
 | [links/](links/README.md) | Three-word meeting ids, who creates meetings, how a meeting ends, transcript links | [D6](links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)–[D9](links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09) |
 | [media/](media/README.md) | SFU sessions, simulcast, codecs, browser capabilities, iOS handling, replacing a dead session | [D10](media/README.md#d10-each-participant-has-separate-publish-and-subscribe-sessions-2026-10-09)–[D14](media/README.md#d14-calls-work-in-a-plain-browser-tab-and-ios-gets-defensive-handling-2026-10-09), [D33](media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09) |
 | [recording/](recording/README.md) | Consent, per-speaker capture, chunks in R2, the post-meeting transcript, compressed copies of the audio, retention, sharing | [D15](recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)–[D19](recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09) |
-| [core/](core/README.md) | The functional core: state, events, effects, invariants | [D20](core/README.md#d20-core-first-2026-10-09) |
+| [core/](core/README.md) | The functional core: state, events, effects, invariants, reconnecting | [D20](core/README.md#d20-core-first-2026-10-09), [D35](core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10) |
 | [cost/](cost/README.md) | The cost model and the Google Workspace baseline | [D21](cost/README.md#d21-build-and-measure-no-further-price-analysis-2026-10-09) |
 | [ui/](ui/README.md) | Phone-first pages, dark theme, the owner's password and past-meetings page, the guest pre-join, the meeting screen, the transcript page | [D22](ui/README.md#d22-phones-and-tablets-are-fully-supported-and-the-start-and-pre-join-pages-are-laid-out-for-phones-first-2026-10-09)–[D31](ui/README.md#d31-the-transcript-page-shows-speaker-labelled-paragraphs-with-wall-clock-times-2026-10-09) |
 

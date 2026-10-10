@@ -277,8 +277,8 @@ pub fn is_stale(now: Millis, since: Millis, last_ping: Option<Millis>) -> bool {
 #[cfg(test)]
 mod tests {
     use meeting_core::{
-        ClientMsg, DisplayName, MeetingId, ResumeToken, SCHEDULED_TTL_MS, SessionId, SessionKind,
-        SfuReply, TranscriptRef,
+        ClientMsg, DisplayName, LEAVE_GRACE_MS, MeetingId, ResumeToken, SCHEDULED_TTL_MS,
+        SessionId, SessionKind, SfuReply, TranscriptRef,
     };
 
     use super::*;
@@ -370,6 +370,17 @@ mod tests {
             open.alarm, None,
             "nothing is due in a room with a joined host"
         );
+    }
+
+    #[test]
+    fn a_dropped_socket_arms_the_grace_alarm_and_keeps_the_room_open() {
+        let dropped = T0.after(1_000);
+        let (record, _) = room_with_host().step(dropped, Event::SocketClosed { who: HOST });
+        assert_eq!(record.phase(), Phase::Live);
+        let Record::Open(open) = record else {
+            panic!("a host in the grace period keeps the room open")
+        };
+        assert_eq!(open.alarm, Some(dropped.after(LEAVE_GRACE_MS)));
     }
 
     #[test]

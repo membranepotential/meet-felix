@@ -202,6 +202,10 @@ pub struct ParticipantView {
     /// host ([`ClientMsg::Mute`]), or because the room records without their consent. A muted
     /// microphone may still publish its (silent) audio track.
     pub muted: bool,
+    /// Whether their socket dropped and the room waits up to [`crate::LEAVE_GRACE_MS`] for their
+    /// client to come back. They stay joined meanwhile, and their tracks stay listed, but what
+    /// others receive from them may be frozen or silent.
+    pub reconnecting: bool,
 }
 
 /// The public snapshot of a room: no secrets, no SDP, no SFU sessions.

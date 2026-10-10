@@ -12,6 +12,7 @@ behaviour starts here. The decision to build it this way is
 Decisions on this page:
 
 - [D20: Core first (2026-10-09)](#d20-core-first-2026-10-09)
+- [D35: A dropped socket gets a minute before it counts as leaving (2026-10-10)](#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)
 
 Code: [`crates/meeting-core/src/lib.rs`](../../crates/meeting-core/src/lib.rs)
 (the rules, in its module comment), [`step.rs`](../../crates/meeting-core/src/step.rs),
@@ -38,7 +39,8 @@ time is an extra argument because the core reads no clock.
   (name, role, recording consent, microphone switch, resume token, and
   connection state:
   waiting for the host, knocking, awaiting consent, connecting, joined with
-  their SFU sessions and tracks, or left), the lock, the recording status,
+  their SFU sessions and tracks and, while their socket is gone, since when
+  (see [Reconnecting](#reconnecting)), or left), the lock, the recording status,
   the transcript token, and the phase with its timer (see
   [Phases](#phases)): scheduled since its creation, live with since when the
   room is empty, or ended at a time. The public part every client sees is the
@@ -50,7 +52,9 @@ time is an extra argument because the core reads no clock.
   the authenticated owner, and a fresh `ResumeToken` made by the shell from
   random bytes, see [Reconnecting](#reconnecting)), an SFU reply
   to an earlier effect (`Event::Sfu`), a socket that closed without a `Leave`
-  (`Event::SocketClosed`), or the alarm the core asked for
+  (`Event::SocketClosed`; for a joined participant it starts the grace period
+  of [D35](#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)),
+  or the alarm the core asked for
   (`Event::AlarmFired`).
 - **`Effect`**: something the shell must do, in list order. Send to one
   socket or several (`Send`, `Broadcast`), close a socket (`CloseSocket`),
@@ -87,7 +91,8 @@ simulcast layer policy.
 SFU reply, it loads `RoomState` from its SQLite storage, calls `step`, stores
 the new state, and carries out the effects in order:
 
-- `Send` and `Broadcast` write to the hibernating WebSockets.
+- `Send` and `Broadcast` write to the hibernating WebSockets. A message to a
+  participant without an open socket goes nowhere.
 - The `Sfu*` effects become HTTPS calls to the SFU through `worker::Fetch`;
   each reply goes back into `step` as `Event::Sfu`.
 - `CloseSocket` closes the socket and forgets it: the shell reports no
@@ -207,11 +212,18 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   If the SFU does not answer within `NEGOTIATION_TIMEOUT_MS`, the room drops
   the offer and sends `Error { PublishFailed }`, so the client may offer again
   (2026-10-09).
+- A joined participant whose socket closes without a `Leave` keeps their
+  place, SFU sessions, tracks and recording for `LEAVE_GRACE_MS` (one
+  minute), shown to the others as reconnecting; a client that resumes in
+  that time carries on as if nothing happened, and otherwise the participant
+  leaves when the minute is over. Anyone not yet joined leaves at once
+  ([D35](#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)).
 - A live room ends when a host ends it, or after `EMPTY_ROOM_TIMEOUT_MS` (two
   minutes) without admitted (connecting or joined) participants. Knocking
   guests and guests awaiting consent do not count, so their coming and going
-  does not move the end. A scheduled room has no empty timer; it ends only
-  after `SCHEDULED_TTL_MS` (60 days) without a host
+  does not move the end; a participant in their grace period counts. A
+  scheduled room has no empty timer; it ends only after `SCHEDULED_TTL_MS`
+  (60 days) without a host
   ([D8](../links/README.md#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09)).
 
 ## The alarm
@@ -232,6 +244,9 @@ for each candidate time:
   replacement session got no reply within `NEGOTIATION_TIMEOUT_MS` (it then
   counts as failed), or failed and is due again (`SUBSCRIBE_RETRY_MS` after
   the failure).
+- `Grace(participant)`: that joined participant's socket has been gone for
+  `LEAVE_GRACE_MS`; they leave
+  ([D35](#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)).
 
 `step` emits `SetAlarm` when this time changes, and after every
 `AlarmFired`, because the shell's alarm is used up once it fires. It never
@@ -252,16 +267,57 @@ participant has not left, the core emits `CloseSocket` for the old socket and
 as it would answer a repeated `Join` (`Welcome` when joined). Consent,
 tracks and the mute flag stay as they were, and so does the role, except that a guest whose
 place the owner's socket takes becomes a host (2026-10-09, see
-[Phases](#phases)). Otherwise, for example after the shell reported
-`SocketClosed` for the old socket, the `Join` is a fresh join.
+[Phases](#phases)). Otherwise, for example after the participant's grace
+period ended, the `Join` is a fresh join.
 
-The Worker reports a closed socket as `SocketClosed` at once, so a client
-that replaces its socket on purpose ("Join as host" after a login) must not
-close the old one first: the room would often see that close before the new
-`Join` and let the participant leave. The web client's
-`SignalingClient.reconnect()` keeps the old socket open, the resuming `Join`
-makes the room close it, and the client closes it itself once the room's
-first answer arrives on the new socket (2026-10-10).
+**The grace period** (2026-10-10,
+[D35](#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)).
+The Worker reports a closed socket as `SocketClosed` at once, and a socket
+whose client stopped pinging for a minute from its alarm. For a joined
+participant, `SocketClosed` does not mean leaving: the core notes since when
+the socket is gone (`socket_lost` in `Connection::Joined`) and keeps the
+participant with their SFU sessions, their published and received tracks,
+and the recording of their audio, for `LEAVE_GRACE_MS` (one minute). The
+room view shows them with `reconnecting: true`, and the others' tiles say
+"Reconnecting…". The grace ends in one of three ways:
+
+- The client resumes with its token: the core clears the mark, and the
+  `Welcome` carries the unchanged epochs, so the client keeps both peer
+  connections.
+- `LEAVE_GRACE_MS` pass: the `Grace` alarm makes the participant leave as a
+  `Leave` would; their tracks close on every subscriber, the recording of
+  their audio stops, and if nobody admitted is left, the empty time starts
+  now, not when the socket dropped. Their token then starts a fresh join.
+- A host kicks them or ends the meeting, as for anyone in the room; the
+  `Kicked` or `Ended` goes nowhere. A kicked client's token no longer
+  resumes, so it comes back as a new guest; a client of an ended meeting
+  gets HTTP 410 and the meeting's end page.
+
+A second report for the same socket (the runtime may report an error and a
+close) changes nothing. A participant who is not joined yet (waiting for the
+host, knocking, awaiting consent, or connecting) leaves at once: they
+publish nothing, and their client holds no resume token, which only the
+`Welcome` carries.
+
+During the grace, what the room sends to the participant goes nowhere: the
+`State` broadcast skips them, and the shell delivers a `Send` to a
+participant without a socket to nobody. The resume catches up: the
+`Welcome` carries the current view, with a recording that started and the
+mute flag a host set meanwhile; a joined participant the room records
+without consent gets `ConsentRequired` again after it; and a subscribe offer
+still waiting for its answer fails at once (`SfuCloseTracks` for its
+transceivers and `Error { SubscribeFailed }`), so its tracks are offered
+again after `SUBSCRIBE_RETRY_MS` instead of after the offer's timeout. A
+`PublishAnswer` sent during the grace is not repeated: the browser's offer
+times out after 20 seconds and asks the user to turn the device off and on.
+
+Before the grace period existed, a `Join` with the token had to reach the
+room before the room noticed the old socket was gone, so a client that
+replaces its socket on purpose ("Join as host" after a login) must not close
+the old one first. The web client's `SignalingClient.reconnect()` keeps the
+old socket open, the resuming `Join` makes the room close it, and the client
+closes it itself once the room's first answer arrives on the new socket
+(2026-10-10). The grace period makes this a second safeguard; both stay.
 
 After every `Welcome`, the web client makes its microphone switch and the
 room's mute flag agree, and muting wins: if the room shows it muted (a host
@@ -323,7 +379,21 @@ after every step that:
   for it and awaits it; before that they keep waiting until they leave, the
   room expires, or the owner's socket makes them a host;
 - in a live room, the empty timer runs exactly while nobody is admitted, and
-  the shell's alarm is always set to the room's next due time.
+  the shell's alarm is always set to the room's next due time;
+- a joined participant whose socket closes keeps everything for the grace
+  period: in that step the room only marks them (the state is otherwise
+  unchanged, and only a `State` broadcast to the others and the alarm
+  follow), and a second report changes nothing; a participant not yet
+  joined leaves at once;
+- the mark never moves later, and no grace outlives an alarm at or after its
+  end;
+- a resume leaves the state as it was, except that the grace ends, an
+  unanswered subscribe offer fails, and the owner's socket makes a guest a
+  host;
+- the room shows exactly the participants whose socket the shell lost as
+  reconnecting, and every other joined client's last view is the current
+  one; recording goes on during the grace, and the empty timer waits for it
+  to end.
 
 CI runs these tests from phase 1 on ([TESTING.md](../TESTING.md)).
 
@@ -338,3 +408,55 @@ server and in the browser. Shells stay thin, so they are cheap to change or
 replace ([D2](../architecture/README.md#d2-a-pure-rust-core-with-imperative-shells-2026-10-09)).
 A change that puts meeting logic into a shell must update this decision in the
 same commit.
+
+## D35: A dropped socket gets a minute before it counts as leaving (2026-10-10)
+
+When a joined participant's signaling socket closes without a `Leave`, the
+room keeps them for `LEAVE_GRACE_MS` (one minute): their place, role,
+consent, SFU sessions, published and received tracks, and the recording of
+their audio all stay, and the room view marks them `reconnecting`. A client
+that resumes with its token within the minute carries on with the same
+participant id and the same peer connections. Otherwise the participant
+leaves when the minute is over, exactly as on a `Leave`. A participant not
+yet joined leaves at once. The web client sends `Leave` when its page is
+closed or reloaded (`pagehide` without `persisted`), so a deliberate exit
+does not linger. The rules are under [Reconnecting](#reconnecting).
+
+Why: in the second real test (2026-10-09) a phone on mobile data took part;
+a phone's socket drops when the network changes or the browser goes to the
+background. Before, the room treated every closed socket as leaving: the
+participant's tracks closed for everyone, the recorder closed their adapter,
+and the client came back as a new participant with a new id, new SFU
+sessions and a new recording generation, unless its new `Join` happened to
+reach the room before the close did. A socket drop is often not a media
+drop: the peer connections run on their own, and the SFU lets a session
+that lost connectivity be reused for 30 seconds
+([research 02](../research/02-cloudflare-deep-dive.md));
+[D33](../media/README.md#d33-a-dead-sfu-session-is-replaced-not-retried-2026-10-09)
+replaces a session that died.
+
+Why one minute: the client's reconnect backoff reaches its seventh attempt
+after about 35 seconds at worst, which leaves one negotiation timeout of
+slack; it equals the Worker's keepalive tolerance for a silent socket, so a
+socket in doubt gets one minute under either rule; and a longer grace makes
+closed tabs and abandoned laptops linger as "Reconnecting…" tiles. A socket
+that dies silently is found by the keepalive after a minute, so it can show
+for up to two. The Worker's alarm reports the silent sockets before it feeds
+`AlarmFired`, and drops a report whose socket a resume has closed meanwhile:
+`AlarmFired` can wait on SFU calls, during which a client may resume on a new
+socket, and the late report must not mark the resumed participant as lost.
+
+Why not leave at once on a "clean" close (code 1000 or 1001): which code a
+phone's browser sends when the system drops a backgrounded socket is
+undocumented; if it is 1001, the case the grace exists for would still
+leave at once. The Worker logs the code and `was_clean` of every close
+(`websocket_close`) to settle this later. In the e2e runs of 2026-10-10,
+local `wrangler dev` reported 1000 and 1001, both clean, and the
+application code 4000 that the browser test uses for a dropped socket.
+
+Known gaps: a kick during the grace reaches nobody, and the kicked client
+comes back as a new guest (the host can kick again or lock the room); a
+`PublishAnswer` sent during the grace is lost, and the browser asks the user
+to turn the device off and on after its 20-second timeout; subscribers see
+a frozen last frame until the participant is back or gone, which the tile
+explains.

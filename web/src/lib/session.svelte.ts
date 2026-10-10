@@ -4,6 +4,7 @@
  * inside the Join tap, disposed when the stay is over.
  */
 import { untrack } from 'svelte';
+import { on } from 'svelte/events';
 import { getIceServers, getMeeting } from './api.ts';
 import {
 	awaitingConsent,
@@ -158,6 +159,14 @@ export class Session {
 			$effect(() => {
 				if (this.#media.micStalled) untrack(() => this.toasts.show(MIC_STALLED, 'alert'));
 			});
+			// Closing the tab or reloading leaves at once; otherwise the room would keep our
+			// place for its grace period (D35) and show us as reconnecting. A page kept in the
+			// back/forward cache (`persisted`) may come back, so it does not leave.
+			$effect(() =>
+				on(window, 'pagehide', (event) => {
+					if (!event.persisted) this.#signaling.send({ type: 'leave' });
+				})
+			);
 			// Everyone sees our mic switch. A report that could not go out (the socket was down)
 			// is made on the next welcome instead of adopting the room's view (`#welcomed`).
 			$effect(() => {

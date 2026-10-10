@@ -13,6 +13,11 @@
 		/** The room records without this person's consent; shown only to hosts. */
 		unrecorded: boolean;
 		/**
+		 * Their connection to the room dropped and the room keeps their place for a minute while
+		 * they come back (D35). What we receive from them may be frozen or silent meanwhile.
+		 */
+		reconnecting: boolean;
+		/**
 		 * Reads how loud this person's voice is now, 0..1 (see `media/speaking.ts`). A function,
 		 * so a level change re-renders only the ring and bars, not the tile list (which would
 		 * rebind the video).
@@ -89,7 +94,7 @@
 </script>
 
 <figure
-	class={['tile', variant, speaking && 'speaking']}
+	class={['tile', variant, speaking && 'speaking', tile.reconnecting && 'reconnecting']}
 	title={variant === 'chip' ? label : undefined}
 	{@attach tile.layerTrack && reportWidth(tile.layerTrack)}
 >
@@ -141,6 +146,10 @@
 		<span class="name">{label}</span>
 		<!-- Not on strip tiles: their caption is too narrow for the name and the label. -->
 		{#if tile.unrecorded && variant !== 'strip'}<span class="unrecorded">Not recorded</span>{/if}
+		<!-- Strip captions are too narrow for it; the dimmed picture shows it there. -->
+		{#if tile.reconnecting}
+			<span class={['status', variant === 'strip' && 'visually-hidden']}>Reconnecting…</span>
+		{/if}
 		{#if speaking}<span class="visually-hidden">(speaking)</span>{/if}
 		{#if tile.host}<span class="visually-hidden">(host)</span>{/if}
 	</figcaption>
@@ -218,6 +227,13 @@
 
 	.mirror {
 		transform: scaleX(-1);
+	}
+
+	/* A frozen last frame reads as stale, not as someone sitting still. */
+	.reconnecting video,
+	.reconnecting .avatar {
+		opacity: 0.4;
+		filter: grayscale(1);
 	}
 
 	.avatar {
@@ -319,7 +335,8 @@
 		color: var(--signal);
 	}
 
-	.unrecorded {
+	.unrecorded,
+	.status {
 		flex: none;
 		color: var(--lichen);
 		font-size: 0.8125rem;

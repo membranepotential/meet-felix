@@ -31,6 +31,12 @@ pub const NEGOTIATION_TIMEOUT_MS: u64 = 15 * 1000;
 /// before it asks again for a replacement session after the SFU failed to create one.
 pub const SUBSCRIBE_RETRY_MS: u64 = 3 * 1000;
 
+/// How long a joined participant whose socket closed without a `Leave` keeps their place, SFU
+/// sessions and tracks before the room lets them leave, so their client can take the place again
+/// from a new socket (D35 in `docs/core`). It equals the worker's keepalive tolerance, so a socket
+/// in doubt gets one minute under either rule.
+pub const LEAVE_GRACE_MS: u64 = 60 * 1000;
+
 /// The version of the recording notice the pre-join screen shows; a consent records it. Raise it
 /// whenever the notice's text changes in substance.
 pub const NOTICE_VERSION: u32 = 1;
@@ -121,6 +127,10 @@ pub(crate) enum Connection {
         subscribe: SessionSlot<SubscribeSession>,
         /// The epochs of the sessions in the slots, or of the lost ones while replacing.
         epochs: SessionEpochs,
+        /// Since when the participant's socket is gone, while they wait to resume; `None` while
+        /// connected. Records stored before the field existed load as connected.
+        #[serde(default)]
+        socket_lost: Option<Millis>,
     },
     Left,
 }
@@ -234,6 +244,8 @@ pub(crate) enum AlarmReason {
     /// The request for a participant's replacement session of this kind timed out, or is due to
     /// be sent again.
     Replace(ParticipantId, SessionKind),
+    /// A joined participant's socket has been gone for [`LEAVE_GRACE_MS`]: they leave.
+    Grace(ParticipantId),
 }
 
 impl RoomState {
@@ -333,6 +345,7 @@ impl RoomState {
                     presence,
                     tracks,
                     muted: p.muted,
+                    reconnecting: p.connection.socket_lost().is_some(),
                 })
             })
             .collect();
@@ -473,6 +486,10 @@ impl RoomState {
             } => Some((since.after(EMPTY_ROOM_TIMEOUT_MS), AlarmReason::EmptyRoom)),
             Lifecycle::Live { empty_since: None } | Lifecycle::Ended { .. } => None,
         };
+        let grace = self.participants.iter().filter_map(|(&who, p)| {
+            let lost = p.connection.socket_lost()?;
+            Some((lost.after(LEAVE_GRACE_MS), AlarmReason::Grace(who)))
+        });
         let sessions = self.joined().flat_map(|(who, publish, subscribe)| {
             let replace = |kind, r: &Replacement| Some((r.due(), AlarmReason::Replace(who, kind)));
 
@@ -493,7 +510,7 @@ impl RoomState {
             };
             publish.into_iter().chain(subscribe)
         });
-        end.into_iter().chain(sessions)
+        end.into_iter().chain(grace).chain(sessions)
     }
 
     /// The time for [`Effect::SetAlarm`]: the earliest of [`RoomState::alarms`].
@@ -648,6 +665,14 @@ impl Connection {
     /// arrival) and has not left.
     pub(crate) fn is_admitted(&self) -> bool {
         matches!(self, Self::Connecting { .. } | Self::Joined { .. })
+    }
+
+    /// Since when a joined participant's socket is gone; `None` while connected or not joined.
+    pub(crate) fn socket_lost(&self) -> Option<Millis> {
+        match self {
+            Self::Joined { socket_lost, .. } => *socket_lost,
+            _ => None,
+        }
     }
 }
 

@@ -50,9 +50,17 @@ renegotiation and recording events and check the invariants listed in
 tracks, one offerer per session, no recording without a broadcast, and no
 host locked out. They also check that every joined client's last snapshot
 equals the current room view, that only consenting participants are
-recorded, and that `RoomState` survives a JSON round trip. A second test
+recorded, and that `RoomState` survives a JSON round trip. Since 2026-10-10
+the simulator also plays the shell's side of a dropped socket: it delivers
+nothing to a participant whose socket closed and sends nothing from them
+until they resume, and it checks the grace-period invariants of
+[D35](core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)
+(a drop only marks a joined participant, the mark never moves later, no
+grace outlives its alarm, a resume changes nothing else, and the room shows
+exactly the dropped participants as reconnecting). A second test
 checks that the random sequences actually reach rooms that receive tracks,
-record and end, since otherwise the properties would prove little. There is
+record, end, and lose, resume and expire sockets in the grace period,
+since otherwise the properties would prove little. There is
 no CI yet; phase 1 adds it, running these tests on every push.
 
 ## End-to-end tests (Playwright)
@@ -192,7 +200,7 @@ Protocol layer (`web/e2e/protocol/`, Node only, about 25 s):
 |---|---|
 | `owner-session.spec.ts` | `POST /api/login` (401 wrong password, 400 without one, 204 with the cookie `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`), `GET /api/me` (cookie, none, forged), `POST /api/logout` |
 | `http-routes.spec.ts` | `POST /api/new` (401 without or with a wrong secret, 201 with the secret or the cookie, three words and nothing else), `GET /api/meeting/{words}` (policy, `scheduled`, case-insensitive, 404), 426 without upgrade, `GET /api/ice` (STUN for a known meeting, 404 otherwise) |
-| `lifecycle.spec.ts` | A guest waits in a scheduled room despite a forged `x-meet-owner`; the owner joins as host, the room goes live, the guest is let in; ping and pong; a malformed frame; leaving; resume with the token; "join as host" with the cookie; `End` closes every socket, refuses the next one and releases the words; the room keeps its participants through an idle phase |
+| `lifecycle.spec.ts` | A guest waits in a scheduled room despite a forged `x-meet-owner`; the owner joins as host, the room goes live, the guest is let in; ping and pong; a malformed frame; leaving; a dropped socket keeps the participant and its tracks, shown `reconnecting`, until the resume with the token brings it back with the same id and epochs; a knocking guest whose socket closes is gone at once; resume with the token; "join as host" with the cookie; `End` closes every socket, refuses the next one and releases the words; the room keeps its participants through an idle phase |
 | `consent-recording.spec.ts` | Recording from the host's arrival in a `fromStart` meeting, the transcript token in `Ended`; a guest without consent waits in `awaitingConsent` until `SetConsent`; `hostDecides`: recording on and off by the host, `ConsentRequired` and `Muted` for a guest without consent; a guest cannot record |
 | `negotiation.spec.ts` | `PublishAnswer` from the SFU; the first pull's `not_found_track_error` reaches the guest as a `SubscribeOffer` without tracks, the retry delivers the track; answers reach `renegotiate`; `Unpublish` closes the track on the publish and the subscribe session; a third participant's track reaches everyone |
 | `host-controls.spec.ts` | Lock, knock, admit; kick (with the SFU holding `tracks/close` while the kicked client sends `Join` on the same socket, which must not bring it back); a guest cannot kick; a host's mute |
@@ -207,7 +215,7 @@ Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
 | `owner.spec.ts` | Login on `/` (wrong password, then the owner area), creating a meeting, logout; `/meetings` shows Scheduled, Live and Ended with the transcript link; "Join as host" inside a live meeting: the owner, joined as a guest from a browser without the cookie while their own host browser is in the call, logs in through the control bar's dialog, gets the host controls, keeps the participant id, the typed name and both peer connections, and the host never sees them leave |
 | `call.spec.ts` | The owner's pre-join (name prefilled, "You join as host"); a guest's pre-join (recording notice, "not started yet") and lobby, let in when the host joins; tiles with names, the recording badge, host controls only for the host; mute, camera off and on (the guest's view of the host follows the room), a host muting a guest; the device pickers on the pre-join; switching camera and microphone in the "Devices" dialog swaps the tracks on the publish connection's senders without an unpublish or a new publish offer, and the guest still sees the host's video (Chromium only); screen share with the expand button, control bar visible while expanded for both sides (Chromium only); leave, end for all, the ended page with the transcript link, a late join |
 | `consent.spec.ts` | `hostDecides`: the host starts recording, the guest in the call gets the consent dialog, the host sees "Guest has not accepted the recording yet" and "Not recorded" on the guest's tile, guests see neither; a late guest without consent waits outside and joins the notice ("Guest and Late have not…"); each accept shortens it, and it disappears when both accepted |
-| `recovery.spec.ts` | The SFU loses the guest's subscribe session: `SubscribeReset`, a new session, negotiation on it; a failed peer connection (simulated in the page): "Reconnecting to the others…", `ResetSession`, a new session; a dropped socket (through `page.routeWebSocket`): the "Reconnecting…" pill, then a `Join` with the resume token and the same participant |
+| `recovery.spec.ts` | The SFU loses the guest's subscribe session: `SubscribeReset`, a new session, negotiation on it; a failed peer connection (simulated in the page): "Reconnecting to the others…", `ResetSession`, a new session; a dropped socket (through `page.routeWebSocket`, closed with code 4000 because the browser rejects 1001 there): the "Reconnecting…" pill for the guest and a dimmed "Reconnecting…" tile on the host's side, then a `Join` with the resume token, the same participant, and both marks gone |
 | `real-sfu.spec.ts` (`@real`) | Three people through the real SFU: each receives the others' video (bytes and decoded frames per tile) and audio; a small window gets a smaller simulcast layer; a screen share reaches the others; 60 s without a new socket or session reset while media keeps flowing |
 
 ### Adding a test
@@ -274,7 +282,8 @@ passes, 12 and 20 kHz are attenuated more than 40 dB, a constant stays
 constant), the Opus encoder (bitrate cap, pre-skip measured with a click),
 the Ogg writer (read back with `ogg::PacketReader`), the capture pipeline
 (30 s cut, spooling every 1.5 s, holes, silent chunks), the job's retry rules
-and gaps, Whisper's reply filter, and the versioned room record.
+and gaps, Whisper's reply filter, and the versioned room record (including
+the grace alarm a dropped socket arms, 2026-10-10).
 
 [`crates/worker/recorder-e2e/run.mjs`](../crates/worker/recorder-e2e/run.mjs)
 drives a recorded meeting against `wrangler dev` (command in the script's

@@ -286,3 +286,8 @@ What the room does (`meeting-core`, [D20](../core/README.md#d20-core-first-2026-
 - A client that reconnects compares the epochs in its `Welcome` with its
   connections and replaces any whose session the room replaced while the
   socket was down.
+- A dropped signaling socket alone replaces nothing: the room keeps both
+  sessions and all tracks through the participant's one-minute grace period
+  ([D35](../core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)),
+  and a replacement during it reaches the client through the epochs in the
+  `Welcome` (2026-10-10).

@@ -171,8 +171,12 @@ participant for two minutes (`EMPTY_ROOM_TIMEOUT_MS` = 2 × 60 × 1000 ms).
 Admitted means connecting or joined. Guests who knock on a locked room or
 wait for their own consent to recording do not count: the empty time starts
 when the last admitted participant leaves, and a guest who knocks and leaves
-neither stops nor restarts it. A DO alarm measures the empty time
-([core/](../core/README.md#the-alarm)). When the room ends, the core closes every
+neither stops nor restarts it. A joined participant whose socket dropped
+still counts during their one-minute grace period, so the empty time starts
+when that grace ends, not when the socket dropped (2026-10-10,
+[D35](../core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)).
+A DO alarm measures the empty time ([core/](../core/README.md#the-alarm)).
+When the room ends, the core closes every
 socket, stops a running recording, releases the words, and emits
 `Effect::EndMeeting` last. After that the room accepts no more sockets, and
 the transcript job starts.

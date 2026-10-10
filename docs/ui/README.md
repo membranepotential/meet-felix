@@ -234,6 +234,16 @@ words must say what the press means.
   room then has two hosts, both the owner. Why: STATUS of 2026-10-10; the
   owner on a phone browser without the cookie could become host only by
   leaving, and only from the pre-join or the lobby.
+- **A participant whose connection dropped keeps their tile, marked.** As
+  built on 2026-10-10: while the room waits for a participant to come back
+  ([D35](../core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)),
+  their camera tile stays, its caption says "Reconnecting…" (on strip tiles
+  only for screen readers, as the caption is too narrow), and the picture
+  or the initials are dimmed and grey, so a frozen last frame reads as
+  stale. Their own screen-share tile and our own tile carry no mark; our own
+  drop shows as the "Reconnecting…" notice above the control bar. Closing
+  or reloading the tab sends `Leave` first (`pagehide`), so the others do
+  not see a tile linger for a minute.
 
 ## D29: A shared screen keeps people in a column on desktops and in round chips on phones (2026-10-09)
 

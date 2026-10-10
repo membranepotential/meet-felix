@@ -30,10 +30,14 @@
 //!   by a new one, not retried. A lost publish session takes its tracks with it, for everyone.
 //!   The client hears [`ServerMsg::SubscribeReset`] or [`ServerMsg::PublishReset`] once the new
 //!   session exists; a failed request for it is sent again after [`SUBSCRIBE_RETRY_MS`].
-//! - A client whose socket dropped takes its place again with its [`ResumeToken`].
+//! - A client whose socket dropped takes its place again with its [`ResumeToken`]. A joined
+//!   participant whose socket closes without a `Leave` keeps their place, sessions and tracks
+//!   (and their recording) for [`LEAVE_GRACE_MS`], shown as reconnecting; only if no client takes
+//!   the place within that time do they leave. Anyone not yet joined leaves at once.
 //! - A live room ends when a host ends it or after [`EMPTY_ROOM_TIMEOUT_MS`] without admitted
-//!   participants; knocking guests do not count. A scheduled room has no empty timer: it ends
-//!   only if no host joins within [`SCHEDULED_TTL_MS`] of its creation.
+//!   participants; knocking guests do not count, and a participant waiting to resume does. A
+//!   scheduled room has no empty timer: it ends only if no host joins within
+//!   [`SCHEDULED_TTL_MS`] of its creation.
 //!
 //! The [`recording`] module holds the recorder's rules (speaker labels, silence gate, chunk
 //! cuts, holes in the adapter stream) and [`transcript`] the merge of speech segments into the
@@ -68,8 +72,8 @@ pub use protocol::{
 };
 pub use shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 pub use state::{
-    EMPTY_ROOM_TIMEOUT_MS, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState, SCHEDULED_TTL_MS,
-    SUBSCRIBE_RETRY_MS,
+    EMPTY_ROOM_TIMEOUT_MS, LEAVE_GRACE_MS, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState,
+    SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
 };
 pub use step::step;
 #[cfg(feature = "wasm")]

@@ -1,6 +1,7 @@
 /**
  * Recovery in the browser (D33): the SFU loses a session, the browser reports a failed peer
- * connection, and the room's socket drops. In each case the participant stays in the meeting.
+ * connection, and the room's socket drops. In each case the participant stays in the meeting;
+ * while the socket is down, the others see them reconnecting (D35).
  */
 import type { WebSocketRoute } from '@playwright/test';
 import { createMeeting } from '../fixtures/api.ts';
@@ -99,7 +100,7 @@ test('a failed peer connection: the client asks for a new session and says it re
 	await expect.poll(answeredOnNewSession(guest, sfu, before), { timeout: 15_000 }).toBe(true);
 });
 
-test('a dropped socket shows "Reconnecting…" and the same participant comes back', async ({
+test('a dropped socket shows "Reconnecting…" on both sides and the same participant comes back', async ({
 	api,
 	owner,
 	host,
@@ -128,13 +129,21 @@ test('a dropped socket shows "Reconnecting…" and the same participant comes ba
 
 	const dropped = first as { page: WebSocketRoute; server: WebSocketRoute } | null;
 	if (!dropped) throw new Error('the guest never opened a socket');
-	await dropped.server.close({ code: 1001, reason: 'e2e: dropped' });
+	// The server side closes from inside the browser, where `WebSocket.close` accepts only 1000
+	// and 3000–4999: with 1001 the room saw no close until the page closed (2026-10-10).
+	await dropped.server.close({ code: 4000, reason: 'e2e: dropped' });
 	await dropped.page.close({ code: 1001, reason: 'e2e: dropped' });
 	const pill = guest.page.locator('.pill', { hasText: 'Reconnecting…' });
 	await expect(pill).toBeVisible();
+	// The host keeps the guest's tile, marked, while the room waits for the guest.
+	const guestTile = host.tile('Guest');
+	await expect(guestTile).toContainText('Reconnecting…');
+	await expect(guestTile).toHaveClass(/reconnecting/);
 
 	release();
 	await expect(pill).toBeHidden();
+	await expect(guestTile).not.toContainText('Reconnecting…');
+	await expect(guestTile).not.toHaveClass(/reconnecting/);
 	const rejoin = await guest.waitForSent('join', (m) => m.resume !== undefined);
 	expect(rejoin.resume).toBe(guest.received('welcome')[0]?.resume);
 	await expect.poll(() => guest.received('welcome').map((w) => w.you)).toEqual([you, you]);
