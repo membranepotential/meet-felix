@@ -204,6 +204,19 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   `NEGOTIATION_TIMEOUT_MS` (15 seconds), ends with `SfuCloseTracks` for the
   offered transceivers and `Error { SubscribeFailed }` to the client; its
   tracks are requested again after `SUBSCRIBE_RETRY_MS` (3 seconds).
+- A track the SFU did not find is pulled again sooner (2026-10-10). The
+  first pull of a new track usually comes before its publisher's connection
+  is up, and the SFU then answers `not_found_track_error`: it leaves the
+  track out of its offer, or, with no offer at all, fails the call
+  (`FailureCause::TrackNotFound`, which still sends `Error { SubscribeFailed }`).
+  Each wanted track counts these refusals (`Wanted::not_found`); the first
+  `FIRST_PULL_RETRIES` (5) are retried after `FIRST_PULL_RETRY_MS` (500 ms),
+  later ones after `SUBSCRIBE_RETRY_MS`, so a track that never appears costs
+  one SFU call per 3 seconds, not two per second. A new track of the same
+  kind starts at zero. Against the real SFU the publisher's connection came
+  up 200–400 ms after its `PublishAnswer`, and a refused first pull reached
+  the subscriber 3.8–4.2 s after the publish offer before this rule and
+  1.0–1.9 s after it (DEVLOG 2026-10-10).
 - A session the SFU declares gone (`SfuReply::Failed` with
   `FailureCause::SessionGone`), or whose peer connection the client reports
   failed (`ClientMsg::ResetSession`), is replaced, not retried
@@ -251,7 +264,8 @@ for each candidate time:
 - `Publish(participant)`: that participant's publish offer times out.
 - `Subscribe(participant)`: that participant's subscribe negotiation times
   out, or, while no negotiation runs, their earliest wanted track is due for
-  a retry.
+  a retry (`SUBSCRIBE_RETRY_MS` after a failure, `FIRST_PULL_RETRY_MS` after
+  one of the first refusals of a track the SFU did not find).
 - `Replace(participant, kind)`: the request for that participant's
   replacement session got no reply within `NEGOTIATION_TIMEOUT_MS` (it then
   counts as failed), or failed and is due again (`SUBSCRIBE_RETRY_MS` after
@@ -374,6 +388,12 @@ after every step that:
   offered tracks;
 - no subscription is lost: every track of every other joined participant is
   received under its current name or still wanted;
+- no wanted track waits longer than `SUBSCRIBE_RETRY_MS`; a track's
+  not-found count grows only when the SFU left it out of an offer or failed
+  its pull with `TrackNotFound`, by one, and the track is then due
+  `FIRST_PULL_RETRY_MS` later while the count is at most
+  `FIRST_PULL_RETRIES`, else `SUBSCRIBE_RETRY_MS` later; the simulated SFU
+  leaves out some pulled tracks and fails some pulls this way;
 - recording is never on without a `State` broadcast or `Welcome` that tells
   every joined client first;
 - no guest is admitted without consent while the room records; whoever is in

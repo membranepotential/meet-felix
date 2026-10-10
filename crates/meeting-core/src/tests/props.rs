@@ -12,11 +12,11 @@ use crate::state::{
     AlarmReason, Connection, Lifecycle, PublishNegotiation, SessionSlot, SubscribeNegotiation,
 };
 use crate::{
-    ClientMsg, Effect, ErrorCode, Event, FailureCause, LEAVE_GRACE_MS, LocalTrack, Mid, Millis,
-    NEGOTIATION_TIMEOUT_MS, NegotiationId, OfferedTrack, ParticipantId, RecordingPolicy,
-    RemoteTrack, ResumeToken, Rid, Role, RoomState, RoomView, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
-    Sdp, ServerMsg, SessionEpochs, SessionId, SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
-    TrackRef,
+    ClientMsg, Effect, ErrorCode, Event, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS, FailureCause,
+    LEAVE_GRACE_MS, LocalTrack, Mid, Millis, NEGOTIATION_TIMEOUT_MS, NegotiationId, OfferedTrack,
+    ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, Rid, Role, RoomState, RoomView,
+    SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpochs, SessionId, SessionKind,
+    SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
 };
 
 const POOL: u32 = 6;
@@ -43,7 +43,8 @@ enum Action {
         owner: bool,
     },
     /// Answer a pending SFU call, or fail it. An answer to a publish offer rejects the offered
-    /// tracks whose bit is set in `refuse` (bit 0 for the first track).
+    /// tracks whose bit is set in `refuse` (bit 0 for the first track); a subscribe offer leaves
+    /// out the requested tracks whose bit is set, as the SFU leaves out tracks it did not find.
     Reply {
         pick: usize,
         fail: Option<FailureCause>,
@@ -158,6 +159,7 @@ fn action() -> impl Strategy<Value = Action> {
         16 => (any::<usize>(), (0..40u8).prop_map(|n| match n {
             0 | 1 => Some(FailureCause::Transient),
             2 => Some(FailureCause::SessionGone),
+            3 => Some(FailureCause::TrackNotFound),
             _ => None,
         }), prop_oneof![3 => Just(0u8), 1 => 1..8u8])
             .prop_map(|(pick, fail, refuse)| Action::Reply { pick, fail, refuse }),
@@ -219,6 +221,8 @@ struct Sim {
     unpublished: usize,
     /// How many publish offers timed out.
     publish_timeouts: usize,
+    /// How many times the room scheduled a track again because the SFU did not find it.
+    not_found: usize,
     /// Whether a host was ever joined.
     host_joined: bool,
     /// How many guests waited for the first host and were let in, or asked for consent, when it
@@ -260,6 +264,7 @@ impl Sim {
             grace_expired: 0,
             unpublished: 0,
             publish_timeouts: 0,
+            not_found: 0,
             host_joined: false,
             released: 0,
             promoted: 0,
@@ -453,16 +458,25 @@ impl Sim {
                         },
                         None,
                     ) => {
-                        let tracks = tracks.into_iter().map(|track| OfferedTrack {
-                            mid: Mid::new(self.fresh("r")),
-                            track,
-                        });
+                        let found: Vec<_> = tracks
+                            .into_iter()
+                            .enumerate()
+                            .filter(|&(i, _)| refuse & (1 << i) == 0)
+                            .map(|(_, track)| track)
+                            .collect();
+                        let tracks = found
+                            .into_iter()
+                            .map(|track| OfferedTrack {
+                                mid: Mid::new(self.fresh("r")),
+                                track,
+                            })
+                            .collect();
                         SfuReply::SubscribeOffer {
                             who,
                             session,
                             negotiation,
                             sdp_offer: Sdp::new("o"),
-                            tracks: tracks.collect(),
+                            tracks,
                         }
                     }
                     (
@@ -601,6 +615,7 @@ impl Sim {
         }
         let effects = self.room.apply(event.clone());
         self.check(&before, &event, &effects)?;
+        self.not_found += self.check_not_found(&before, &event)?;
         let after = &self.room.state;
         if let Event::Sfu(reply) = &event
             && let Some((who, kind, session, Some(negotiation))) = reply_session(reply)
@@ -1217,6 +1232,60 @@ impl Sim {
         self.check_phases(before, event, effects)
     }
 
+    /// No wanted track waits longer than [`SUBSCRIBE_RETRY_MS`]. A wanted track's not-found count
+    /// grows only when the SFU did not find it (it left the track out of a subscribe offer, or failed
+    /// the pull with [`FailureCause::TrackNotFound`]), by one, and the track is then due
+    /// [`FIRST_PULL_RETRY_MS`] later for the first [`FIRST_PULL_RETRIES`] times, else
+    /// [`SUBSCRIBE_RETRY_MS`] later. Returns how many counts grew.
+    fn check_not_found(&self, before: &RoomState, event: &Event) -> Result<usize, TestCaseError> {
+        let now = self.room.now;
+        let mut grown = 0;
+        for (who, _, subscribe) in self.room.state.joined() {
+            let Some(subscribe) = subscribe.ready() else {
+                continue;
+            };
+            let was = before
+                .joined()
+                .find(|&(id, ..)| id == who)
+                .and_then(|(.., s)| s.ready())
+                .filter(|s| s.id == subscribe.id);
+            for (track, wanted) in &subscribe.wanted {
+                prop_assert!(
+                    wanted.due <= now.after(SUBSCRIBE_RETRY_MS),
+                    "{who:?} waits for {track:?} until {:?}",
+                    wanted.due
+                );
+                let count = was
+                    .and_then(|s| s.wanted.get(track))
+                    .map_or(0, |w| w.not_found);
+                // A new track under the same kind starts over at 0.
+                if wanted.not_found <= count {
+                    continue;
+                }
+                let refused = matches!(
+                    event,
+                    Event::Sfu(
+                        SfuReply::SubscribeOffer { who: to, .. }
+                            | SfuReply::Failed { who: to, cause: FailureCause::TrackNotFound, .. }
+                    ) if *to == who
+                );
+                prop_assert!(
+                    refused,
+                    "{who:?}'s {track:?} counted as not found on {event:?}"
+                );
+                prop_assert_eq!(wanted.not_found, count + 1);
+                let pause = if wanted.not_found <= FIRST_PULL_RETRIES {
+                    FIRST_PULL_RETRY_MS
+                } else {
+                    SUBSCRIBE_RETRY_MS
+                };
+                prop_assert_eq!(wanted.due, now.after(pause));
+                grown += 1;
+            }
+        }
+        Ok(grown)
+    }
+
     /// A joined participant whose socket closes keeps everything for the grace period: the step
     /// only marks them, closes no track and stops no recording. The mark never moves later, and
     /// no grace outlives an alarm at or after its end. Anyone else whose socket closes leaves.
@@ -1471,8 +1540,8 @@ fn resumed(before: &RoomState, who: ParticipantId, now: Millis) -> RoomState {
     {
         let retry = now.after(SUBSCRIBE_RETRY_MS);
         for o in offered {
-            if let Some(due) = subscribe.wanted.get_mut(&o.track) {
-                *due = retry;
+            if let Some(wanted) = subscribe.wanted.get_mut(&o.track) {
+                wanted.due = retry;
             }
         }
         subscribe.negotiation = SubscribeNegotiation::Idle;
@@ -1623,6 +1692,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
     let (mut released, mut expired, mut promoted, mut replaced) = (0, 0, 0, 0);
     let (mut graced, mut resumed_in_grace, mut grace_expired) = (0, 0, 0);
     let (mut partly_rejected, mut late_publish, mut late_subscribe) = (0, 0, 0);
+    let mut not_found = 0;
     for case in 0..1000 {
         let actions = proptest::collection::vec(action(), 1..250)
             .new_tree(&mut runner)
@@ -1645,7 +1715,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
             saw[4] |= state.joined().any(|(_, _, s)| {
                 s.ready().is_some_and(|s| {
                     s.negotiation.since().is_none()
-                        && s.wanted.values().any(|&due| due > sim.room.now)
+                        && s.wanted.values().any(|w| w.due > sim.room.now)
                 })
             });
             saw[5] |= state.joined().any(|(_, p, s)| {
@@ -1670,6 +1740,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
         partly_rejected += usize::from(sim.partly_rejected > 0);
         late_publish += usize::from(sim.late_publish_replies > 0);
         late_subscribe += usize::from(sim.late_subscribe_replies > 0);
+        not_found += usize::from(sim.not_found > 0);
     }
     assert!(
         [
@@ -1691,6 +1762,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
             partly_rejected,
             late_publish,
             late_subscribe,
+            not_found,
         ]
         .iter()
         .all(|&n| n >= 20),
@@ -1702,6 +1774,7 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
          socket lost in grace {graced}, resumed in grace {resumed_in_grace}, \
          left when the grace ended {grace_expired}, publish partly rejected {partly_rejected}, \
          late publish reply during a newer offer {late_publish}, \
-         late subscribe reply during a newer negotiation {late_subscribe}"
+         late subscribe reply during a newer negotiation {late_subscribe}, \
+         track not found {not_found}"
     );
 }

@@ -92,6 +92,10 @@ pub enum FailureCause {
     /// with a `session_error`). Every later call on that session fails too, so the room
     /// replaces the session instead of retrying.
     SessionGone,
+    /// The SFU did not find a track the call asked for, because its publisher's connection is
+    /// not up yet (`not_found_track_error`). Common on the first pull of a new track, so the room
+    /// pulls again soon ([`crate::FIRST_PULL_RETRY_MS`]).
+    TrackNotFound,
     /// Anything else; the room retries later.
     Transient,
 }

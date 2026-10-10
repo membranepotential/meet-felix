@@ -11,9 +11,9 @@ use serde::de::DeserializeOwned;
 use crate::wire::{
     ALL_ADAPTERS_FAILED, AdapterId, AdapterRef, AdapterResult, AdapterTrack, AdaptersResponse,
     CLOSE_TRACK_ERROR, CloseAdaptersRequest, CloseTrackObject, CloseTracksRequest, ErrorFields,
-    LayerFallback, MAX_ADAPTERS_PER_REQUEST, NewAdaptersRequest, NewSessionResponse,
-    RenegotiateRequest, SESSION_ERROR, SdpType, SessionDescription, Simulcast, TrackObject,
-    TrackResult, TracksRequest, TracksResponse, UpdateTracksRequest,
+    LayerFallback, MAX_ADAPTERS_PER_REQUEST, NOT_FOUND_TRACK_ERROR, NewAdaptersRequest,
+    NewSessionResponse, RenegotiateRequest, SESSION_ERROR, SdpType, SessionDescription, Simulcast,
+    TrackObject, TrackResult, TracksRequest, TracksResponse, UpdateTracksRequest,
 };
 
 /// The API's base URL.
@@ -116,13 +116,18 @@ const GONE: u16 = 410;
 impl SfuError {
     /// Whether the session the call was made on is gone: the SFU answered HTTP 410, or with
     /// [`SESSION_ERROR`] (also seen with 406 after an unanswered offer). Every later call on such
-    /// a session fails as well, so the room replaces it rather than retrying.
+    /// a session fails as well, so the room replaces it rather than retrying. A track the SFU
+    /// did not find ([`NOT_FOUND_TRACK_ERROR`]) is [`FailureCause::TrackNotFound`], which the room
+    /// retries soon.
     pub fn cause(&self) -> FailureCause {
         match self {
             Self::Api { status: GONE, .. } | Self::Status { status: GONE } => {
                 FailureCause::SessionGone
             }
             Self::Api { code, .. } if code == SESSION_ERROR => FailureCause::SessionGone,
+            Self::Track { code, .. } if code == NOT_FOUND_TRACK_ERROR => {
+                FailureCause::TrackNotFound
+            }
             Self::Api { .. }
             | Self::Status { .. }
             | Self::Transport(_)
@@ -244,7 +249,8 @@ impl<T: SfuTransport> SfuClient<T> {
     /// So an offer is returned even if every track failed and the list is empty: a publisher
     /// whose `PeerConnection` is not connected yet gets `not_found_track_error` together with an
     /// offer (seen against the live SFU, see `docs/spikes/02-first-call.md`), and the core retries
-    /// such tracks after `SUBSCRIBE_RETRY_MS`. Fails only if there is no offer.
+    /// such tracks after `FIRST_PULL_RETRY_MS`. Fails only if there is no offer; the error is then
+    /// the first track's, so a missing track fails with [`FailureCause::TrackNotFound`].
     pub async fn subscribe(
         &self,
         session: &SessionId,

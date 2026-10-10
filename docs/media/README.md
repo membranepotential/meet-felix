@@ -295,8 +295,10 @@ Triggers:
 
 - The SFU answers a call on a session with HTTP 410, or with the error code
   `session_error` (also seen with 406 after an unanswered offer). `sfu-api`
-  reports this as `FailureCause::SessionGone`; every other failure is
-  `Transient` and is retried as before.
+  reports this as `FailureCause::SessionGone`; a pulled track the SFU does
+  not find (`not_found_track_error`) is `TrackNotFound` and is retried sooner
+  ([retry rule](../core/README.md#rules-the-core-enforces), 2026-10-10); every other failure
+  is `Transient` and is retried as before.
   - A subscribe or renegotiate call fails this way: the subscribe session is
     replaced.
   - A publish call fails this way: the publish session is replaced.

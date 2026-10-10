@@ -465,7 +465,7 @@ fn subscribe_effect_returns_the_offer_when_every_track_is_missing() {
                     session: SessionId::new(SUBSCRIBER),
                     negotiation: NEGOTIATION,
                 },
-                cause: FailureCause::Transient,
+                cause: FailureCause::TrackNotFound,
             }),
         })
     );
@@ -645,6 +645,20 @@ fn a_session_the_sfu_declares_gone_is_reported_as_such() {
         (SfuError::Status { status: 503 }, FailureCause::Transient),
         (
             SfuError::Transport("reset".to_owned()),
+            FailureCause::Transient,
+        ),
+        (
+            SfuError::Track {
+                code: "not_found_track_error".to_owned(),
+                description: String::new(),
+            },
+            FailureCause::TrackNotFound,
+        ),
+        (
+            SfuError::Track {
+                code: "other_track_error".to_owned(),
+                description: String::new(),
+            },
             FailureCause::Transient,
         ),
     ] {

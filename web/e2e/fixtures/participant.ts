@@ -23,18 +23,40 @@ declare global {
 	interface Window {
 		/** Every `RTCPeerConnection` the page created, oldest first (see `trackPeerConnections`). */
 		__e2ePeerConnections?: RTCPeerConnection[];
+		/** When a peer connection reached `connected`, by the wall clock (see `trackPeerConnections`). */
+		__e2eConnected?: Connected[];
 	}
 }
 
-/** Runs in the page before its scripts: keeps every peer connection for `getStats()` and faults. */
+/** A peer connection that reached `connectionState` "connected". */
+export type Connected = {
+	/** `Date.now()` in the page; the browsers run on the test's machine, so it is the test's clock. */
+	at: number;
+	/** Whether it is a publish connection (one of its transceivers sends). */
+	publishes: boolean;
+};
+
+/**
+ * Runs in the page before its scripts: keeps every peer connection for `getStats()` and faults,
+ * and notes when each one connects.
+ */
 function trackPeerConnections(): void {
 	const created: RTCPeerConnection[] = [];
+	const connected: Connected[] = [];
 	window.__e2ePeerConnections = created;
+	window.__e2eConnected = connected;
 	const Original = window.RTCPeerConnection;
 	window.RTCPeerConnection = class extends Original {
 		constructor(config?: RTCConfiguration) {
 			super(config);
 			created.push(this);
+			this.addEventListener('connectionstatechange', () => {
+				if (this.connectionState !== 'connected') return;
+				connected.push({
+					at: Date.now(),
+					publishes: this.getTransceivers().some((t) => t.direction === 'sendonly')
+				});
+			});
 		}
 	};
 }
@@ -213,6 +235,11 @@ export class Participant {
 			subscriber.dispatchEvent(new Event('connectionstatechange'));
 			return all.length;
 		});
+	}
+
+	/** Every time one of the page's peer connections reached `connected`, oldest first. */
+	connected(): Promise<Connected[]> {
+		return this.page.evaluate(() => window.__e2eConnected ?? []);
 	}
 
 	close(): Promise<void> {

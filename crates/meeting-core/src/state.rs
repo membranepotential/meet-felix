@@ -31,6 +31,16 @@ pub const NEGOTIATION_TIMEOUT_MS: u64 = 15 * 1000;
 /// before it asks again for a replacement session after the SFU failed to create one.
 pub const SUBSCRIBE_RETRY_MS: u64 = 3 * 1000;
 
+/// How long the room waits before it pulls a track again that the SFU did not find. The first
+/// pull of a new track usually comes before its publisher's connection is up; against the real
+/// SFU the connection came up 200–400 ms after the `PublishAnswer` (2026-10-10).
+pub const FIRST_PULL_RETRY_MS: u64 = 500;
+
+/// How many times the room pulls a track again after [`FIRST_PULL_RETRY_MS`] when the SFU does
+/// not find it. Later retries wait [`SUBSCRIBE_RETRY_MS`], so a track that never appears does not
+/// cost an SFU call every half second.
+pub const FIRST_PULL_RETRIES: u8 = 5;
+
 /// How long a joined participant whose socket closed without a `Leave` keeps their place, SFU
 /// sessions and tracks before the room lets them leave, so their client can take the place again
 /// from a new socket (D35 in `docs/core`). It equals the worker's keepalive tolerance, so a socket
@@ -191,15 +201,44 @@ pub(crate) struct SubscribeSession {
     pub(crate) id: SessionId,
     #[serde(with = "pairs")]
     pub(crate) receiving: BTreeMap<TrackRef, Receiving>,
-    /// Tracks to receive, each with the earliest time to request it. A track stays here until
-    /// a negotiation delivers it, so a failed negotiation loses nothing.
+    /// Tracks to receive. A track stays here until a negotiation delivers it, so a failed
+    /// negotiation loses nothing.
     #[serde(with = "pairs")]
-    pub(crate) wanted: BTreeMap<TrackRef, Millis>,
+    pub(crate) wanted: BTreeMap<TrackRef, Wanted>,
     pub(crate) negotiation: SubscribeNegotiation,
     /// The id of the latest negotiation on this session: the running one, if any. Records
     /// stored before the field existed load with 0.
     #[serde(default)]
     pub(crate) last_negotiation: NegotiationId,
+}
+
+/// A track a subscriber should receive and does not yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredWanted")]
+pub(crate) struct Wanted {
+    /// The earliest time to request it.
+    pub(crate) due: Millis,
+    /// How many requests for it the SFU refused because it did not find the track (its
+    /// publisher's connection was not up yet).
+    pub(crate) not_found: u8,
+}
+
+/// A stored [`Wanted`]: records stored before the not-found count existed hold the due time
+/// alone.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredWanted {
+    Due(Millis),
+    Wanted { due: Millis, not_found: u8 },
+}
+
+impl From<StoredWanted> for Wanted {
+    fn from(stored: StoredWanted) -> Self {
+        match stored {
+            StoredWanted::Due(due) => Self::at(due),
+            StoredWanted::Wanted { due, not_found } => Self { due, not_found },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +616,31 @@ impl Replacement {
     }
 }
 
+impl Wanted {
+    /// A track to request from `due` on, which the SFU has not refused yet.
+    pub(crate) fn at(due: Millis) -> Self {
+        Self { due, not_found: 0 }
+    }
+
+    /// The SFU did not find the track at `now`: the first [`FIRST_PULL_RETRIES`] times, request
+    /// it again after [`FIRST_PULL_RETRY_MS`], later after [`SUBSCRIBE_RETRY_MS`].
+    pub(crate) fn not_found(&mut self, now: Millis) {
+        self.not_found = self.not_found.saturating_add(1);
+        let pause = if self.not_found <= FIRST_PULL_RETRIES {
+            FIRST_PULL_RETRY_MS
+        } else {
+            SUBSCRIBE_RETRY_MS
+        };
+        self.due = now.after(pause);
+    }
+
+    /// A request for the track failed at `now` for another reason: request it again after
+    /// [`SUBSCRIBE_RETRY_MS`].
+    pub(crate) fn failed(&mut self, now: Millis) {
+        self.due = now.after(SUBSCRIBE_RETRY_MS);
+    }
+}
+
 impl PublishSession {
     /// A new session with nothing published.
     pub(crate) fn new(id: SessionId) -> Self {
@@ -617,7 +681,7 @@ impl PublishNegotiation {
 
 impl SubscribeSession {
     /// A new session that receives nothing yet and wants `wanted`.
-    pub(crate) fn new(id: SessionId, wanted: BTreeMap<TrackRef, Millis>) -> Self {
+    pub(crate) fn new(id: SessionId, wanted: BTreeMap<TrackRef, Wanted>) -> Self {
         Self {
             id,
             receiving: BTreeMap::new(),
@@ -643,7 +707,7 @@ impl SubscribeSession {
     fn due(&self) -> Option<Millis> {
         match self.negotiation.since() {
             Some(since) => Some(since.after(NEGOTIATION_TIMEOUT_MS)),
-            None => self.wanted.values().min().copied(),
+            None => self.wanted.values().map(|w| w.due).min(),
         }
     }
 }

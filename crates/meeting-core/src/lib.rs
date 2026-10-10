@@ -22,7 +22,9 @@
 //!   offers, one negotiation at a time); new tracks reach every other joined participant, and an
 //!   unpublished track or a leaving participant's tracks are closed on all subscribers and no
 //!   longer recorded. A track stays wanted until a negotiation delivers it; a failed or
-//!   timed-out subscribe negotiation is retried after [`SUBSCRIBE_RETRY_MS`]. A publish offer
+//!   timed-out subscribe negotiation is retried after [`SUBSCRIBE_RETRY_MS`], and a track the
+//!   SFU did not find yet (its publisher's connection is not up) after [`FIRST_PULL_RETRY_MS`],
+//!   the first [`FIRST_PULL_RETRIES`] times. A publish offer
 //!   the SFU does not answer within [`NEGOTIATION_TIMEOUT_MS`] fails, so the client may offer
 //!   again. Only the tracks the SFU accepted are published; the client hears which kinds it
 //!   rejected, and an answer that rejects all of them fails the offer.
@@ -77,8 +79,8 @@ pub use protocol::{
 };
 pub use shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 pub use state::{
-    EMPTY_ROOM_TIMEOUT_MS, LEAVE_GRACE_MS, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState,
-    SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
+    EMPTY_ROOM_TIMEOUT_MS, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS, LEAVE_GRACE_MS,
+    NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
 };
 pub use step::step;
 #[cfg(feature = "wasm")]

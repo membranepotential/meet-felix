@@ -3,11 +3,12 @@
 use super::support::{Room, T0, name, session, track_name, transcript};
 use crate::recording::{ConsentRecord, RosterEntry};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FailureCause, LEAVE_GRACE_MS, Mid,
-    Millis, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, NegotiationId, OfferedTrack, ParticipantId,
-    Phase, Presence, RecordingPolicy, RemoteTrack, ResumeToken, Role, RoomState, RoomView,
+    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, ErrorCode, Event, FIRST_PULL_RETRIES,
+    FIRST_PULL_RETRY_MS, FailureCause, LEAVE_GRACE_MS, LocalTrack, Mid, Millis,
+    NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, NegotiationId, OfferedTrack, ParticipantId, Phase,
+    Presence, RecordingPolicy, RemoteTrack, ResumeToken, Role, RoomState, RoomView,
     SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpoch, SessionEpochs, SessionId,
-    SessionKind, SfuCall, SfuReply, TrackKind,
+    SessionKind, SfuCall, SfuReply, TrackKind, TrackName,
 };
 
 const HOST: ParticipantId = ParticipantId(1);
@@ -720,6 +721,19 @@ fn state_survives_a_json_round_trip() {
     let loaded: RoomState = serde_json::from_value(stored).expect("deserializable");
     assert!(!loaded.participants[&GUEST].muted);
 
+    // A wanted track stored before the not-found count existed, as its due time alone, loads
+    // with no refusal counted.
+    let mut stored = serde_json::to_value(&room.state).expect("serializable");
+    let wanted = &mut stored["participants"][GUEST.0.to_string()]["connection"]["Joined"]["subscribe"]
+        ["Ready"]["wanted"];
+    let pairs = wanted.as_array_mut().expect("pairs");
+    assert_eq!(pairs.len(), 2, "the host's audio and video");
+    for pair in pairs {
+        pair[1] = pair[1]["due"].take();
+    }
+    let loaded: RoomState = serde_json::from_value(stored).expect("deserializable");
+    assert_eq!(loaded, room.state);
+
     // A participant waiting to resume survives storage; one stored before the grace period
     // existed loads as connected.
     room.apply(Event::SocketClosed { who: GUEST });
@@ -922,6 +936,121 @@ fn an_unanswered_subscribe_offer_times_out_and_is_requested_again() {
         room.apply(Event::AlarmFired).as_slice(),
         [Effect::SfuSubscribe { tracks, .. }, Effect::SetAlarm { .. }] if tracks == &[track]
     ));
+}
+
+/// The SFU refuses the guest's running pull of the host's tracks because it did not find them,
+/// as it does before the publisher's connection is up: no offer, `not_found_track_error`.
+fn track_not_found(room: &mut Room) -> Vec<Effect> {
+    room.sfu(SfuReply::Failed {
+        who: GUEST,
+        call: SfuCall::Subscribe {
+            session: session(GUEST, SessionKind::Subscribe),
+            negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
+        },
+        cause: FailureCause::TrackNotFound,
+    })
+}
+
+#[test]
+fn a_track_the_sfu_left_out_of_its_offer_is_pulled_again_soon() {
+    let mut room = meeting_room();
+    let track = host_publishes_audio(&mut room);
+    let offered = room.now;
+    let effects = room.sfu(SfuReply::SubscribeOffer {
+        who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
+        negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
+        sdp_offer: Sdp::new("offer"),
+        tracks: Vec::new(),
+    });
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Send { to: GUEST, msg: ServerMsg::SubscribeOffer { tracks, .. } }, ..]
+                if tracks.is_empty()
+        ),
+        "{effects:#?}"
+    );
+    room.client(
+        GUEST,
+        ClientMsg::SubscribeAnswer {
+            sdp: Sdp::new("answer"),
+        },
+    );
+    let effects = room.sfu(SfuReply::Renegotiated {
+        who: GUEST,
+        session: session(GUEST, SessionKind::Subscribe),
+        negotiation: room.negotiation(GUEST, SessionKind::Subscribe),
+    });
+    assert_eq!(
+        effects,
+        [Effect::SetAlarm {
+            at: offered.after(FIRST_PULL_RETRY_MS)
+        }]
+    );
+
+    room.now = offered.after(FIRST_PULL_RETRY_MS);
+    assert!(matches!(
+        room.apply(Event::AlarmFired).as_slice(),
+        [Effect::SfuSubscribe { tracks, .. }, Effect::SetAlarm { .. }] if tracks == &[track]
+    ));
+}
+
+#[test]
+fn a_track_the_sfu_does_not_find_is_pulled_again_soon_a_few_times_then_after_a_pause() {
+    let mut room = meeting_room();
+    let track = host_publishes_audio(&mut room);
+    for _ in 0..FIRST_PULL_RETRIES {
+        // The client hears of the failure as of any other; its notice waits for a while.
+        assert_eq!(
+            track_not_found(&mut room),
+            [
+                Effect::Send {
+                    to: GUEST,
+                    msg: ServerMsg::Error {
+                        code: ErrorCode::SubscribeFailed
+                    }
+                },
+                Effect::SetAlarm {
+                    at: room.now.after(FIRST_PULL_RETRY_MS)
+                },
+            ]
+        );
+        room.now = room.now.after(FIRST_PULL_RETRY_MS);
+        assert!(matches!(
+            room.apply(Event::AlarmFired).as_slice(),
+            [Effect::SfuSubscribe { tracks, .. }, Effect::SetAlarm { .. }] if tracks.as_slice() == std::slice::from_ref(&track)
+        ));
+    }
+    // A track that keeps not appearing waits as long as after any other failure.
+    assert!(track_not_found(&mut room).contains(&Effect::SetAlarm {
+        at: room.now.after(SUBSCRIBE_RETRY_MS)
+    }));
+
+    // A new track of the same kind gets quick retries again.
+    room.now = room.now.after(SUBSCRIBE_RETRY_MS);
+    room.apply(Event::AlarmFired);
+    room.client(
+        HOST,
+        ClientMsg::PublishOffer {
+            sdp: Sdp::new("offer"),
+            tracks: vec![LocalTrack {
+                mid: Mid::new("new-audio"),
+                kind: TrackKind::Audio,
+                name: TrackName::new("new-audio"),
+            }],
+        },
+    );
+    room.sfu(SfuReply::Published {
+        who: HOST,
+        session: session(HOST, SessionKind::Publish),
+        negotiation: room.negotiation(HOST, SessionKind::Publish),
+        sdp_answer: Sdp::new("answer"),
+        rejected: Vec::new(),
+    });
+    assert!(track_not_found(&mut room).contains(&Effect::SetAlarm {
+        at: room.now.after(FIRST_PULL_RETRY_MS)
+    }));
 }
 
 /// The host publishes audio and the guest receives it; returns the track and the guest's mid.

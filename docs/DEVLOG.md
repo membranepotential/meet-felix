@@ -3,6 +3,56 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — A track the SFU did not find is pulled again after 500 ms
+
+STATUS Next item 1. The first pull of a new track usually comes before its
+publisher's connection is up, the SFU answers `not_found_track_error`, and
+the room retried after `SUBSCRIBE_RETRY_MS` (3 s), the pause after any
+failure. So a guest saw a newcomer's video about 3 s later than it could.
+
+- **Measured first.** `real-sfu.spec.ts` now prints one `first pull` line
+  per publisher and subscriber who was in before it published, in ms after
+  the publisher's `PublishOffer` (the fixture's `Participant.connected()`
+  notes when each peer connection reached `connected`). Before the change,
+  13 pulls over both `@real` tests: `PublishAnswer` at +188–285 ms, the
+  publisher's connection up at +395–694 ms (200–410 ms after the answer).
+  8 pulls got the video at once (+0.58–1.06 s); 5 were refused and got it
+  at +3.83–4.16 s. A first run, timed from the answer, showed the same
+  split: 6 of 13 at +3.36–3.89 s after the answer.
+- **Two shapes of refusal.** The SFU leaves the track out of an offer it
+  still returns (known since spike 02), or, with no offer at all, the call
+  fails with the same error. The run's wrangler log has four failed
+  `Subscribe` calls of the second shape, and the browsers got
+  `SubscribeFailed` before all 5 refused pulls. That shape reached the core
+  as a `Transient` failure, so a fix of the left-out path alone would have
+  missed it.
+- **Changed.** `sfu-api` maps `not_found_track_error` to a new
+  `FailureCause::TrackNotFound`. The core keeps a count per wanted track
+  (`Wanted { due, not_found }`, which replaces the bare due time): a track
+  left out of an offer, or failed with `TrackNotFound`, is pulled again
+  after `FIRST_PULL_RETRY_MS` (500 ms) the first `FIRST_PULL_RETRIES` (5)
+  times and after `SUBSCRIBE_RETRY_MS` from then on; a new track of that
+  kind starts at zero. Other failures keep 3 s. A stored record with the old
+  bare due time still loads (`StoredWanted`, no record version bump).
+  `SUBSCRIBE_GRACE_MS` stays 10 s: the browser still hears `SubscribeFailed`
+  on the no-offer shape and drops the notice on the next offer, which now
+  comes sooner, and a track that keeps failing should still be reported
+  after 10 s. Tests: two rules (the left-out retry; the quick schedule, the
+  fallback after 5, a new track starting over), the old stored shape in the
+  JSON round trip, and the simulator now leaves out pulled tracks and fails
+  pulls with `TrackNotFound`, with an invariant on the schedule; core 72,
+  sfu-api 16 tests.
+- **After.** Same two tests: all 13 pulls got the video at +0.55–1.94 s; 9
+  were refused one to three times first (left out or failed) and arrived at
+  +1.01–1.94 s. The worst case went from 4.2 s to 1.9 s. The printed count
+  of offers without the video is approximate: it also counts offers about
+  other tracks in the same window.
+
+Next: the SFU still refuses pulls for 0.5–1 s after the publisher reports
+`connected` (it wants packets, not only a connection), so a pull triggered
+by the publisher's first packets would save the rest; not worth it now.
+Deploy when no meeting runs.
+
 ## 2026-10-10 — A smaller simulcast layer holds; a five-party run
 
 STATUS Next item 1. Against the real SFU a subscriber that asked for the

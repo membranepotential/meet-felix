@@ -22,6 +22,71 @@ const LAYER_HOLD_MS = 25_000;
 const ROUND_MS = 10_000;
 const ROUNDS = 3;
 
+/**
+ * How one subscriber, already in the meeting, first received a publisher's video, in ms after the
+ * publisher sent its first `PublishOffer`: when the `PublishAnswer` arrived, when the publisher's
+ * connection came up, and when the subscribe offer that carries the video arrived. `leftOut`
+ * counts the subscribe offers before it that left the video out: pulls the SFU refused, usually
+ * because the publisher's connection was not up yet. `failed` counts `SubscribeFailed` errors.
+ */
+type FirstPull = {
+	publisher: string;
+	subscriber: string;
+	answeredMs: number;
+	connectedMs: number | undefined;
+	pulledMs: number | undefined;
+	leftOut: number;
+	failed: number;
+};
+
+/** The first pulls of every publisher's video by everyone who was in before it was published. */
+async function firstPulls(people: readonly Participant[]): Promise<FirstPull[]> {
+	const firstAt = (who: Participant, dir: 'sent' | 'received', type: string) =>
+		who.frames.find((f) => f.dir === dir && f.msg.type === type)?.at;
+	const pulls: FirstPull[] = [];
+	for (const publisher of people) {
+		const offered = firstAt(publisher, 'sent', 'publishOffer');
+		const answered = firstAt(publisher, 'received', 'publishAnswer');
+		const owner = publisher.received('welcome')[0]?.you;
+		if (offered === undefined || answered === undefined || owner === undefined) continue;
+		const connected = (await publisher.connected()).find((c) => c.publishes && c.at >= offered);
+		for (const subscriber of people) {
+			const welcomed = firstAt(subscriber, 'received', 'welcome');
+			if (subscriber === publisher || welcomed === undefined || welcomed > offered) continue;
+			const after = subscriber.frames.filter((f) => f.dir === 'received' && f.at >= offered);
+			const pulled = after.find(
+				(f) =>
+					f.msg.type === 'subscribeOffer' &&
+					f.msg.tracks.some((t) => t.track.owner === owner && t.track.kind === 'video')
+			);
+			const before = after.filter((f) => pulled === undefined || f.at < pulled.at);
+			pulls.push({
+				publisher: publisher.label,
+				subscriber: subscriber.label,
+				answeredMs: answered - offered,
+				connectedMs: connected && connected.at - offered,
+				pulledMs: pulled && pulled.at - offered,
+				leftOut: before.filter((f) => f.msg.type === 'subscribeOffer').length,
+				failed: before.filter(
+					(f) => f.msg.type === 'error' && f.msg.code === 'subscribeFailed'
+				).length
+			});
+		}
+	}
+	return pulls;
+}
+
+/** Prints the first pulls to the run's output, one line each. */
+function logFirstPulls(pulls: readonly FirstPull[]): void {
+	for (const p of pulls) {
+		console.log(
+			`first pull ${p.publisher} -> ${p.subscriber}: answer +${p.answeredMs} ms, ` +
+				`publisher connected +${p.connectedMs ?? '?'} ms, video offered +${p.pulledMs ?? '?'} ms ` +
+				`after ${p.leftOut} offers without it and ${p.failed} failures`
+		);
+	}
+}
+
 test.describe('real SFU', { tag: '@real' }, () => {
 	test.skip(
 		!hasRealSfuSecrets(),
@@ -61,6 +126,7 @@ test.describe('real SFU', { tag: '@real' }, () => {
 				}
 				expect(grew.filter((s) => s.kind === 'audio')).toHaveLength(others.length);
 			}
+			logFirstPulls(await firstPulls([host, ada, bo]));
 		});
 
 		await test.step('a layer change: a small window gets a smaller layer, and keeps it', async () => {
@@ -161,6 +227,7 @@ test.describe('real SFU', { tag: '@real' }, () => {
 				await expect
 					.poll(() => tileVideoWidth(who.tile(name)), { timeout: 30_000 })
 					.toBeGreaterThan(0);
+		logFirstPulls(await firstPulls([host, ...guests]));
 
 		for (let round = 1; round <= ROUNDS; round++) {
 			await test.step(`round ${round}: every tile's video grew over ${ROUND_MS / 1000} s`, async () => {

@@ -13,7 +13,7 @@ use crate::state::{
     AlarmReason, Connection, Consent, Lifecycle, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, Offered,
     Participant, PublishNegotiation, PublishSession, PublishedTrack, Receiving, RecordingStatus,
     Replacement, RoomState, SUBSCRIBE_RETRY_MS, SessionSlot, SubscribeNegotiation,
-    SubscribeSession,
+    SubscribeSession, Wanted,
 };
 
 /// Applies one event and returns the new state and what the shell must do, in order.
@@ -339,7 +339,7 @@ impl RoomState {
             )
         });
         if was_lost && unanswered {
-            self.subscription_failed(now, old, fx);
+            self.subscription_failed(now, old, Wanted::failed, fx);
         }
     }
 
@@ -771,10 +771,10 @@ impl RoomState {
     }
 
     /// Every track the others publish, wanted by `who` from `now`.
-    fn others_tracks(&self, now: Millis, who: ParticipantId) -> BTreeMap<TrackRef, Millis> {
+    fn others_tracks(&self, now: Millis, who: ParticipantId) -> BTreeMap<TrackRef, Wanted> {
         self.published_tracks()
             .filter(|track| track.owner != who)
-            .map(|track| (track, now))
+            .map(|track| (track, Wanted::at(now)))
             .collect()
     }
 
@@ -977,7 +977,7 @@ impl RoomState {
                 subscribe.wanted.extend(
                     kinds
                         .iter()
-                        .map(|&kind| (TrackRef { owner: who, kind }, now)),
+                        .map(|&kind| (TrackRef { owner: who, kind }, Wanted::at(now))),
                 );
             }
             self.request_wanted(now, subscriber, fx);
@@ -1018,12 +1018,13 @@ impl RoomState {
                 })
             })
             .collect();
-        // Requested tracks the SFU left out stay wanted and are retried later.
+        // Requested tracks the SFU left out stay wanted and are retried soon: it leaves out the
+        // tracks it did not find, usually because their publisher's connection is not up yet.
         for (track, _) in requested {
             if !offered.iter().any(|o| o.track == *track)
-                && let Some(due) = subscribe.wanted.get_mut(track)
+                && let Some(wanted) = subscribe.wanted.get_mut(track)
             {
-                *due = now.after(SUBSCRIBE_RETRY_MS);
+                wanted.not_found(now);
             }
         }
         let incoming = offered
@@ -1158,10 +1159,12 @@ impl RoomState {
                     FailureCause::SessionGone => {
                         self.replace_session(now, who, SessionKind::Publish, fx)
                     }
-                    FailureCause::Transient if publish.pending(negotiation) => {
+                    FailureCause::TrackNotFound | FailureCause::Transient
+                        if publish.pending(negotiation) =>
+                    {
                         self.publish_failed(who, fx)
                     }
-                    FailureCause::Transient => {}
+                    FailureCause::TrackNotFound | FailureCause::Transient => {}
                 }
             }
             SfuCall::Subscribe {
@@ -1190,7 +1193,11 @@ impl RoomState {
                         )
                     );
                 if running {
-                    self.subscription_failed(now, who, fx);
+                    let retry = match cause {
+                        FailureCause::TrackNotFound => Wanted::not_found,
+                        FailureCause::SessionGone | FailureCause::Transient => Wanted::failed,
+                    };
+                    self.subscription_failed(now, who, retry, fx);
                     self.request_wanted(now, who, fx);
                 }
             }
@@ -1216,17 +1223,23 @@ impl RoomState {
     }
 
     /// Ends `who`'s running subscribe negotiation as failed: closes the transceivers it added,
-    /// keeps its tracks wanted for a retry after [`SUBSCRIBE_RETRY_MS`], and tells the client to
-    /// drop any subscribe offer it holds.
-    fn subscription_failed(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
+    /// keeps its tracks wanted for a retry that `retry` schedules ([`Wanted::failed`], or
+    /// [`Wanted::not_found`] when the SFU did not find them), and tells the client to drop any
+    /// subscribe offer it holds.
+    fn subscription_failed(
+        &mut self,
+        now: Millis,
+        who: ParticipantId,
+        retry: fn(&mut Wanted, Millis),
+        fx: &mut Effects,
+    ) {
         let Some(subscribe) = self.subscribe_session_mut(who) else {
             return;
         };
         let negotiation = mem::replace(&mut subscribe.negotiation, SubscribeNegotiation::Idle);
-        let retry = now.after(SUBSCRIBE_RETRY_MS);
         for track in negotiation.tracks() {
-            if let Some(due) = subscribe.wanted.get_mut(&track) {
-                *due = retry;
+            if let Some(wanted) = subscribe.wanted.get_mut(&track) {
+                retry(wanted, now);
             }
         }
         let mids: Vec<_> = match negotiation {
@@ -1270,8 +1283,8 @@ impl RoomState {
         }
         let mut requested: Vec<(TrackRef, RemoteTrack)> = Vec::new();
         let mut settled = Vec::new();
-        for (&track, &due) in &subscribe.wanted {
-            if due > now {
+        for (&track, wanted) in &subscribe.wanted {
+            if wanted.due > now {
                 continue;
             }
             match self.resolve(track) {
@@ -1427,7 +1440,7 @@ impl RoomState {
                         .and_then(|(.., subscribe)| subscribe.ready()?.negotiation.since())
                         .is_some_and(|since| since.after(NEGOTIATION_TIMEOUT_MS) <= now);
                     if timed_out {
-                        self.subscription_failed(now, who, fx);
+                        self.subscription_failed(now, who, Wanted::failed, fx);
                     }
                     self.request_wanted(now, who, fx);
                 }

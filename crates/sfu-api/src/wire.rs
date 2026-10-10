@@ -142,6 +142,11 @@ pub struct TrackResult {
 /// close.
 pub const CLOSE_TRACK_ERROR: &str = "close_track_error";
 
+/// `errorCode` of a pulled track the SFU does not find: "Track not found on remote peer. Make
+/// sure the publisher peer is connected and sending packets for this track" (seen on every first
+/// pull that comes before the publisher's connection is up, 2026-10-09 and 2026-10-10).
+pub const NOT_FOUND_TRACK_ERROR: &str = "not_found_track_error";
+
 /// `errorCode` of a request on a session the SFU no longer serves, e.g. "Session appears to be
 /// disconnected" with HTTP 410 (seen in production on 2026-10-09).
 pub const SESSION_ERROR: &str = "session_error";

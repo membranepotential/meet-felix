@@ -11,7 +11,7 @@ reach. Each layer below says what exists on 2026-10-09 and what is planned.
 | Core unit tests | Single rules of `step`, whole meetings, ids, the word list | `cargo test -p meeting-core` | Exist; growing with the core |
 | Core property tests | The invariants hold for any event sequence | `cargo test -p meeting-core` | Exist (`proptest`, 512 cases of up to 200 actions) |
 | WASM build of the core | The core compiles for the browser | `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm` | Exists |
-| SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer); core SFU effects to replies, with the negotiation id carried through and a publish answer's per-track errors turned into rejected kinds | `cargo test -p sfu-api` | Exist |
+| SFU client tests | Request and response JSON against samples from Cloudflare's docs and a live SFU response (`not_found_track_error` with an offer, and without one as `FailureCause::TrackNotFound`); core SFU effects to replies, with the negotiation id carried through and a publish answer's per-track errors turned into rejected kinds | `cargo test -p sfu-api` | Exist |
 | Worker unit tests | Storage record, socket attachment with the owner flag, alarm (a fired alarm is forgotten unless the core sets it again) and keepalive rules; the ended room's alarm (a pending `/end` is sent again before the storage is deleted); the owner's session cookie (valid, expired, tampered, foreign, missing) and password; `/api/new` and `/api/login` input checks | `cargo test -p meet-worker` | Exist |
 | E2E protocol tests | The real `RoomObject` running the core under `wrangler dev`, driven over raw WebSockets, with a mock SFU: owner session, HTTP routes, the meeting lifecycle, consent and recording state, negotiation, host controls, SFU failures and session recovery, the meetings list | `pnpm test:e2e` (project `protocol`) | Exist (Playwright Test, `web/e2e/protocol/`) |
 | E2E browser tests | The UI flows in Chromium and Firefox with fake devices against the same local stack: login, pre-join, lobby, tiles, controls, screen share, leave and end, past meetings, recovery | `pnpm test:e2e` (projects `chromium`, `firefox`) | Exist (`web/e2e/browser/`) |
@@ -67,6 +67,11 @@ simulated SFU also rejects some offered tracks in its publish answers, and
 it can hold a call past its negotiation's deadline and answer it later
 (`Stall`, `Unstall`); a simulated client offers again after its held offer
 timed out (`Reoffer`), so the held answer arrives late for the new offer.
+Since 2026-10-10 it also leaves some pulled tracks out of its subscribe
+offers and fails some pulls with `TrackNotFound`, as the real SFU does before
+a publisher's connection is up, and the tests check the first-pull retry
+schedule (quick retries, then the 3 s pause, and no wanted track waiting
+longer than that).
 The tests check that every published or pulled track
 was accepted by the SFU, and that a reply about a negotiation other than the
 running one changes nothing. A second test (1,000 cases)
@@ -215,7 +220,8 @@ Tests import `test` and `expect` from
   ([`fixtures/participant.ts`](../web/e2e/fixtures/participant.ts)), each in
   its own context; the owner's context gets the session cookie through the
   API. A participant logs every signalling frame its page sent and received,
-  and knows the UI by its roles and texts (`control(name)`, `endForAll()`,
+  with the time, notes when each of its page's peer connections reached
+  `connected` (`connected()`), and knows the UI by its roles and texts (`control(name)`, `endForAll()`,
   …) and, where a role or text does not single an element out, by a
   `data-testid` (the getters `meeting`, `tiles`, `tile(name)`, `pill(text)`
   and `transcriptLink`; the testids are listed in "Adding a test").
@@ -264,7 +270,7 @@ Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
 | `call.spec.ts` | The owner's pre-join (name prefilled, "You join as host"); a guest's pre-join (recording notice, "not started yet") and lobby, let in when the host joins; tiles with names, the recording badge, host controls only for the host; mute, camera off and on (the guest's view of the host follows the room), a host muting a guest; the device pickers on the pre-join; switching camera and microphone in the "Devices" dialog swaps the tracks on the publish connection's senders without an unpublish or a new publish offer, and the guest still sees the host's video (Chromium only); screen share with the expand button, control bar visible while expanded for both sides (Chromium only); leave, end for all, the ended page with the transcript link, a late join |
 | `consent.spec.ts` | `hostDecides`: the host starts recording, the guest in the call gets the consent dialog, the host sees "Guest has not accepted the recording yet" and "Not recorded" on the guest's tile, guests see neither; a late guest without consent waits outside and joins the notice ("Guest and Late have not…"); each accept shortens it, and it disappears when both accepted |
 | `recovery.spec.ts` | The SFU loses the guest's subscribe session: `SubscribeReset`, a new session, negotiation on it; a failed peer connection (simulated in the page): "Reconnecting to the others…", `ResetSession`, a new session; a dropped socket (through `page.routeWebSocket`, closed with code 4000 because the browser rejects 1001 there): the "Reconnecting…" pill for the guest and a dimmed "Reconnecting…" tile on the host's side, then a `Join` with the resume token, the same participant, and both marks gone |
-| `real-sfu.spec.ts` (`@real`) | Three people through the real SFU: each receives the others' video (bytes and decoded frames per tile) and audio; a small window gets a smaller simulcast layer, and the decoded width stays at most half the full layer's at every 1 s sample for 25 s, with no new `SetLayer` (the run prints the samples); a screen share reaches the others; 60 s without a new socket or session reset while media keeps flowing. Five people (host and four guests): every tile's video grows in bytes and decoded frames in each of three 10 s rounds |
+| `real-sfu.spec.ts` (`@real`) | Three people through the real SFU: each receives the others' video (bytes and decoded frames per tile) and audio; a small window gets a smaller simulcast layer, and the decoded width stays at most half the full layer's at every 1 s sample for 25 s, with no new `SetLayer` (the run prints the samples); a screen share reaches the others; 60 s without a new socket or session reset while media keeps flowing. Five people (host and four guests): every tile's video grows in bytes and decoded frames in each of three 10 s rounds. Both print one `first pull` line per publisher and subscriber who was in before it published: when the `PublishAnswer` arrived, when the publisher's connection came up (`Participant.connected()`) and when the subscribe offer carrying its video arrived, in ms after the publish offer, with the refusals before it; no assertion, as the times depend on the network |
 
 ### Adding a test
 
