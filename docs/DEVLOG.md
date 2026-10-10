@@ -32,6 +32,8 @@ Small follow-ups that today's code reviews collected.
 
 Next: the STATUS Next list.
 
+Deployed as version b88fda55 (commit 497ad78) with no meeting live.
+
 ## 2026-10-10 — A track the SFU did not find is pulled again after 500 ms
 
 STATUS Next item 1. The first pull of a new track usually comes before its
