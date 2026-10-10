@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { INITIAL, reduce, type ClientState } from './client-state.ts';
+import { INITIAL, reduce, syncMute, type ClientState } from './client-state.ts';
 import type { ParticipantView, RoomView, SessionEpochs } from './protocol.ts';
 
 const person = (
@@ -13,6 +13,7 @@ const person = (
 	consentRecording: true,
 	presence: 'joined',
 	tracks: [],
+	muted: false,
 	...extra
 });
 
@@ -132,5 +133,20 @@ describe('reduce', () => {
 			welcomed(),
 			[{ kind: 'publish-reset', epoch: 2 }]
 		]);
+	});
+});
+
+describe('syncMute', () => {
+	it('switches the mic off when the room shows us muted, since muting wins', () => {
+		expect(syncMute(true, true)).toEqual([{ kind: 'mute-mic' }]);
+	});
+
+	it('reports a mic that is off while the room shows it on', () => {
+		expect(syncMute(false, false)).toEqual([{ kind: 'report-muted' }]);
+	});
+
+	it('does nothing when both agree', () => {
+		expect(syncMute(true, false)).toEqual([]);
+		expect(syncMute(false, true)).toEqual([]);
 	});
 });

@@ -31,7 +31,8 @@ const room: RoomView = {
 			role: 'host',
 			consentRecording: true,
 			presence: 'joined',
-			tracks: ['audio', 'video']
+			tracks: ['audio', 'video'],
+			muted: true
 		}
 	]
 };
@@ -65,6 +66,7 @@ const SERVER_SAMPLES: Samples<ServerMsg> = {
 const CLIENT_SAMPLES: Samples<ClientMsg> = {
 	join: { type: 'join', name: 'Ada', consent: true, resume: 'r1' },
 	setConsent: { type: 'setConsent', consent: false },
+	setMuted: { type: 'setMuted', muted: true },
 	publishOffer: {
 		type: 'publishOffer',
 		sdp: 'v=0',

@@ -3,6 +3,43 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — first real test with a guest: mute state, expanded screen, Whisper filters
+
+The owner's test meeting (laptop plus an iPhone on mobile data, TURN live)
+produced a correct two-speaker transcript. Three findings, all fixed locally:
+
+- **No feedback after "Mute <guest>".** The protocol had no mute state: the
+  host's `Mute` only sent `Muted` to the target, and a muted mic keeps its
+  track published. Now `Participant.muted` is part of `RoomState` and
+  `ParticipantView`; `ClientMsg::SetMuted` reports a participant's own
+  switch; the host's `Mute` and the consent gate set the flag and still send
+  `Muted`. The web shell sends `setMuted` when its mic switch changes and,
+  after every Welcome, lets the room's view win ("muting wins"). The tile
+  shows the muted icon for others, and the host's Mute button is disabled
+  once the guest is muted. docs/core/README.md describes the rule.
+- **No mute while a shared screen was fullscreen on the iPhone.** iPhone
+  Safari's native player (`webkitEnterFullscreen`) hid the page, and on
+  desktop the fullscreened tile hid the control bar too. A shared screen now
+  expands inside the meeting view: the header (except the Recording badge)
+  and the other tiles are hidden, the screen fills the stage on black, the
+  control bar stays; where the Fullscreen API exists the whole meeting view
+  goes fullscreen as well. docs/ui/README.md records the decision.
+- **Hallucinated names on the phone's quiet chunks** ("Steven", "Anthony
+  Chousou", and the prompt echoed as "Phone, Phone, Phone, …"). Cause: the
+  Whisper prompt "Participants: Felix Peppert, Phone." Ran the same chunks
+  through Workers AI without a prompt: a filler word or nothing. The prompt
+  is gone, and segments with `avg_logprob` below −1.0 or
+  `compression_ratio` above 2.4 are dropped (OpenAI's reference thresholds;
+  real speech scored −0.26 to −0.44). D17's as-built note has the numbers.
+
+Also: four snippets of real speech from that meeting (two per device) live in
+`web/e2e/audio/` with a manifest; the recorder e2e streams them and checks
+each snippet's keywords in the transcript instead of espeak sentences.
+
+Next: deploy once no meeting is live; the owner tries Mute and Expand on the
+iPhone; delete button for past meetings; per-speaker audio on the transcript
+page.
+
 ## 2026-10-10 — TURN credentials live
 
 The owner created a Realtime TURN key and put it in `.dev.vars`; the two

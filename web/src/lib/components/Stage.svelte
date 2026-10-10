@@ -3,12 +3,23 @@
 	import { fitGrid, tileAspect } from '../layout.ts';
 	import Tile, { type TileModel } from './Tile.svelte';
 
-	/** `featured` (a shared screen) gets the large tile. */
+	/**
+	 * `featured` (a shared screen) gets the large tile. `expanded` (a shared screen) is shown
+	 * alone; `onexpand` asks to expand a screen, or `null` to go back.
+	 */
 	let {
 		tiles,
 		featured,
-		layers
-	}: { tiles: TileModel[]; featured: TileModel | null; layers: LayerControl } = $props();
+		expanded,
+		layers,
+		onexpand
+	}: {
+		tiles: TileModel[];
+		featured: TileModel | null;
+		expanded: TileModel | null;
+		layers: LayerControl;
+		onexpand: (screen: TileModel | null) => void;
+	} = $props();
 
 	const GAP = 8;
 
@@ -18,22 +29,40 @@
 	let landscape = $derived(width >= height);
 	let rest = $derived(featured ? tiles.filter((t) => t.key !== featured.key) : tiles);
 	let fit = $derived(fitGrid(tiles.length, width, height, GAP, tileAspect(width, height)));
+
+	/** The large tile: the expanded screen, else the featured one. */
+	let main = $derived(expanded ?? featured);
+
+	const expandTo = (screen: TileModel) => (on: boolean) => onexpand(on ? screen : null);
 </script>
 
 <div class="stage" bind:clientWidth={width} bind:clientHeight={height}>
-	{#if featured}
-		<!-- One featured tile for both orientations: rotating a phone keeps it, and its fullscreen. -->
-		<div class={['spotlight', landscape ? 'beside' : 'below']}>
+	{#if main}
+		<!--
+			One large tile for both orientations and for the expanded view: rotating a phone keeps
+			it and its video, and Expand/Exit keep the focus on the same button.
+		-->
+		<div class={['spotlight', expanded ? 'alone' : landscape ? 'beside' : 'below']}>
 			<div class="featured">
-				<div class="screen-box"><Tile tile={featured} {layers} /></div>
+				<div class="screen-box">
+					<Tile
+						tile={main}
+						{layers}
+						variant={expanded ? 'expanded' : 'tile'}
+						onexpand={expandTo(main)}
+					/>
+				</div>
 			</div>
-			{#if rest.length > 0 && landscape}
+			{#if expanded}
+				<!-- The screen alone. -->
+			{:else if rest.length > 0 && landscape}
 				<ul class="strip" aria-label="Other participants">
 					{#each rest as tile (tile.key)}
-						<li><Tile {tile} {layers} variant="strip" /></li>
+						<li><Tile {tile} {layers} variant="strip" onexpand={expandTo(tile)} /></li>
 					{/each}
 				</ul>
 			{:else if rest.length > 0}
+				<!-- Chips are too small for the expand button; a screen is one while a second is shared. -->
 				<ul class="chips" aria-label="Other participants">
 					{#each rest as tile (tile.key)}
 						<li><Tile {tile} {layers} variant="chip" /></li>
@@ -83,6 +112,15 @@
 	.spotlight {
 		display: grid;
 		gap: 8px;
+		height: 100%;
+	}
+
+	/* Expanded: the screen alone, as tall as the stage. */
+	.spotlight.alone {
+		grid-template-rows: minmax(0, 1fr);
+	}
+
+	.alone .screen-box {
 		height: 100%;
 	}
 

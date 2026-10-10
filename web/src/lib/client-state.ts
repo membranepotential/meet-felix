@@ -73,7 +73,10 @@ export type Command =
 	| { kind: 'subscribe-retrying'; notice: string }
 	/** The room refused a `SetLayer` for a track it does not deliver yet: ask again later. */
 	| { kind: 'layer-refused' }
+	/** Switch the local microphone off. */
 	| { kind: 'mute-mic' }
+	/** Tell the room our microphone is off (`SetMuted`). */
+	| { kind: 'report-muted' }
 	/** The stay is over: release media and close the socket. */
 	| { kind: 'teardown' };
 
@@ -108,6 +111,18 @@ export function describeError(code: ErrorCode): string | null {
 		case 'notSubscribed':
 			return null;
 	}
+}
+
+/**
+ * After a welcome, makes the local mic switch and the room's mute flag agree. Muting wins: the
+ * room shows us muted when a host muted us, perhaps while the socket was down, or when it records
+ * without our consent, so the mic goes off; a mic switched off before joining or while the socket
+ * was down is reported to the room. Later switches are reported as they happen.
+ */
+export function syncMute(shownMuted: boolean, micOn: boolean): Command[] {
+	if (shownMuted && micOn) return [{ kind: 'mute-mic' }];
+	if (!shownMuted && !micOn) return [{ kind: 'report-muted' }];
+	return [];
 }
 
 const over = (state: ClientState, end: SessionEnd): [ClientState, Command[]] => [

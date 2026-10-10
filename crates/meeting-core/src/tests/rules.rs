@@ -37,6 +37,15 @@ fn meeting_room() -> Room {
     room
 }
 
+fn muted(room: &Room, who: ParticipantId) -> Option<bool> {
+    room.state
+        .view()
+        .participants
+        .iter()
+        .find(|p| p.id == who)
+        .map(|p| p.muted)
+}
+
 fn role(room: &Room, who: ParticipantId) -> Option<Role> {
     room.state
         .view()
@@ -355,6 +364,7 @@ fn neither_admitting_nor_unlocking_lets_in_a_guest_without_consent_while_recordi
     room.client(HOST, ClientMsg::SetRecording { on: false });
     assert_eq!(presence(&room, GUEST), Some(Presence::Connecting));
     assert_eq!(presence(&room, OTHER), Some(Presence::Connecting));
+    assert_eq!(muted(&room, GUEST), Some(false));
 }
 
 #[test]
@@ -398,6 +408,9 @@ fn starting_a_recording_announces_it_first_and_records_consenting_speakers_only(
         panic!("unexpected effects {effects:#?}");
     };
     assert_eq!(to, &[HOST, GUEST]);
+    assert_eq!(state, &room.state.view(), "shows the guest muted");
+    assert_eq!(muted(&room, GUEST), Some(true));
+    assert_eq!(muted(&room, HOST), Some(false));
     let recording = state.recording.expect("announced");
     assert_eq!((recording.since, recording.by), (room.now, HOST));
     assert_eq!(start, &Effect::StartRecording { since: room.now });
@@ -465,6 +478,65 @@ fn consent_given_later_records_and_withdrawn_consent_stops_recording_and_mutes()
                 msg: ServerMsg::Muted
             },
         ]
+    );
+    assert_eq!(muted(&room, GUEST), Some(true));
+}
+
+#[test]
+fn a_host_without_consent_enters_a_recording_room_muted() {
+    let (mut room, _) = Room::with_policy(RecordingPolicy::FromStart);
+    room.join(HOST, true, false);
+    room.connect(HOST);
+    assert_eq!(presence(&room, HOST), Some(Presence::Joined));
+    assert_eq!(muted(&room, HOST), Some(true));
+}
+
+#[test]
+fn everyone_sees_a_participants_microphone_switch() {
+    let mut room = meeting_room();
+    assert_eq!(muted(&room, GUEST), Some(false));
+
+    let effects = room.client(GUEST, ClientMsg::SetMuted { muted: true });
+    assert_eq!(
+        effects,
+        [Effect::Broadcast {
+            to: vec![HOST, GUEST],
+            msg: ServerMsg::State {
+                state: room.state.view()
+            }
+        }]
+    );
+    assert_eq!(muted(&room, GUEST), Some(true));
+    // The same switch again changes nothing.
+    assert_eq!(room.client(GUEST, ClientMsg::SetMuted { muted: true }), []);
+
+    room.client(GUEST, ClientMsg::SetMuted { muted: false });
+    assert_eq!(muted(&room, GUEST), Some(false));
+}
+
+#[test]
+fn a_host_mute_shows_the_participant_muted_at_once_and_tells_them() {
+    let mut room = meeting_room();
+    let effects = room.client(HOST, ClientMsg::Mute { who: GUEST });
+    assert_eq!(
+        effects,
+        [
+            Effect::Broadcast {
+                to: vec![HOST, GUEST],
+                msg: ServerMsg::State {
+                    state: room.state.view()
+                }
+            },
+            Effect::Send {
+                to: GUEST,
+                msg: ServerMsg::Muted
+            },
+        ]
+    );
+    assert_eq!(muted(&room, GUEST), Some(true));
+    assert_eq!(
+        room.client(HOST, ClientMsg::Mute { who: OTHER }),
+        error(HOST, ErrorCode::InvalidTarget)
     );
 }
 
@@ -633,6 +705,19 @@ fn state_survives_a_json_round_trip() {
         serde_json::from_str::<RoomState>(&json).expect("deserializable"),
         room.state
     );
+
+    // A participant stored before the mute flag existed loads unmuted.
+    room.client(GUEST, ClientMsg::SetMuted { muted: true });
+    let mut stored = serde_json::to_value(&room.state).expect("serializable");
+    for p in stored["participants"]
+        .as_object_mut()
+        .expect("participants")
+        .values_mut()
+    {
+        p.as_object_mut().expect("participant").remove("muted");
+    }
+    let loaded: RoomState = serde_json::from_value(stored).expect("deserializable");
+    assert!(!loaded.participants[&GUEST].muted);
 }
 
 #[test]
@@ -640,6 +725,7 @@ fn a_client_takes_its_place_again_on_a_new_socket() {
     const NEW_SOCKET: ParticipantId = ParticipantId(9);
     let mut room = meeting_room();
     room.publish(GUEST, &[TrackKind::Audio]);
+    room.client(GUEST, ClientMsg::SetMuted { muted: true });
     let before = room.state.clone();
     let token = before.participants[&GUEST].resume.clone();
 

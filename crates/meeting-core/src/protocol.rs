@@ -198,6 +198,10 @@ pub struct ParticipantView {
     pub presence: Presence,
     /// Kinds of the tracks they publish, sorted.
     pub tracks: Vec<TrackKind>,
+    /// Whether their microphone is switched off: by themselves ([`ClientMsg::SetMuted`]), by a
+    /// host ([`ClientMsg::Mute`]), or because the room records without their consent. A muted
+    /// microphone may still publish its (silent) audio track.
+    pub muted: bool,
 }
 
 /// The public snapshot of a room: no secrets, no SDP, no SFU sessions.
@@ -248,6 +252,13 @@ pub enum ClientMsg {
     SetConsent {
         /// Whether you accept recording and transcription.
         consent: bool,
+    },
+    /// Report your microphone switch: send it whenever it changes, and after every
+    /// [`ServerMsg::Welcome`] whose state shows you otherwise. Every client sees it as
+    /// [`ParticipantView::muted`].
+    SetMuted {
+        /// Whether your microphone is off.
+        muted: bool,
     },
     /// Offer new tracks on the publish session.
     PublishOffer {
@@ -301,7 +312,8 @@ pub enum ClientMsg {
         /// The participant to remove.
         who: ParticipantId,
     },
-    /// Host: ask a participant to mute their microphone.
+    /// Host: mute a participant's microphone. The room shows them muted at once and sends them
+    /// [`ServerMsg::Muted`]; only they can unmute themselves.
     Mute {
         /// The participant to mute.
         who: ParticipantId,
@@ -375,7 +387,8 @@ pub enum ServerMsg {
     /// [`ClientMsg::SetConsent`]. Until you consent you stay outside the room or, if you are
     /// already in, muted and not recorded.
     ConsentRequired,
-    /// Mute your microphone: a host asked, or the room records without your consent.
+    /// Mute your microphone: a host asked, or the room records without your consent. The room
+    /// already shows you muted; send [`ClientMsg::SetMuted`] when you unmute.
     Muted,
     /// A host removed you; the socket closes next.
     Kicked,

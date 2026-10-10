@@ -842,11 +842,10 @@ impl Inner {
         }
         let transcriber = WhisperTurbo(self.env.ai(AI)?);
         let bucket = self.bucket()?;
-        let prompt = recorder.prompt();
         let results = join_all(
             batch
                 .iter()
-                .map(|row| self.transcribe_chunk(&transcriber, &bucket, row, &prompt)),
+                .map(|row| self.transcribe_chunk(&transcriber, &bucket, row)),
         )
         .await;
         let mut retry_at: Option<Millis> = None;
@@ -904,7 +903,6 @@ impl Inner {
         transcriber: &impl Transcriber,
         bucket: &Bucket,
         row: &ChunkRow,
-        prompt: &str,
     ) -> std::result::Result<Vec<Segment>, TranscribeError> {
         let id = row.id();
         let key = chunk_key(&self.id(), id.who, id.generation, id.index);
@@ -924,7 +922,7 @@ impl Inner {
             .bytes()
             .await
             .map_err(|e| other(e.to_string()))?;
-        let texts = transcriber.transcribe(&audio, prompt).await?;
+        let texts = transcriber.transcribe(&audio).await?;
         let at = |seconds: f64| {
             let offset = (seconds.max(0.0) * 1000.0).round() as u64;
             Millis(row.start_ms + offset.min(row.duration_ms))

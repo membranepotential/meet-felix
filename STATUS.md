@@ -4,7 +4,7 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- test-meeting — user records a real meeting with a guest on https://meet.example.com and reads the transcript page — waiting
+- test-findings — mute state (core+web), expanded screen with control bar, Whisper prompt removed + thresholds, real-speech e2e snippets — reviewed (2 × code-reviewer-high, findings fixed), e2e 56/56 + recorder 22/22 — deploy waits for the owner's live meeting to end
 
 ## Done
 - 2026-10-10 TURN live: the owner created a Realtime TURN key; secrets `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` uploaded; `/api/ice` on production returns STUN plus TURN credentials (port 53 filtered), and a relay-only gather in headless Chromium produced relay candidates over UDP, TCP and TLS.

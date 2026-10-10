@@ -87,6 +87,7 @@ enum Msg {
     Mute(u32),
     SetRecording(bool),
     SetConsent(bool),
+    SetMuted(bool),
     /// The client's peer connection for this session failed; `stale` names an epoch other than
     /// the current one, as a report about a replaced session's connection does.
     ResetSession {
@@ -118,6 +119,7 @@ fn msg() -> impl Strategy<Value = Msg> {
         1 => who().prop_map(Msg::Mute),
         4 => any::<bool>().prop_map(Msg::SetRecording),
         3 => any::<bool>().prop_map(Msg::SetConsent),
+        2 => any::<bool>().prop_map(Msg::SetMuted),
         1 => (proptest::sample::select(vec![SessionKind::Publish, SessionKind::Subscribe]), any::<bool>())
             .prop_map(|(kind, stale)| Msg::ResetSession { kind, stale }),
         1 => (0..20u8).prop_filter_map("rare", |n| (n == 0).then_some(Msg::End)),
@@ -306,6 +308,7 @@ impl Sim {
                     Msg::Mute(w) => ClientMsg::Mute { who: id(w) },
                     Msg::SetRecording(on) => ClientMsg::SetRecording { on },
                     Msg::SetConsent(consent) => ClientMsg::SetConsent { consent },
+                    Msg::SetMuted(muted) => ClientMsg::SetMuted { muted },
                     Msg::ResetSession { kind, stale } => {
                         let epoch = current_epochs(&self.room.state, id(who))
                             .unwrap_or_default()
@@ -786,6 +789,38 @@ impl Sim {
             {
                 prop_assert!(owner_join && p.role == Role::Host, "{who:?} changed role");
             }
+            // A participant's mute flag follows their own report, and otherwise only turns on,
+            // together with a `Muted` to them; whoever is sent `Muted` is shown muted. (A join
+            // after leaving is a new participant, unmuted.)
+            let told_muted = effects.contains(&Effect::Send {
+                to: who,
+                msg: ServerMsg::Muted,
+            });
+            if let Some(was) = was
+                && was.connection.presence().is_some()
+                && was.muted != p.muted
+            {
+                let reported = matches!(
+                    event,
+                    Event::Client { from, msg: ClientMsg::SetMuted { muted }, .. }
+                        if *from == who && *muted == p.muted
+                );
+                prop_assert!(
+                    reported || (p.muted && told_muted),
+                    "{who:?}'s mute flag changed: {effects:?}"
+                );
+            } else if p.connection.presence().is_some()
+                && was.is_none_or(|was| was.connection.presence().is_none())
+            {
+                prop_assert!(
+                    !p.muted || told_muted,
+                    "{who:?} joined muted without being told: {effects:?}"
+                );
+            }
+            prop_assert!(
+                !told_muted || p.muted,
+                "{who:?} told to mute but shown unmuted"
+            );
             match &p.connection {
                 // Nobody joins before the SFU created both sessions, and every session in use
                 // is one the SFU created for its participant.

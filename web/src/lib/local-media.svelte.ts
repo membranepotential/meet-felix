@@ -28,7 +28,10 @@ export class LocalMedia {
 	screen = $state.raw<MediaStreamTrack | null>(null);
 	devices = $state.raw<DeviceLists>({ microphones: [], cameras: [] });
 	choice = $state<DeviceChoice>({ microphone: null, camera: null });
-	/** The user's mute switch. Muting keeps the track live (and published) with `enabled = false`. */
+	/**
+	 * The user's mute switch. Muting keeps the track live (and published) with `enabled = false`;
+	 * the session reports the switch to the room, which shows it to everyone.
+	 */
 	micOn = $state(true);
 	error = $state.raw<CaptureError | null>(null);
 	starting = $state(false);

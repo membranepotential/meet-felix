@@ -1,0 +1,30 @@
+[
+	{
+		"file": "host-laptop-works.wav",
+		"speaker": "laptop",
+		"language": "en",
+		"text": "Okay, so on the laptop that works good. Now I'm going to my phone in the other room.",
+		"keywords": ["laptop", "phone"]
+	},
+	{
+		"file": "host-ending-now.wav",
+		"speaker": "laptop",
+		"language": "en",
+		"text": "Probably should have more better coverage of end-to-end tests. Okay, ending now.",
+		"keywords": ["coverage", "ending"]
+	},
+	{
+		"file": "phone-unmuted.wav",
+		"speaker": "iphone",
+		"language": "en",
+		"text": "Okay, I'm still muted here. Now I'm unmuted on my phone. I see the screen. That works well.",
+		"keywords": ["muted", "phone", "screen"]
+	},
+	{
+		"file": "phone-no-feedback.wav",
+		"speaker": "iphone",
+		"language": "en",
+		"text": "Hello, hello? Ah, okay, so now the button does do something. It just doesn't have feedback.",
+		"keywords": ["button", "feedback"]
+	}
+]

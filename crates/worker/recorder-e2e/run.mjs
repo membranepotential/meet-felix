@@ -15,24 +15,25 @@
 //     --var SFU_API_URL:http://localhost:8790/v1 --var RECORDER_ORIGIN:http://localhost:8803
 // Then: node crates/worker/recorder-e2e/run.mjs [base-url]   (default http://localhost:8803)
 //
-// Audio: with `espeak-ng` and `ffmpeg` installed, the mock speaks German and English sentences;
-// otherwise it streams a 440 Hz tone, which Whisper should leave without text. Set
-// RECORDER_E2E_SECONDS (default 34) for the length; over 30 s exercises the hard chunk cut.
+// Audio: the real speech snippets in web/e2e/audio (needs `ffmpeg`), streamed one after the
+// other with a pause between them; the transcript must contain each snippet's keywords. Without
+// ffmpeg it streams a 440 Hz tone, which Whisper should leave without text. Set
+// RECORDER_E2E_SECONDS (default 40) for the length; over 30 s exercises the hard chunk cut.
 // RECORDER_E2E_SFU_PORT (default 8790) moves the mock SFU. Needs Node >= 26.
 
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BASE = process.argv[2] ?? "http://localhost:8803";
 const WS_BASE = BASE.replace(/^http/, "ws");
 const SECRET = process.env.RECORDER_E2E_CREATE_SECRET ?? "e2e-secret";
 const SFU_PORT = Number(process.env.RECORDER_E2E_SFU_PORT ?? 8790);
 const SFU_SECRET = "e2e-sfu";
-const SECONDS = Number(process.env.RECORDER_E2E_SECONDS ?? 34);
+const SECONDS = Number(process.env.RECORDER_E2E_SECONDS ?? 40);
 const JOB_TIMEOUT_MS = Number(process.env.RECORDER_E2E_JOB_TIMEOUT_MS ?? 180_000);
 
 const results = [];
@@ -53,21 +54,18 @@ const until = async (what, predicate, ms = 10_000, every = 200) => {
 
 const FRAME_BYTES = 960 * 4; // 20 ms of 48 kHz stereo 16-bit
 
+const AUDIO_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "web", "e2e", "audio");
+/** The snippets of web/e2e/audio: `{ file, speaker, language, text, keywords }` each. */
+const SNIPPETS = JSON.parse(readFileSync(join(AUDIO_DIR, "snippets.json"), "utf8"));
+
 function speech() {
   try {
-    const dir = mkdtempSync(join(tmpdir(), "recorder-e2e-"));
-    const lines = [
-      ["de", "Guten Tag zusammen. Wir besprechen heute den Plan für die nächste Woche."],
-      ["en", "Thanks everyone. Let us start with the budget and then talk about the release."],
-    ];
-    const parts = lines.map(([voice, text], i) => {
-      const wav = join(dir, `${i}.wav`);
-      execFileSync("espeak-ng", ["-v", voice, "-s", "150", "-w", wav, text]);
-      return execFileSync("ffmpeg", ["-v", "error", "-i", wav, "-ar", "48000", "-ac", "2", "-f", "s16le", "-"], {
+    const parts = SNIPPETS.map((s) =>
+      execFileSync("ffmpeg", ["-v", "error", "-i", join(AUDIO_DIR, s.file), "-ar", "48000", "-ac", "2", "-f", "s16le", "-"], {
         maxBuffer: 64 << 20,
-      });
-    });
-    const pause = Buffer.alloc(48_000 * 4); // one second of silence between sentences
+      }),
+    );
+    const pause = Buffer.alloc(48_000 * 4); // one second of silence between snippets
     return { kind: "speech", pcm: Buffer.concat(parts.flatMap((p) => [p, pause])) };
   } catch {
     return null;
@@ -314,7 +312,9 @@ async function main() {
     check("the transcript names the meeting and the speaker", t.meeting === meeting && t.speakers.every((s) => s.label === "Felix (host)"));
     check("the consent record lists the host", t.consents.some((c) => c.name === "Felix" && c.noticeVersion === 1));
     if (AUDIO.kind === "speech") {
-      check("the speech came back as at least one paragraph", t.paragraphs.length > 0, t.paragraphs.map((p) => p.text).join(" | ").slice(0, 200));
+      const text = t.paragraphs.map((p) => p.text).join(" ").toLowerCase();
+      const missing = SNIPPETS.flatMap((s) => s.keywords.filter((k) => !text.includes(k)));
+      check("the transcript has every snippet's keywords", missing.length === 0, missing.length ? `missing ${missing.join(", ")}: ${text.slice(0, 300)}` : text.slice(0, 120));
     }
     const md = await fetch(`${BASE}/api/transcript/${token}/transcript.md`);
     check(

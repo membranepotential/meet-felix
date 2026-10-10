@@ -85,7 +85,7 @@ test('mute and camera: the buttons, the own tile, and the others’ view follow'
 	await expect(guest.control('Unmute')).toBeVisible();
 });
 
-test('screen share: a featured tile with a fullscreen button, for the sharer and the others', async ({
+test('screen share: a featured tile that expands, for the sharer and the others', async ({
 	api,
 	owner,
 	host,
@@ -99,16 +99,51 @@ test('screen share: a featured tile with a fullscreen button, for the sharer and
 	await host.control('Share screen').click();
 	await expect(host.control('Stop sharing')).toBeVisible();
 	await expect(
-		host.tile('Your screen').getByRole('button', { name: 'Show fullscreen' })
+		host.tile('Your screen').getByRole('button', { name: 'Expand screen' })
 	).toBeVisible();
 	await host.waitForSent('publishOffer', (m) => m.tracks.some((t) => t.kind === 'screen'));
 	const remoteScreen = guest.tile(`${OWNER_NAME}’s screen`);
 	await expect(remoteScreen).toBeVisible({ timeout: 15_000 });
-	await expect(remoteScreen.getByRole('button', { name: 'Show fullscreen' })).toBeVisible();
 
+	// Expanded: the screen alone, fullscreen on the meeting, and the control bar still there.
+	const header = guest.meeting.locator('header');
+	await expect(header).toBeVisible();
+	await remoteScreen.getByRole('button', { name: 'Expand screen' }).click();
+	await expect(guest.tiles).toHaveCount(1);
+	await expect(header).toHaveCount(0);
+	await expect(guest.control('Mute')).toBeVisible();
+	await expect
+		.poll(() => guest.page.evaluate(() => document.fullscreenElement?.className ?? ''))
+		.toContain('meeting');
+	await guest.control('Mute').click();
+	await expect(guest.control('Unmute')).toBeVisible();
+
+	await remoteScreen.getByRole('button', { name: 'Exit expanded view' }).click();
+	await expect(guest.tiles).toHaveCount(3);
+	await expect(header).toBeVisible();
+	await expect.poll(() => guest.page.evaluate(() => document.fullscreenElement)).toBeNull();
+
+	// Leaving fullscreen another way (Esc, a system gesture) also leaves the expanded view.
+	await remoteScreen.getByRole('button', { name: 'Expand screen' }).click();
+	await expect(guest.tiles).toHaveCount(1);
+	await expect
+		.poll(() => guest.page.evaluate(() => document.fullscreenElement !== null))
+		.toBe(true);
+	await guest.page.evaluate(() => document.exitFullscreen());
+	await expect(guest.tiles).toHaveCount(3);
+
+	// The share ends while expanded: back to the normal stage.
+	await remoteScreen.getByRole('button', { name: 'Expand screen' }).click();
+	await expect(guest.tiles).toHaveCount(1);
+	await expect
+		.poll(() => guest.page.evaluate(() => document.fullscreenElement !== null))
+		.toBe(true);
 	await host.control('Stop sharing').click();
 	await expect(host.tile('Your screen')).toHaveCount(0);
 	await expect(remoteScreen).toHaveCount(0);
+	await expect(guest.tiles).toHaveCount(2);
+	await expect(header).toBeVisible();
+	await expect.poll(() => guest.page.evaluate(() => document.fullscreenElement)).toBeNull();
 });
 
 test('a guest leaves; the host ends the meeting for everyone, with the transcript link', async ({

@@ -13,6 +13,7 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
         r#"{ type: "join"; name: DisplayName; consent: boolean; resume?: ResumeToken }"#
     ));
     assert!(ClientMsg::DECL.contains(r#"{ type: "setConsent"; consent: boolean }"#));
+    assert!(ClientMsg::DECL.contains(r#"{ type: "setMuted"; muted: boolean }"#));
     assert!(ServerMsg::DECL.contains(
         r#"{ type: "welcome"; you: ParticipantId; state: RoomView; resume: ResumeToken; epochs: SessionEpochs }"#
     ));
@@ -60,6 +61,7 @@ fn every_server_msg_round_trips_through_json() {
             consent_recording: true,
             presence: Presence::Joined,
             tracks: vec![TrackKind::Audio, TrackKind::Video],
+            muted: true,
         }],
     };
     let all = [
@@ -152,6 +154,9 @@ fn json_uses_camel_case_tags_and_omits_absent_options() {
     assert_eq!(msg, ClientMsg::SetConsent { consent: false });
     let policy = serde_json::to_string(&crate::RecordingPolicy::FromStart).expect("serializable");
     assert_eq!(policy, r#""fromStart""#);
+    let msg: ClientMsg =
+        serde_json::from_str(r#"{"type":"setMuted","muted":true}"#).expect("valid");
+    assert_eq!(msg, ClientMsg::SetMuted { muted: true });
     let msg: ClientMsg =
         serde_json::from_str(r#"{"type":"unpublish","kind":"video"}"#).expect("valid");
     assert_eq!(

@@ -262,8 +262,14 @@ of CPU per invocation): the alarm runs one small step per invocation and
 re-arms itself at once while work remains. A step uploads what an eviction
 left behind, transcribes up to four stored chunks in parallel, or merges up to
 300 segments into paragraphs; the last step writes both files. Requests use
-`vad_filter: true`, `beam_size: 2` and an `initial_prompt` naming the
-participants, and segments with `no_speech_prob` above 0.6 are dropped. An
+`vad_filter: true` and `beam_size: 2`, and no prompt: on the test meeting of
+2026-10-10 a prompt naming the participants made the model echo it on quiet
+chunks ("Phone, Phone, Phone, …") and invent names ("Steven"); without one the
+same chunks gave a filler word or nothing. Segments with `no_speech_prob`
+above 0.6, `avg_logprob` below −1.0 (real speech scored −0.26 to −0.44, a
+guessed "Okay." on a muted phone −1.03) or `compression_ratio` above 2.4 (the
+echoed prompt scored 37) are dropped; the last two are OpenAI's reference
+thresholds. An
 error whose text names a quota, the daily allowance or neurons waits until
 00:05 UTC, and one that says 429, "rate limit" or "too many requests" waits an
 hour; the status shows `retryAt`, and the transcript never fails for that.

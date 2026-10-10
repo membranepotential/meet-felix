@@ -35,7 +35,8 @@ time is an extra argument because the core reads no clock.
 
 - **`RoomState`**: one serializable value holding everything about a room:
   the meeting id, the recording policy, the participants
-  (name, role, recording consent, resume token, and connection state:
+  (name, role, recording consent, microphone switch, resume token, and
+  connection state:
   waiting for the host, knocking, awaiting consent, connecting, joined with
   their SFU sessions and tracks, or left), the lock, the recording status,
   the transcript token, and the phase with its timer (see
@@ -64,7 +65,8 @@ time is an extra argument because the core reads no clock.
   exported to TypeScript with `tsify`. Client messages: `Join` (name,
   consent and an optional resume token; no host token since 2026-10-09, see
   [Phases](#phases)),
-  `SetConsent`, `PublishOffer`, `Unpublish` (a track kind), `SubscribeAnswer`,
+  `SetConsent`, `SetMuted` (the sender's microphone switch), `PublishOffer`,
+  `Unpublish` (a track kind), `SubscribeAnswer`,
   `SetLayer`, `Lock`,
   `Admit`, `Kick`, `Mute`, `SetRecording`, `End` and `Leave`. Server
   messages: `Welcome` (with the resume token), `State`, `Waiting`,
@@ -168,6 +170,15 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
 - A meeting with `RecordingPolicy::FromStart` starts recording when the first
   host joins; with `HostDecides`, only `SetRecording` starts it.
 - Only hosts lock, admit, kick, mute, record and end.
+- Every participant's microphone switch is part of the room state
+  (`ParticipantView::muted`), so every client shows who is muted
+  (2026-10-10). A client reports its own switch with `SetMuted`. A host's
+  `Mute` and the consent rule above set the flag at once and send `Muted`, so
+  the host sees the result without waiting for the muted client; only the
+  participant unmutes themselves. A participant joins unmuted, unless the
+  room records without their consent. A muted microphone may still publish
+  its silent audio track, so a client shows a microphone as on only if the
+  participant publishes audio and is not muted.
 - Every change to the public `RoomView` reaches every joined client, so all
   of them see a recording start. Only consenting participants' audio is
   recorded.
@@ -238,11 +249,18 @@ When a client's socket drops, it opens a new socket, which the shell gives a
 new participant id, and sends `Join { resume: Some(token) }`. If the token's
 participant has not left, the core emits `CloseSocket` for the old socket and
 `Rebind { socket: new id, participant: old id }`, and answers the participant
-as it would answer a repeated `Join` (`Welcome` when joined). Consent and
-tracks stay as they were, and so does the role, except that a guest whose
+as it would answer a repeated `Join` (`Welcome` when joined). Consent,
+tracks and the mute flag stay as they were, and so does the role, except that a guest whose
 place the owner's socket takes becomes a host (2026-10-09, see
 [Phases](#phases)). Otherwise, for example after the shell reported
 `SocketClosed` for the old socket, the `Join` is a fresh join.
+
+After every `Welcome`, the web client makes its microphone switch and the
+room's mute flag agree, and muting wins: if the room shows it muted (a host
+muted it while the socket was down, or the room records without its
+consent), it switches the microphone off; if its microphone is off and the
+room shows it on (switched off before joining or while the socket was down),
+it sends `SetMuted` (`syncMute` in `web/src/lib/client-state.ts`, 2026-10-10).
 
 A `Join` from a participant still in the room changes nothing and gets the
 same answer again (`Welcome`, `Waiting`, or `ConsentRequired`), unless it
@@ -255,7 +273,7 @@ join.
 Property tests (`proptest`) generate random sequences of join (from the
 owner's socket or not, into a scheduled or live room), resume (also from the
 owner's socket), leave,
-kick, lock, knock, consent, publish, unpublish, renegotiation, SFU failure,
+kick, lock, knock, consent, mute, microphone switch, publish, unpublish, renegotiation, SFU failure,
 lost SFU replies, alarms (at random times, at negotiation deadlines and at
 the scheduled expiry) and
 recording events under both recording policies, run them through `step`, and check
@@ -280,6 +298,9 @@ after every step that:
   `Muted`; and exactly the consenting joined speakers' current audio is
   recorded, with no track left over from a speaker who left or a track that
   is gone;
+- a participant's mute flag follows their own `SetMuted` and otherwise only
+  turns on, together with a `Muted` to them; whoever gets `Muted` is shown
+  muted;
 - guests never succeed with `Lock`, `Admit`, `Kick`, `Mute`, `SetRecording`
   or `End`: the state stays the same and they get an `Error`;
 - a host is never locked out of their own room (only guests wait for the

@@ -80,6 +80,10 @@ pub(crate) struct Participant {
     /// Lets the participant's client take this place again from a new socket.
     pub(crate) resume: ResumeToken,
     pub(crate) connection: Connection,
+    /// Whether their microphone is off ([`ParticipantView::muted`]). Records stored before the
+    /// field existed load as unmuted.
+    #[serde(default)]
+    pub(crate) muted: bool,
 }
 
 /// A participant's consent to recording: when they first gave it, which notice they saw, and
@@ -328,6 +332,7 @@ impl RoomState {
                     consent_recording: p.consents(),
                     presence,
                     tracks,
+                    muted: p.muted,
                 })
             })
             .collect();

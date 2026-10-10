@@ -8,6 +8,7 @@ import { getIceServers, getMeeting } from './api.ts';
 import {
 	INITIAL,
 	reduce,
+	syncMute,
 	type ClientState,
 	type Command,
 	type SessionEnd
@@ -104,6 +105,8 @@ export class Session {
 	#subscriber: Promise<Subscriber> | null = null;
 	/** The epochs of the room's sessions the two connections belong to. */
 	#epochs: SessionEpochs = { publish: 0, subscribe: 0 };
+	/** The last mic switch was not reported, because the socket was down. */
+	#unsentMute = false;
 	readonly #resets = new SessionResets((kind, epoch) =>
 		this.#signaling.send({ type: 'resetSession', kind, epoch })
 	);
@@ -149,6 +152,15 @@ export class Session {
 			});
 			$effect(() => {
 				if (this.#media.micStalled) untrack(() => this.toasts.show(MIC_STALLED, 'alert'));
+			});
+			// Everyone sees our mic switch. A report that could not go out (the socket was down)
+			// is made on the next welcome instead of adopting the room's view (`#welcomed`).
+			$effect(() => {
+				const muted = !this.#media.micOn;
+				untrack(() => {
+					if (this.stage.kind !== 'in') return;
+					this.#unsentMute = !this.#signaling.send({ type: 'setMuted', muted });
+				});
 			});
 		});
 	}
@@ -242,6 +254,9 @@ export class Session {
 			case 'mute-mic':
 				this.#media.mute();
 				return;
+			case 'report-muted':
+				this.#signaling.send({ type: 'setMuted', muted: true });
+				return;
 			case 'teardown':
 				this.#over();
 				return;
@@ -251,13 +266,19 @@ export class Session {
 	/**
 	 * A new participant opens new peer connections. After a reconnect, the old ones stay,
 	 * except a connection whose session the room replaced while the socket was down: its reset
-	 * never arrived, but the welcome's epochs tell.
+	 * never arrived, but the welcome's epochs tell. Either way the mic switch and the room's mute
+	 * flag are made to agree.
 	 */
 	#welcomed(fresh: boolean, epochs: SessionEpochs): void {
 		const current = (kind: SessionKind) => !fresh && this.#epochs[kind] === epochs[kind];
 		if (this.#publisher === null || !current('publish')) this.#openPublisher(epochs.publish);
 		else void this.#publisher.then((publisher) => publisher.retryFailed());
 		if (this.#subscriber === null || !current('subscribe')) this.#openSubscriber(epochs.subscribe);
+		if (this.#unsentMute) {
+			this.#unsentMute = !this.#signaling.send({ type: 'setMuted', muted: !this.#media.micOn });
+			return;
+		}
+		for (const command of syncMute(this.me?.muted ?? false, this.#media.micOn)) this.#run(command);
 	}
 
 	/**

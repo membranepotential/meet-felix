@@ -136,15 +136,6 @@ impl Recorder {
             None => self.speakers.push(entry),
         }
     }
-
-    /// The prompt for the speech model: the participants' names, so they are spelled the same
-    /// in every chunk (research 11).
-    pub fn prompt(&self) -> String {
-        let mut names: Vec<&str> = self.speakers.iter().map(|s| s.name.as_str()).collect();
-        names.sort_unstable();
-        names.dedup();
-        format!("Participants: {}.", names.join(", "))
-    }
 }
 
 /// The status behind `GET /api/transcript/:token`.
@@ -485,6 +476,6 @@ mod tests {
         recorder.name_speaker(entry("Ana"));
         recorder.name_speaker(entry("Anna"));
         assert_eq!(recorder.speakers.len(), 1);
-        assert_eq!(recorder.prompt(), "Participants: Anna.");
+        assert_eq!(recorder.speakers[0].name.as_str(), "Anna");
     }
 }

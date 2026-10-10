@@ -179,6 +179,7 @@ impl RoomState {
                             }),
                             resume: fresh_token,
                             connection: Connection::Knocking,
+                            muted: false,
                         },
                     );
                     self.enter(from, fx);
@@ -209,6 +210,10 @@ impl RoomState {
             }
             ClientMsg::SetConsent { consent } => {
                 self.set_consent(now, from, consent, fx);
+                Ok(())
+            }
+            ClientMsg::SetMuted { muted } => {
+                self.participants.get_mut(&from).expect("present").muted = muted;
                 Ok(())
             }
             ClientMsg::PublishOffer { sdp, tracks } => {
@@ -271,7 +276,7 @@ impl RoomState {
                 require_host()?;
                 match self.participants.get(&who) {
                     Some(p) if matches!(p.connection, Connection::Joined { .. }) => {
-                        fx.send(who, ServerMsg::Muted);
+                        self.mute(who, fx);
                         Ok(())
                     }
                     _ => Err(ErrorCode::InvalidTarget),
@@ -429,13 +434,21 @@ impl RoomState {
 
     /// Asks `who` for consent to the running recording; if they are admitted, they are muted
     /// until they give it.
-    fn ask_consent(&self, who: ParticipantId, fx: &mut Effects) {
+    fn ask_consent(&mut self, who: ParticipantId, fx: &mut Effects) {
         fx.send(who, ServerMsg::ConsentRequired);
         if self
             .participants
             .get(&who)
             .is_some_and(|p| p.connection.is_admitted())
         {
+            self.mute(who, fx);
+        }
+    }
+
+    /// Mutes `who`: shows them muted at once and tells their client to switch the microphone off.
+    fn mute(&mut self, who: ParticipantId, fx: &mut Effects) {
+        if let Some(p) = self.participants.get_mut(&who) {
+            p.muted = true;
             fx.send(who, ServerMsg::Muted);
         }
     }

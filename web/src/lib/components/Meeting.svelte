@@ -79,7 +79,7 @@
 					key: String(p.id),
 					source: 'camera',
 					stream: camera,
-					micOn: p.tracks.includes('audio'),
+					micOn: p.tracks.includes('audio') && !p.muted,
 					level: () => levelOf(String(p.id)),
 					layerTrack: camera ? { owner: p.id, kind: 'video' } : null,
 					actions: session.isHost
@@ -134,6 +134,49 @@
 	/** A shared screen gets the large tile. */
 	let featured = $derived(tiles.find((t) => t.source === 'screen') ?? null);
 
+	/** The meeting's root element: what goes fullscreen while a screen is expanded. */
+	let root: HTMLDivElement | undefined = $state();
+
+	/**
+	 * The shared screen shown alone, with the control bar below it, or `null`. A screen is known
+	 * by its tile key and its stream, so a share that ends never comes back expanded, not even
+	 * when the SFU reuses its slot for another track. In-page only where elements cannot go
+	 * fullscreen (iPhone Safari): the meeting already fills the viewport there.
+	 */
+	let expandedRef = $state.raw<{ key: string; stream: MediaStream } | null>(null);
+	let expanded = $derived.by(() => {
+		const ref = expandedRef;
+		if (ref === null) return null;
+		return (
+			tiles.find((t) => t.source === 'screen' && t.key === ref.key && t.stream === ref.stream) ??
+			null
+		);
+	});
+
+	/** Expands `screen`, or goes back with `null`; fullscreen follows where the browser has it. */
+	function expand(screen: TileModel | null) {
+		expandedRef = screen?.stream ? { key: screen.key, stream: screen.stream } : null;
+		if (screen && document.fullscreenEnabled && root && document.fullscreenElement !== root) {
+			root.requestFullscreen().catch(() => {});
+		}
+	}
+
+	// Nothing expanded any more (Exit, or the share ended): forget the screen, leave fullscreen.
+	$effect(() => {
+		if (expanded !== null) return;
+		if (expandedRef !== null) expandedRef = null;
+		if (root && document.fullscreenElement === root) document.exitFullscreen().catch(() => {});
+	});
+
+	/**
+	 * Leaving fullscreen (Esc, a system gesture) also leaves the expanded view. Fullscreen that
+	 * arrives after the view already collapsed (a quick Exit) is left again.
+	 */
+	function onFullscreenChange() {
+		if (document.fullscreenElement !== root) expandedRef = null;
+		else if (expanded === null) document.exitFullscreen().catch(() => {});
+	}
+
 	function modal(dialog: HTMLDialogElement) {
 		dialog.showModal();
 		return () => dialog.close();
@@ -145,20 +188,27 @@
 	}
 </script>
 
-<div class="meeting">
-	<header>
-		{#if session.room?.recording}
-			<p class="recording" role="status">
-				<span class="dot" aria-hidden="true"></span>
-				Recording
-			</p>
-		{/if}
-		<p class="title">{meeting}</p>
-		{#if session.room?.locked}<p class="locked">Locked</p>{/if}
-	</header>
+<svelte:document onfullscreenchange={onFullscreenChange} />
+
+<div bind:this={root} class={['meeting', expanded && 'expanded']}>
+	<!-- Expanded, the header gives way to the screen; only the recording badge stays (D15). -->
+	{#if !expanded || session.room?.recording}
+		<header>
+			{#if session.room?.recording}
+				<p class="recording" role="status">
+					<span class="dot" aria-hidden="true"></span>
+					Recording
+				</p>
+			{/if}
+			{#if !expanded}
+				<p class="title">{meeting}</p>
+				{#if session.room?.locked}<p class="locked">Locked</p>{/if}
+			{/if}
+		</header>
+	{/if}
 
 	<div class="stage-wrap">
-		<Stage {tiles} {featured} layers={session.layers} />
+		<Stage {tiles} {featured} {expanded} layers={session.layers} onexpand={expand} />
 	</div>
 
 	<!-- Notices hang above the bar, over the stage's lower edge, so the tiles never jump. -->
@@ -188,14 +238,20 @@
 {/if}
 
 <style>
+	/* Named areas, so the stage keeps its row while the header is left out. */
 	.meeting {
 		display: grid;
-		grid-template-rows: auto minmax(0, 1fr) auto;
+		grid-template:
+			'header' auto
+			'stage' minmax(0, 1fr)
+			'dock' auto;
 		height: 100dvh;
 		overflow: hidden;
+		background: var(--lake);
 	}
 
 	header {
+		grid-area: header;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
@@ -241,11 +297,19 @@
 	}
 
 	.stage-wrap {
+		grid-area: stage;
 		min-height: 0;
 		padding: 0 var(--gutter);
 	}
 
+	/* The expanded screen fills the stage edge to edge, on black; only the phone's safe areas stay. */
+	.expanded .stage-wrap {
+		padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+		background: #000;
+	}
+
 	.dock {
+		grid-area: dock;
 		position: relative;
 	}
 </style>

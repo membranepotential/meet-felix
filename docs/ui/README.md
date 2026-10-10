@@ -191,10 +191,20 @@ words must say what the press means.
   stage's lower edge instead of pushing it, so the tiles never jump. Why: in
   that day's real test the user found the strip of notices at the top of the
   meeting distracting.
-- **A shared screen can go fullscreen.** Every screen tile but a chip has a round
-  fullscreen button in its corner: the Fullscreen API on the tile, or the
-  video's own player where only that exists (iPhone Safari). Why: on
-  2026-10-09 a screen share was unreadable on a phone.
+- **A shared screen can expand, and the control bar stays.** Every screen
+  tile but a chip has a round "Expand" button in its corner. Expanded, the
+  meeting shows that screen alone on black with every pixel visible, hides
+  the header and the other tiles, and keeps the control bar and the notices
+  at the bottom; the recording badge stays while recording runs ([D15](../recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
+  Where the browser can put an element in fullscreen, the meeting view goes
+  fullscreen too, and leaving fullscreen (Esc, a system gesture) also leaves
+  the expanded view. Where it cannot (iPhone Safari), the view expands
+  inside the page, which already fills the browser window. Why: on 2026-10-09 a
+  screen share was unreadable on a phone. The first version used the
+  Fullscreen API on the tile and iPhone Safari's own video player
+  (`webkitEnterFullscreen`); in the iPhone test of 2026-10-10 that player
+  hid the page and its control bar, so the user could not mute while
+  watching the screen. A fullscreen tile hid the bar on desktops too.
 
 ## D29: A shared screen keeps people in a column on desktops and in round chips on phones (2026-10-09)
 

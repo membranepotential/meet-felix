@@ -1,4 +1,5 @@
 /** What a host can do to others: lock, admit a knock, mute, kick; and what a guest cannot. */
+import type { RoomView } from '../../src/lib/protocol.ts';
 import { isOp } from '../fixtures/mock-sfu-control.ts';
 import { joinAs, liveMeeting } from '../fixtures/meeting.ts';
 import { publishOffer, receive } from '../fixtures/negotiation.ts';
@@ -48,8 +49,17 @@ test('a guest cannot kick', async ({ api, owner, rooms }) => {
 	await guest.client.take('error', (m) => m.code === 'notHost');
 });
 
-test("a host's mute reaches the participant", async ({ api, owner, rooms }) => {
+test("a host's mute reaches the participant and shows at once; only they unmute", async ({
+	api,
+	owner,
+	rooms
+}) => {
 	const { host, guest } = await liveMeeting({ api, owner, rooms });
+	const shown = (state: RoomView) => state.participants.find((p) => p.id === guest.id)?.muted;
 	host.client.send({ type: 'mute', who: guest.id });
+	await host.client.take('state', (m) => shown(m.state) === true);
 	await guest.client.take('muted');
+
+	guest.client.send({ type: 'setMuted', muted: false });
+	await host.client.take('state', (m) => shown(m.state) === false);
 });
