@@ -57,6 +57,11 @@ test checks the host's tile.
 Next: code review, then deploy when no meeting is live; then the cleanup of
 ended-room storage.
 
+Deployed as version b3ff7ba5 (commit 8d5d8c6) with no meeting live. The review
+found that the Worker alarm queued the silent-socket reports after `AlarmFired`,
+which can wait on SFU calls; a resume in that window would then be marked lost.
+The reports now go first, and a report whose socket a resume closed is dropped.
+
 ## 2026-10-10 — "Join as host" inside a live meeting
 
 STATUS Next item 1. The owner who joined as a guest, for example from a
