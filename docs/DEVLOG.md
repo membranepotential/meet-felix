@@ -3,6 +3,20 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-10 — TURN credentials live
+
+The owner created a Realtime TURN key and put it in `.dev.vars`; the two
+secrets `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` are now on the worker. On
+production, `GET /api/ice?meeting=…` returns the STUN entries plus a TURN
+entry with 24-hour credentials over UDP 3478/443, TCP 3478/80 and TLS
+5349/443 (port 53 dropped, as designed). A relay-only ICE gather in
+headless Chromium (`iceTransportPolicy: "relay"`) produced relay candidates
+over all three transports, so phones on mobile data have a relay path.
+No code change.
+
+Next: the owner records a real meeting with a guest on a phone and reads
+the transcript page.
+
 ## 2026-10-10 — phase 3 live: recorder, transcript page, Playwright e2e
 
 Deployed as version 24f9bf24 (commit 8c4a918) after a code review with

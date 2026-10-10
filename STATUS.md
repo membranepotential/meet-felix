@@ -4,10 +4,10 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- turn-key — user creates a TURN key (Realtime → TURN) and uploads `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` — waiting
 - test-meeting — user records a real meeting with a guest on https://meet.example.com and reads the transcript page — waiting
 
 ## Done
+- 2026-10-10 TURN live: the owner created a Realtime TURN key; secrets `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` uploaded; `/api/ice` on production returns STUN plus TURN credentials (port 53 filtered), and a relay-only gather in headless Chromium produced relay candidates over UDP, TCP and TLS.
 - 2026-10-10 Phase 3 live: version 24f9bf24, commit 8c4a918. Production proof with headless Chromium through the real SFU: adapter connected, 3 Opus chunks (≈33 KB per 30 s) in the EU bucket, transcript ready 10–12 s after the end; with synthesized speech as the microphone the transcript has the German and English sentences correctly, labelled "Felix Peppert (host)" with wall-clock times, consent recorded. Playwright e2e: 56 local tests + @real call. R2 lifecycle rule audio/ 3 days added.
 - 2026-10-09 Deployed version 7aafb17d, commit 64a56aa: D33 session replacement with epochs and timeouts, TURN via `/api/ice?meeting=`, simulcast fallback, fullscreen share, notification pills, device dedupe. Review by code-reviewer-high, all findings fixed; core 44, sfu-api 12, worker 27, web 113 tests, spike 73/73.
 - 2026-10-09 Research 11 (docs/research/11-gotchas-on-cloudflare.md): 8 changes to make now (simulcast priorityOrdering, stored-record versioning, audio unlock after a session reset, iOS mic recovery control, consent record, retention, transcript-link hygiene, recorder checklist), 18 to watch; Workers Paid is required for the recorder.
@@ -36,7 +36,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - Core later: reply for an SFU offer on the publish session; replace a subscribe session after 410; partial publish carries accepted tracks; grace period before a dropped socket counts as Leave; negotiation ids on SFU replies; cleanup of ended-room storage.
 - Web later: active speaker, remote mute state, peer-connection failure recovery, waiting-for-consent list for hosts.
 - Observe hibernation, egress and neurons on the dashboard after real use; switch to Paid if transcripts must arrive the same day for larger meetings.
-- Phase 2 remaining: TURN credentials, screen share end-to-end test, >3 participants, 'Join as host' inside a live meeting, device checklist on real phones.
+- Phase 2 remaining: screen share end-to-end test, >3 participants, 'Join as host' inside a live meeting, device checklist on real phones.
 - Phase 3: RecorderObject, adapters, R2 chunks, Whisper job, transcript page.
 
 ## Open questions
