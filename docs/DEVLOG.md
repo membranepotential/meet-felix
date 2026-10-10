@@ -36,8 +36,8 @@ Also: four snippets of real speech from that meeting (two per device) live in
 `web/e2e/audio/` with a manifest; the recorder e2e streams them and checks
 each snippet's keywords in the transcript instead of espeak sentences.
 
-Next: deploy once no meeting is live; the owner tries Mute and Expand on the
-iPhone; delete button for past meetings; per-speaker audio on the transcript
+Deployed as version 0aa254e5 (commit b0150b4) after the owner's second
+meeting ended. Next: the owner tries Mute and Expand on the iPhone; delete button for past meetings; per-speaker audio on the transcript
 page.
 
 ## 2026-10-10 — TURN credentials live
