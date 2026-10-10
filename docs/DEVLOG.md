@@ -31,6 +31,8 @@ outside, through both accepts.
 
 Next: STATUS Next item 2, "Join as host" inside a live meeting.
 
+Deployed as version 5192341c (commit f007875) with no meeting live.
+
 ## 2026-10-10 — Devices switchable inside a live meeting
 
 In the test meeting of 2026-10-10 the owner looked for a way to change the

@@ -4,10 +4,11 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
 
 ## Now
-- consent-list — hosts see which guests have not accepted the recording yet (core sends awaitingConsent; web shows only knocks) — implementer-high running — next: code-reviewer-high, deploy when no meeting is live
+- join-as-host-live — the owner can log in from inside a live meeting (core and worker support it; web offers it only in the lobby and pre-join) — implementer-high running — next: code-reviewer-high, deploy when no meeting is live
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-10 Deployed version 5192341c, commit f007875: hosts see who has not accepted the recording (pill + "Not recorded" on tiles); consent.spec.ts; web 142 unit tests, e2e 59 passed 3 skipped.
 - 2026-10-10 Deployed version f2bdd8b1, commit e32feb6: devices switchable inside a live meeting (Devices dialog in the control bar, track swap on the sender, last pick wins); review findings fixed; web 140 unit tests, e2e 57 passed 3 skipped.
 - 2026-10-10 Deployed version 0aa254e5, commit b0150b4: mute state in core/protocol with tile icons, expanded shared screen keeping the control bar (replaces iPhone's native player), Whisper names prompt removed + avg_logprob/compression_ratio filters, four real-speech snippets in web/e2e/audio for the recorder e2e (22/22). Two code-reviewer-high reviews, findings fixed; core 57, worker 54, web 133, e2e 56.
 - 2026-10-10 TURN live: the owner created a Realtime TURN key; secrets `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` uploaded; `/api/ice` on production returns STUN plus TURN credentials (port 53 filtered), and a relay-only gather in headless Chromium produced relay candidates over UDP, TCP and TLS.
@@ -34,14 +35,13 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 
 ## Next
 In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"); triage of 2026-10-10 pruned the done items.
-1. Waiting-for-consent list for hosts (next up): the core already sends `awaitingConsent`; the web shows only knocks (`session.svelte.ts`, `Toasts.svelte`).
-2. 'Join as host' inside a live meeting: core and worker support it (rules.rs, lifecycle.spec.ts); the web offers it only in the lobby and on the pre-join.
-3. Grace period before a dropped socket counts as Leave (core-first, plan from 2026-10-10), then cleanup of ended-room storage (`Record::Ended` is kept forever; room.rs only deletes the alarm).
-4. Core: a partial publish carries the accepted tracks (`SfuReply::Published` assumes all); a late reply in the same session is still applied to a newer pending negotiation.
-5. Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs `adapters/websocket/new`, stack needs `RECORDER_ORIGIN`); data-testids for tiles, pills, meeting view, transcript link.
-6. Against the real SFU: the decoded layer went back to full ~12 s after `setLayer h` (likely the `asciibetical` fallback ordering in sfu-api `update_layer`, which ranks `f` first); add a hold check to real-sfu.spec.ts; and a 4–6 person run. Costs SFU minutes.
-7. Shorten the first-pull retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
-8. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
+1. 'Join as host' inside a live meeting (next up): core and worker support it (rules.rs, lifecycle.spec.ts); the web offers it only in the lobby and on the pre-join.
+2. Grace period before a dropped socket counts as Leave (core-first, plan from 2026-10-10), then cleanup of ended-room storage (`Record::Ended` is kept forever; room.rs only deletes the alarm).
+3. Core: a partial publish carries the accepted tracks (`SfuReply::Published` assumes all); a late reply in the same session is still applied to a newer pending negotiation.
+4. Fold crates/worker/recorder-e2e/run.mjs into web/e2e (mock SFU needs `adapters/websocket/new`, stack needs `RECORDER_ORIGIN`); data-testids for tiles, pills, meeting view, transcript link.
+5. Against the real SFU: the decoded layer went back to full ~12 s after `setLayer h` (likely the `asciibetical` fallback ordering in sfu-api `update_layer`, which ranks `f` first); add a hold check to real-sfu.spec.ts; and a 4–6 person run. Costs SFU minutes.
+6. Shorten the first-pull retry (`SUBSCRIBE_RETRY_MS` = 3 s serves both the not-found and the failure path) or pull after the publisher connects.
+7. Core, low value: a reply for an SFU offer on the publish session (sfu-api answers `MissingSdp` today).
 - Owner, manual: observe hibernation, egress and neurons on the dashboard after real use; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
 
 ## Open questions
