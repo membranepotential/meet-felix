@@ -126,6 +126,9 @@ speaker and for `/stop`. It drops a `/track` older than the speaker's last
 request or the last `/stop`, and an `/untrack` older than the speaker's last
 request; a `/stop` closes only the adapters of speakers whose last request is
 not newer, and an applied `/untrack` closes all of the speaker's adapters.
+An `/untrack` or `/stop` that overtakes the first `/start` finds no record
+yet; the recorder keeps its number under a separate key, and `/start` takes
+it into the new record.
 The pure rule is `Recorder::begin_track`, `untrack` and `stop` in
 `crates/worker/src/recorder/state.rs`; a test applies a seven-request history
 in all 5,040 arrival orders and gets the in-order result every time. Why

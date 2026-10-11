@@ -260,9 +260,13 @@ impl Inner {
                 consents: Vec::new(),
                 adapters: Vec::new(),
                 phase: Phase::Recording,
-                applied: Applied::default(),
+                applied: self.applied_before_start().await?,
             };
             self.save(&recorder).await?;
+            self.state
+                .storage()
+                .delete(state::APPLIED_BEFORE_START_KEY)
+                .await?;
             self.arm(now().after(HOUSEKEEPING_MS)).await?;
             console_log!("recorder {}: recording started", self.id());
         }
@@ -380,9 +384,41 @@ impl Inner {
         ))
     }
 
+    /// The requests noted before `/start` created the record ([`state::APPLIED_BEFORE_START_KEY`]).
+    async fn applied_before_start(&self) -> Result<Applied> {
+        let json: Option<String> = self
+            .state
+            .storage()
+            .get(state::APPLIED_BEFORE_START_KEY)
+            .await?;
+        Ok(json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?
+            .unwrap_or_default())
+    }
+
+    /// Notes an `/untrack` or `/stop` that overtook the first `/start`, so the `/track` it
+    /// overtook is dropped when it arrives ([`state::APPLIED_BEFORE_START_KEY`]).
+    async fn note_before_start(&self, note: impl FnOnce(&mut Applied)) -> Result<Response> {
+        let mut applied = self.applied_before_start().await?;
+        note(&mut applied);
+        self.state
+            .storage()
+            .put(
+                state::APPLIED_BEFORE_START_KEY,
+                serde_json::to_string(&applied)?,
+            )
+            .await?;
+        Response::empty().map(|r| r.with_status(204))
+    }
+
     async fn untrack(self: &Rc<Self>, untrack: Ordered<UntrackRecording>) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
-            return Response::error("unknown recorder", 404);
+            return self
+                .note_before_start(|applied| {
+                    applied.untrack(untrack.request.who, untrack.seq);
+                })
+                .await;
         };
         let Some(closed) = recorder.untrack(&untrack.request, untrack.seq) else {
             console_log!(
@@ -399,7 +435,11 @@ impl Inner {
 
     async fn stop(self: &Rc<Self>, seq: RequestSeq) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
-            return Response::error("unknown recorder", 404);
+            return self
+                .note_before_start(|applied| {
+                    applied.stop(seq);
+                })
+                .await;
         };
         let closed = recorder.stop(seq);
         self.save(&recorder).await?;

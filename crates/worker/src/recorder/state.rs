@@ -14,6 +14,12 @@ use crate::record::{DecodeError, Stored, stored_record, stored_version};
 /// The recorder's storage key.
 pub const KEY: &str = "recorder";
 
+/// The storage key of the [`Applied`] requests that reached the recorder before its `/start`
+/// created [`KEY`]: the room posts each step's requests in their own fetches, so a later
+/// step's `/untrack` or `/stop` can overtake the first `/start`. `/start` takes them into the
+/// new record ([`Recorder::applied`]) and deletes the key.
+pub const APPLIED_BEFORE_START_KEY: &str = "appliedBeforeStart";
+
 /// The version of the stored recorder's shape. 1 is the bare [`Recorder`] stored before
 /// 2026-10-11; 2 wraps it in the [`Stored`] envelope the room uses.
 pub const RECORDER_VERSION: u32 = 2;
@@ -142,6 +148,27 @@ impl Applied {
             Some((_, known)) => *known = seq,
             None => self.speakers.push((who, seq)),
         }
+    }
+
+    /// Notes an `/untrack` for `who` numbered `seq`; `false` if it is older than a `/track` or
+    /// `/untrack` applied for them, and so is to be dropped.
+    pub fn untrack(&mut self, who: ParticipantId, seq: RequestSeq) -> bool {
+        if seq < self.speaker(who) {
+            return false;
+        }
+        self.set_speaker(who, seq);
+        true
+    }
+
+    /// Notes a `/stop` numbered `seq`; returns the speakers whose last applied request is newer,
+    /// whose adapters the stop leaves open.
+    pub fn stop(&mut self, seq: RequestSeq) -> Vec<ParticipantId> {
+        self.stop = self.stop.max(seq);
+        self.speakers
+            .iter()
+            .filter(|&&(_, last)| last > seq)
+            .map(|&(who, _)| who)
+            .collect()
     }
 }
 
@@ -316,10 +343,9 @@ impl Recorder {
     /// before this arrived.
     pub fn untrack(&mut self, untrack: &UntrackRecording, seq: RequestSeq) -> Option<Vec<Adapter>> {
         let who = untrack.who;
-        if seq < self.applied.speaker(who) {
+        if !self.applied.untrack(who, seq) {
             return None;
         }
-        self.applied.set_speaker(who, seq);
         let closed = self.close_adapters(|a| a.who == who);
         if let Some(consent) = &untrack.consent {
             self.record_consent(consent.clone());
@@ -330,14 +356,7 @@ impl Recorder {
     /// Applies the room's `/stop` numbered `seq`: closes the adapters of every speaker whose
     /// last applied request is not newer. Returns the adapters it closed.
     pub fn stop(&mut self, seq: RequestSeq) -> Vec<Adapter> {
-        self.applied.stop = self.applied.stop.max(seq);
-        let applied = &self.applied;
-        let newer: Vec<ParticipantId> = applied
-            .speakers
-            .iter()
-            .filter(|&&(_, last)| last > seq)
-            .map(|&(who, _)| who)
-            .collect();
+        let newer = self.applied.stop(seq);
         self.close_adapters(|a| !newer.contains(&a.who))
     }
 }
@@ -838,6 +857,31 @@ mod tests {
             }
             assert_eq!(recorded(&recorder), recorded(&in_order), "arrival {arrival:?}");
         }
+    }
+
+    #[test]
+    fn an_untrack_or_stop_that_overtook_the_start_still_drops_the_older_track() {
+        let Request::Track(late) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        // `/start` (1) and `/track` (2) from one step; `/untrack` (3) of a later step arrives
+        // before the record exists, so the recorder notes it on its own.
+        let mut before_start = Applied::default();
+        assert!(before_start.untrack(ParticipantId(0), RequestSeq(3)));
+        let mut recorder = Recorder {
+            applied: before_start,
+            ..empty_recorder()
+        };
+        assert_eq!(recorder.begin_track(&late, RequestSeq(2)), TrackPlan::Stale);
+        // The same for a `/stop` (3).
+        let mut before_start = Applied::default();
+        before_start.stop(RequestSeq(3));
+        let mut recorder = Recorder {
+            applied: before_start,
+            ..empty_recorder()
+        };
+        assert_eq!(recorder.begin_track(&late, RequestSeq(2)), TrackPlan::Stale);
+        assert!(recorded(&recorder).is_empty());
     }
 
     #[test]
