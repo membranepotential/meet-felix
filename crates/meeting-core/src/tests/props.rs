@@ -823,6 +823,24 @@ impl Sim {
             prop_assert_eq!(end, effects.len() - 1, "EndMeeting is last");
         }
 
+        // The transcript link reaches only those who were let in (D19).
+        for effect in effects {
+            if let Effect::Broadcast {
+                to,
+                msg: ServerMsg::Ended {
+                    transcript: Some(_),
+                },
+            } = effect
+            {
+                for who in to {
+                    prop_assert!(
+                        before.participants[who].connection.is_admitted(),
+                        "{who:?} gets the transcript link without being let in"
+                    );
+                }
+            }
+        }
+
         // A recording start reaches every joined client before the recorder starts.
         if let (None, Some(recording)) = (before.recording.current(), after.recording.current()) {
             let started = effects

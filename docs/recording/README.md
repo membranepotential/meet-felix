@@ -347,8 +347,16 @@ logs add no new reader.
 
 In v1 the room shows the transcript link
 ([D9](../links/README.md#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09))
-to everyone in the room when the meeting ends (`ServerMsg::Ended`), so guests
-can save it. The owner's past-meetings page also lists it
+to everyone who was let in when the meeting ends (`ServerMsg::Ended`), so guests
+can save it. "Let in" means connecting or joined, including a participant in
+the reconnect grace period
+([D35](../core/README.md#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)).
+Everyone else still there gets `Ended` without the link: a guest who knocked
+on a locked room, one who waits for consent in `AwaitingConsent` (also one who
+declined it), and one who waits for the host. Changed on 2026-10-11 from
+"everyone in the room": until then, a stranger who knew the words could knock
+on a locked room, never be admitted, and still receive the link to the whole
+transcript, names and consent record included (audit finding P1-001). The owner's past-meetings page also lists it
 ([D26](../ui/README.md#d26-past-meetings-and-transcripts-are-on-a-separate-owner-only-page-behind-the-same-password-2026-10-09);
 changed on 2026-10-09 from "the host's browser also lists it"). The
 transcript page itself is described in

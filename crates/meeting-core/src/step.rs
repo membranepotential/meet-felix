@@ -1465,11 +1465,21 @@ impl RoomState {
         }
     }
 
+    /// Ends the meeting. Everyone still there hears it; only those who were let in (connecting
+    /// or joined, also during the grace) get the transcript link of a recorded meeting (D19).
+    /// A guest who waited for the host, knocked or never consented was never in it.
     fn end(&mut self, now: Millis, fx: &mut Effects) {
         let present: Vec<_> = self.present().collect();
-        let transcript =
-            (self.recording != RecordingStatus::NeverStarted).then(|| self.transcript.clone());
-        fx.broadcast(present.clone(), ServerMsg::Ended { transcript });
+        if self.recording == RecordingStatus::NeverStarted {
+            fx.broadcast(present.clone(), ServerMsg::Ended { transcript: None });
+        } else {
+            let (admitted, outside): (Vec<_>, Vec<_>) = present
+                .iter()
+                .partition(|who| self.participants[who].connection.is_admitted());
+            let transcript = Some(self.transcript.clone());
+            fx.broadcast(admitted, ServerMsg::Ended { transcript });
+            fx.broadcast(outside, ServerMsg::Ended { transcript: None });
+        }
         for &who in &present {
             fx.push(Effect::CloseSocket { who });
             self.participants.get_mut(&who).expect("present").connection = Connection::Left;

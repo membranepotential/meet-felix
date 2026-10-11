@@ -658,6 +658,41 @@ fn ending_tells_everyone_and_releases_the_link() {
 }
 
 #[test]
+fn only_those_let_in_get_the_transcript_link_at_the_end() {
+    const KNOCKING: ParticipantId = ParticipantId(4);
+    const DECLINED: ParticipantId = ParticipantId(5);
+    let mut room = meeting_room();
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    // Without consent, a guest waits for it outside the recording room.
+    room.join(DECLINED, false, false);
+    room.client(HOST, ClientMsg::Lock { on: true });
+    room.join(KNOCKING, false, true);
+    // A joined guest whose socket dropped is still in the room, in their grace period.
+    room.apply(Event::SocketClosed { who: GUEST });
+    assert_eq!(presence(&room, DECLINED), Some(Presence::AwaitingConsent));
+    assert_eq!(presence(&room, KNOCKING), Some(Presence::Knocking));
+    let effects = room.client(HOST, ClientMsg::End);
+    assert_eq!(
+        effects[..2],
+        [
+            Effect::Broadcast {
+                to: vec![HOST, GUEST],
+                msg: ServerMsg::Ended {
+                    transcript: Some(transcript())
+                }
+            },
+            Effect::Broadcast {
+                to: vec![KNOCKING, DECLINED],
+                msg: ServerMsg::Ended { transcript: None }
+            },
+        ]
+    );
+    // Guests who wait for the host never meet a recording: the first host's arrival starts it
+    // and lets them in, or makes them await consent, in the same step. An expired scheduled
+    // room ends without a link (`a_scheduled_room_has_no_empty_timer_and_ends_unused_...`).
+}
+
+#[test]
 fn an_unrecorded_meeting_ends_without_transcript() {
     let mut room = meeting_room();
     let effects = room.client(HOST, ClientMsg::End);

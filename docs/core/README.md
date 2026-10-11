@@ -250,6 +250,11 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   scheduled room has no empty timer; it ends only after `SCHEDULED_TTL_MS`
   (60 days) without a host
   ([D8](../links/README.md#d8-a-meeting-ends-when-a-host-ends-it-or-after-two-empty-minutes-2026-10-09)).
+- When a recorded meeting ends, only participants who were let in
+  (connecting or joined, also in the grace period) get the transcript link in
+  `Ended`; whoever still waits outside gets `Ended` without it
+  ([D19](../recording/README.md#d19-show-the-transcript-link-to-everyone-at-the-end-2026-10-09),
+  2026-10-11).
 
 ## The alarm
 
@@ -396,6 +401,8 @@ after every step that:
   leaves out some pulled tracks and fails some pulls this way;
 - recording is never on without a `State` broadcast or `Welcome` that tells
   every joined client first;
+- the transcript link in `Ended` reaches only participants who were let in
+  (2026-10-11);
 - no guest is admitted without consent while the room records; whoever is in
   the room without consent while it records got `ConsentRequired` and
   `Muted`; and exactly the consenting joined speakers' current audio is

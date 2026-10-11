@@ -45,6 +45,8 @@
 //!   participants; knocking guests do not count, and a participant waiting to resume does. A
 //!   scheduled room has no empty timer: it ends only if no host joins within
 //!   [`SCHEDULED_TTL_MS`] of its creation.
+//! - When a recorded meeting ends, only participants who were let in (connecting or joined,
+//!   also while waiting to resume) get the transcript link in [`ServerMsg::Ended`].
 //!
 //! The [`recording`] module holds the recorder's rules (speaker labels, silence gate, chunk
 //! cuts, holes in the adapter stream) and [`transcript`] the merge of speech segments into the
