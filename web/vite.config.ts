@@ -34,6 +34,11 @@ export default defineConfig({
 			// The pages' Content-Security-Policy, as a `<meta>` tag with the hash of SvelteKit's
 			// inline bootstrap script. A meta tag cannot carry `frame-ancestors`; `static/_headers`
 			// sends that, with `nosniff`, for every static file.
+			// Needs Safari / iOS 16 or newer (Chrome 97, Firefox 102): older Safari does not know
+			// `wasm-unsafe-eval` and would block the WASM core (MDN browser-compat-data,
+			// `http.headers.Content-Security-Policy.script-src.wasm-unsafe-eval`, checked 2026-10-11).
+			// Safari 16 also matches the room's `wss:` socket against `connect-src 'self'`, which
+			// WebKit fixed in April 2022 (https://bugs.webkit.org/show_bug.cgi?id=235873).
 			csp: {
 				mode: 'hash',
 				directives: {

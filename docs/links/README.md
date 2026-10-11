@@ -98,16 +98,19 @@ from the id alone:
   meeting is scheduled or runs. A scheduled link lives up to 60 days, so it
   can be guessed for longer than a running one; guests who find it wait
   outside until the host joins, and the host sees every join.
-- The Worker rate-limits each client: 60 meeting lookups, ICE requests and
-  joins a minute per IP address (changed on 2026-10-11, below).
+- The Worker rate-limits each client: 60 meeting lookups, ICE requests,
+  joins and transcript lookups a minute per IP address (changed on
+  2026-10-11, below).
 - A host can lock the room; late joiners then knock and wait until a host
   admits them.
 - Hosts see every join.
 
 Changed on 2026-10-11 (security audit, finding P2-017): the rate limit above
 was only planned, so this section rested on a control that did not exist. It
-exists now. The Worker counts `GET /api/meeting/:words`, `GET /api/ice` and
-`GET /ws/:words` together per client with the Workers Rate Limiting binding
+exists now. The Worker counts `GET /api/meeting/:words`, `GET /api/ice`,
+`GET /ws/:words` and the transcript routes `GET /api/transcript/:token...`
+([D9](#d9-transcript-links-carry-a-128-bit-random-token-2026-10-09))
+together per client with the Workers Rate Limiting binding
 `PUBLIC_LIMIT` (`[[ratelimits]]` in `wrangler.toml`,
 `crates/worker/src/limits.rs`) and answers 429 with `Retry-After: 60` above
 60 requests a minute. A client is the address in `CF-Connecting-IP`, which
@@ -132,9 +135,11 @@ stops a meeting.
 Unverified: whether `CF-Connecting-IP` survives the Pages front door's
 service binding (research 11, item 10; Cloudflare's header docs cover
 subrequests, not bindings). The front door forwards the request object
-unchanged, so it should. If it does not, every request through the custom
-domain shares one counter (`unknown`) and the Worker logs
-`no CF-Connecting-IP` for each: check Workers Logs after a deploy.
+unchanged, so it should. A request without a usable address is not limited:
+one shared counter for all of them would let a stranger's failed logins lock
+the owner out. The Worker logs `no usable CF-Connecting-IP` once per isolate
+when that happens: check Workers Logs after a deploy, because then the custom
+domain has no rate limit at all.
 
 Rejected: the research recommended a guest link with at least 128 random
 bits plus a separate host secret, and a knock queue by default
@@ -202,10 +207,14 @@ the code is public and an attacker knows every guard:
   counted.
 - The session cookie is `SameSite=Lax`, which stops other sites but not
   sibling subdomains of the same registrable domain. So a browser request
-  that the cookie would authorize must come from the app's own origin:
-  `POST /api/new`, `POST /api/logout` and the host's WebSocket upgrade
-  answer 403 when `Sec-Fetch-Site` is present and not `same-origin`, or,
-  without it, when `Origin` differs from the request's own origin.
+  that the cookie would authorize must come from the app's own origin. It
+  is foreign when `Sec-Fetch-Site` is present and not `same-origin`, or,
+  without it, when `Origin` differs from the request's own origin. Then
+  `POST /api/new` and `POST /api/logout` answer 403, and a WebSocket upgrade
+  joins as a guest, because the cookie is ignored. Refusing the upgrade
+  would look like a lost connection to the app, which retries without end,
+  so an owner whose browser sends unexpected headers would be locked out
+  without a word; anyone may join as a guest anyway.
   `POST /api/new` from the app must also be `application/json` (415
   otherwise), which an HTML form cannot send, so a form injected into the
   app's own pages cannot create meetings. A request with neither header is
@@ -277,3 +286,10 @@ changed on 2026-10-09 from "the host's browser lists it").
 Why a different scheme than meeting ids: transcripts live long
 ([D18](../recording/README.md#d18-keep-the-audio-48-hours-keep-transcripts-until-the-owner-deletes-them-2026-10-09)),
 so their link must be impossible to guess, and nobody needs to say it aloud.
+
+Since 2026-10-11 the transcript routes also count against the per-client
+rate limit of
+[D6](#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09).
+The token alone makes guessing hopeless; the limit bounds the KV reads and
+recorder requests one client can cause. The transcript page polls every
+10 seconds and keeps polling after a 429.

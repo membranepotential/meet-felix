@@ -60,8 +60,10 @@ OWNER_NAME = "${OWNER_NAME}"
 # location over 60-second windows. `namespace_id` is any positive integer unique in the account.
 # `wrangler dev` simulates them locally. The e2e stacks raise the limits, except the spec that
 # tests them.
-# - PUBLIC_LIMIT: /api/meeting/:words, /api/ice and /ws/:words together, per client IP. A join
-#   costs about three; an office behind one address still fits.
+# - PUBLIC_LIMIT: /api/meeting/:words, /api/ice, /ws/:words and /api/transcript/:token...
+#   together, per client IP. A join costs about three, the transcript page one every 10 s; an
+#   office behind one address still fits. Requests without a usable CF-Connecting-IP are not
+#   limited (logged once per isolate).
 # - OWNER_AUTH_LIMIT: password comparisons (login and bearer token) per client IP.
 [[ratelimits]]
 name = "PUBLIC_LIMIT"

@@ -6,9 +6,12 @@
 //!
 //! A client is its IP address from `CF-Connecting-IP`, which Cloudflare's edge sets on every
 //! request from the internet; the custom-domain front door (`edge/`) forwards the request with
-//! its headers unchanged.
+//! its headers unchanged. Whether the header survives that service binding is unverified
+//! (research 11, item 10), so a request without a usable address is not limited at all: one
+//! counter for all of them would let a stranger's failed logins lock the owner out.
 
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use worker::{Env, Request, Response, Result, console_error};
 
@@ -35,35 +38,39 @@ impl Limit {
 
 /// The window of every limit in `wrangler.toml`, sent as `Retry-After`.
 const PERIOD_SECS: u32 = 60;
-/// The key of requests without a usable `CF-Connecting-IP`; they share one counter.
-const UNKNOWN_CLIENT: &str = "unknown";
+/// Whether this isolate has logged a request without a usable `CF-Connecting-IP`.
+static LOGGED_NO_CLIENT: AtomicBool = AtomicBool::new(false);
 
 /// The client a request is counted for: its IPv4 address, or the /64 network of its IPv6
-/// address, because one IPv6 subscriber usually holds a whole /64. Requests without a usable
-/// address share [`UNKNOWN_CLIENT`].
-pub fn client_key(connecting_ip: Option<&str>) -> String {
-    match connecting_ip.and_then(|ip| ip.trim().parse::<IpAddr>().ok()) {
-        Some(IpAddr::V4(ip)) => ip.to_string(),
-        Some(IpAddr::V6(ip)) => match ip.to_ipv4_mapped() {
+/// address, because one IPv6 subscriber usually holds a whole /64. `None` without a usable
+/// address.
+pub fn client_key(connecting_ip: Option<&str>) -> Option<String> {
+    Some(match connecting_ip?.trim().parse::<IpAddr>().ok()? {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
             Some(ip) => ip.to_string(),
             None => {
                 let [a, b, c, d, ..] = ip.segments();
                 format!("{}/64", Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
             }
         },
-        None => UNKNOWN_CLIENT.to_owned(),
-    }
+    })
 }
 
-/// Counts `req` under `limit` and answers whether it may go on. A missing or failing binding
-/// lets the request through (logged): the limits bound abuse, and an outage of the counter
-/// must not stop every meeting.
+/// Counts `req` under `limit` and answers whether it may go on. A request without a usable
+/// `CF-Connecting-IP`, a missing binding and a failing one let the request through (logged):
+/// the limits bound abuse, and neither a lost header nor an outage of the counter may stop
+/// meetings or lock the owner out.
 pub async fn allows(env: &Env, limit: Limit, req: &Request) -> Result<bool> {
-    let header = req.headers().get("CF-Connecting-IP")?;
-    if header.is_none() {
-        console_error!("no CF-Connecting-IP; such requests share one {limit:?} limit");
-    }
-    let key = client_key(header.as_deref());
+    let Some(key) = client_key(req.headers().get("CF-Connecting-IP")?.as_deref()) else {
+        if !LOGGED_NO_CLIENT.swap(true, Ordering::Relaxed) {
+            console_error!(
+                "no usable CF-Connecting-IP; requests without one are not rate-limited \
+                 (logged once per isolate)"
+            );
+        }
+        return Ok(true);
+    };
     let outcome = match env.rate_limiter(limit.binding()) {
         Ok(limiter) => limiter.limit(key).await,
         Err(e) => Err(e),
@@ -93,17 +100,17 @@ mod tests {
     #[test]
     fn clients_are_ipv4_addresses_or_ipv6_networks() {
         for (header, key) in [
-            (Some("203.0.113.7"), "203.0.113.7"),
-            (Some(" 203.0.113.7 "), "203.0.113.7"),
-            (Some("::ffff:203.0.113.7"), "203.0.113.7"),
-            (Some("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::/64"),
-            (Some("2001:db8:1:2::9"), "2001:db8:1:2::/64"),
-            (Some("::1"), "::/64"),
-            (None, UNKNOWN_CLIENT),
-            (Some(""), UNKNOWN_CLIENT),
-            (Some("203.0.113.7, 198.51.100.1"), UNKNOWN_CLIENT),
+            (Some("203.0.113.7"), Some("203.0.113.7")),
+            (Some(" 203.0.113.7 "), Some("203.0.113.7")),
+            (Some("::ffff:203.0.113.7"), Some("203.0.113.7")),
+            (Some("2001:db8:1:2:3:4:5:6"), Some("2001:db8:1:2::/64")),
+            (Some("2001:db8:1:2::9"), Some("2001:db8:1:2::/64")),
+            (Some("::1"), Some("::/64")),
+            (None, None),
+            (Some(""), None),
+            (Some("203.0.113.7, 198.51.100.1"), None),
         ] {
-            assert_eq!(client_key(header), key, "{header:?}");
+            assert_eq!(client_key(header).as_deref(), key, "{header:?}");
         }
     }
 

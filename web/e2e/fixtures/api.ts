@@ -146,20 +146,21 @@ export class Api {
 		return this.#fetch(`/ws/${meeting}`);
 	}
 
-	/** The status of a WebSocket upgrade request to the room: 101 if accepted. */
-	upgradeStatus(meeting: MeetingId): Promise<number> {
-		return upgradeStatus(`${this.baseUrl}/ws/${meeting}`);
+	/** The status of a WebSocket upgrade request to the room with `headers`: 101 if accepted. */
+	upgradeStatus(meeting: MeetingId, headers: Auth = NO_AUTH): Promise<number> {
+		return upgradeStatus(`${this.baseUrl}/ws/${meeting}`, headers);
 	}
 }
 
 /**
- * The status of a WebSocket upgrade request to `url` (`http:` or `ws:`): 101 if accepted.
- * (`fetch` forbids `Upgrade`.)
+ * The status of a WebSocket upgrade request to `url` (`http:` or `ws:`) with extra request
+ * `headers`: 101 if accepted. (`fetch` forbids `Upgrade`.)
  */
-export function upgradeStatus(url: string): Promise<number> {
+export function upgradeStatus(url: string, headers: Auth = NO_AUTH): Promise<number> {
 	return new Promise((resolve, reject) => {
 		const req = request(url.replace(/^ws/, 'http'), {
 			headers: {
+				...headers,
 				connection: 'Upgrade',
 				upgrade: 'websocket',
 				'sec-websocket-version': '13',

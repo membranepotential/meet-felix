@@ -4,40 +4,13 @@
  * (`Sec-Fetch-Site`, else `Origin`). Node sends neither header unless a test sets it, so it
  * stands for a script, which the rule does not check.
  */
-import { randomBytes } from 'node:crypto';
-import { request } from 'node:http';
-import type { MeetingId, TranscriptRef } from '../../src/lib/protocol.ts';
-import { bearer, body, createMeeting, type Auth } from '../fixtures/api.ts';
+import type { TranscriptRef } from '../../src/lib/protocol.ts';
+import { bearer, createMeeting, type Auth } from '../fixtures/api.ts';
+import { joinAs } from '../fixtures/meeting.ts';
 import { expect, test } from '../fixtures/test.ts';
 
 const FOREIGN = 'https://elsewhere.example';
 const JSON_BODY: Auth = { 'content-type': 'application/json' };
-
-/** The status of a WebSocket upgrade to `meeting` with extra request `headers`: 101 if accepted. */
-function upgradeStatus(baseUrl: string, meeting: MeetingId, headers: Auth): Promise<number> {
-	return new Promise((resolve, reject) => {
-		const req = request(`${baseUrl}/ws/${meeting}`, {
-			headers: {
-				...headers,
-				connection: 'Upgrade',
-				upgrade: 'websocket',
-				'sec-websocket-version': '13',
-				'sec-websocket-key': randomBytes(16).toString('base64')
-			}
-		});
-		req.on('upgrade', (_response, socket) => {
-			socket.destroy();
-			resolve(101);
-		});
-		req.on('response', (response) => {
-			response.resume();
-			resolve(response.statusCode ?? 0);
-		});
-		req.on('error', reject);
-		req.setTimeout(5_000, () => req.destroy(new Error('upgrade request timed out')));
-		req.end();
-	});
-}
 
 test('every /api response is no-store, refusals and errors included', async ({
 	api,
@@ -120,19 +93,27 @@ test('POST /api/logout from another origin answers 403, from the app 204', async
 	expect((await logout({ 'sec-fetch-site': 'same-origin' })).status).toBe(204);
 });
 
-test('a host socket from another origin is refused; a guest socket is not', async ({
+test('a socket with the owner cookie joins as host from the app, as a guest from elsewhere', async ({
 	api,
 	owner,
+	rooms,
 	stack
 }) => {
-	const { meeting } = await body<{ meeting: MeetingId }>(
-		await api.newMeeting(bearer(stack.ownerPassword))
+	const meeting = await createMeeting(api, bearer(stack.ownerPassword));
+	const roleOf = async (name: string, headers: Auth) => {
+		const joined = await joinAs(rooms, meeting, name, headers);
+		return joined.welcome.state.participants.find((p) => p.id === joined.id)?.role;
+	};
+	expect(await roleOf('Same origin', { ...owner.headers, 'sec-fetch-site': 'same-origin' })).toBe(
+		'host'
 	);
-	const status = (headers: Auth) => upgradeStatus(stack.baseUrl, meeting, headers);
-	expect(await status({ ...owner.headers, origin: FOREIGN })).toBe(403);
-	expect(await status({ ...owner.headers, 'sec-fetch-site': 'same-site' })).toBe(403);
-	expect(await status({ origin: FOREIGN }), 'a guest from anywhere').toBe(101);
-	expect(await status({ ...owner.headers, origin: stack.baseUrl })).toBe(101);
+	expect(await roleOf('Own origin', { ...owner.headers, origin: stack.baseUrl })).toBe('host');
+	// The cookie is ignored, not refused: a refusal would make the app retry without end.
+	expect(await roleOf('Cross site', { ...owner.headers, 'sec-fetch-site': 'cross-site' })).toBe(
+		'guest'
+	);
+	expect(await roleOf('Elsewhere', { ...owner.headers, origin: FOREIGN })).toBe('guest');
+	expect(await api.upgradeStatus(meeting, { origin: FOREIGN }), 'a guest from anywhere').toBe(101);
 });
 
 test('static pages forbid framing and sniffing, and carry the script policy', async ({ stack }) => {

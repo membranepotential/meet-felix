@@ -32,13 +32,13 @@
 //! - Every `/api/*` response carries `Cache-Control: no-store`: many carry credentials, tokens
 //!   or the owner's data.
 //! - Per-client rate limits ([`limits`], D6 in `docs/links`) answer 429: `/api/meeting`,
-//!   `/api/ice` and `/ws` share one limit; every password comparison (login and bearer token)
-//!   counts against a stricter one.
+//!   `/api/ice`, `/api/transcript` and `/ws` share one limit; every password comparison (login
+//!   and bearer token) counts against a stricter one.
 //! - A browser request that the session cookie would authorize must come from this origin:
-//!   `POST /api/new`, `POST /api/logout` and the host's WebSocket upgrade answer 403 otherwise,
-//!   and `POST /api/new` from a browser must be `application/json` (415 otherwise), which an
-//!   HTML form cannot send. Bearer-token callers and other non-browser clients are not checked:
-//!   they cannot act with someone else's cookie.
+//!   `POST /api/new` and `POST /api/logout` answer 403 otherwise, and a WebSocket upgrade joins
+//!   as a guest. `POST /api/new` from a browser must be `application/json` (415 otherwise),
+//!   which an HTML form cannot send. Bearer-token callers and other non-browser clients are not
+//!   checked: they cannot act with someone else's cookie.
 
 mod ice;
 mod internal;
@@ -197,13 +197,13 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/api/ice", ice_servers)
         .get_async("/ws/:words", join_meeting)
         .get_async("/rec/:recorder/:secret/:who/:n", recorder_stream)
-        .get_async("/api/transcript/:token", |_, ctx| async move {
-            transcript(&ctx, RECORDER_STATUS).await
+        .get_async("/api/transcript/:token", |req, ctx| async move {
+            transcript(&req, &ctx, RECORDER_STATUS).await
         })
-        .get_async("/api/transcript/:token/:file", |_, ctx| async move {
+        .get_async("/api/transcript/:token/:file", |req, ctx| async move {
             match ctx.param("file").map(String::as_str) {
                 Some(file @ (TRANSCRIPT_MD | TRANSCRIPT_JSON)) => {
-                    transcript(&ctx, &format!("/{file}")).await
+                    transcript(&req, &ctx, &format!("/{file}")).await
                 }
                 _ => private(Response::error("not found", 404)),
             }
@@ -228,8 +228,12 @@ fn transcript_key(token: &TranscriptRef) -> String {
 }
 
 /// Passes `GET /api/transcript/:token...` to the transcript's recorder at `path`. The token is
-/// 32 hex digits; anything else is unknown without a KV lookup.
-async fn transcript(ctx: &RouteContext<Config>, path: &str) -> Result<Response> {
+/// 32 hex digits; anything else is unknown without a KV lookup. Counts against
+/// [`Limit::Public`], like a meeting lookup.
+async fn transcript(req: &Request, ctx: &RouteContext<Config>, path: &str) -> Result<Response> {
+    if !limits::allows(&ctx.env, Limit::Public, req).await? {
+        return private(limits::too_many_requests());
+    }
     let token = ctx.param("token").filter(|t| {
         t.len() == 32
             && t.bytes()
@@ -558,8 +562,11 @@ async fn meeting_info(req: Request, ctx: RouteContext<Config>) -> Result<Respons
 }
 
 /// Forwards the upgrade to the room, telling it in [`OWNER_HEADER`] whether the socket is the
-/// owner's. Missing owner secrets make every socket a guest's; a browser socket from another
-/// origin with the owner's cookie is refused (403), so no other site joins as host.
+/// owner's. Missing owner secrets make every socket a guest's, and so does a browser socket
+/// from another origin, whose cookie is ignored: no other site joins as host, and the socket
+/// still joins as anyone may. Refusing it instead would look like a lost connection to the app,
+/// which retries without end, so an owner whose browser sends unexpected headers would be
+/// locked out without a word.
 async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     if !is_websocket_upgrade(&req)? {
         return Response::error("expected a WebSocket upgrade", 426);
@@ -571,12 +578,11 @@ async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Respons
         return Response::error("unknown meeting", 404);
     };
     let owner = match owner_auth(&ctx) {
-        Some(auth) => is_owner_session(&req, &auth.session)?,
+        Some(auth) => {
+            is_owner_session(&req, &auth.session)? && initiator_of(&req)? != Initiator::Foreign
+        }
         None => false,
     };
-    if owner && initiator_of(&req)? == Initiator::Foreign {
-        return cross_origin();
-    }
     let forwarded = req.clone_mut()?;
     forwarded.headers().delete(OWNER_HEADER)?;
     if owner {
