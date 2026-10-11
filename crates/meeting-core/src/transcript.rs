@@ -6,6 +6,8 @@
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use tsify::Tsify;
 
 use crate::ids::{MeetingId, Millis, ParticipantId};
 use crate::recording::{ConsentRecord, Speaker};
@@ -80,6 +82,7 @@ pub fn merge_segments(
 
 /// Why audio is missing from the transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub enum GapReason {
     /// The audio never reached the recorder: a hole in the adapter stream, a deploy, a
@@ -91,6 +94,7 @@ pub enum GapReason {
 
 /// A stretch of a speaker's audio the transcript lacks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub struct Gap {
     /// Whose audio.
@@ -105,6 +109,7 @@ pub struct Gap {
 
 /// A paragraph as `transcript.json` holds it, with its speaker's label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub struct LabelledParagraph {
     /// The speaker.
@@ -121,6 +126,7 @@ pub struct LabelledParagraph {
 
 /// `transcript.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub struct Transcript {
     /// [`TRANSCRIPT_VERSION`].

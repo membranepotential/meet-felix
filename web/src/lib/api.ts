@@ -17,21 +17,11 @@ import {
 	type NewMeetingRequest,
 	type Owner,
 	type PastMeeting,
-	type TranscriptStatus as TranscriptStatusBody
+	type TranscriptStatus
 } from './wasm/meeting_core.js';
 import type { MeetingId, Phase, RecordingPolicy, TranscriptRef } from './protocol.ts';
-import type { Transcript } from './transcript.ts';
 
-export type { ApiErrorCode, Owner, PastMeeting };
-
-type Ready = Extract<TranscriptStatusBody, { status: 'ready' }>;
-
-/**
- * Where a transcript's job stands: the generated `TranscriptStatus`, with `transcript.json`
- * typed by `transcript.ts` until the core generates its type too.
- */
-export type TranscriptStatus =
-	Exclude<TranscriptStatusBody, Ready> | (Omit<Ready, 'transcript'> & { transcript: Transcript });
+export type { ApiErrorCode, Owner, PastMeeting, TranscriptStatus };
 
 /** What `GET /api/me` finds in this browser: the owner's valid session, or none. */
 export type SessionCheck = { kind: 'owner'; owner: Owner } | { kind: 'none' };

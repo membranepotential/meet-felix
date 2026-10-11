@@ -1,11 +1,11 @@
 //! What a `RecorderObject` keeps in its key-value storage, the status it reports, and the pure
 //! rules of its transcript job: retry times, error classes, R2 keys, gaps.
 
+use meeting_core::http::{Progress, TranscriptStatus};
 use meeting_core::recording::{ConsentRecord, RosterEntry};
-use meeting_core::transcript::{Gap, GapReason};
+use meeting_core::transcript::{Gap, GapReason, Transcript};
 use meeting_core::{MeetingId, Millis, ParticipantId, SessionId, TrackName};
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use sfu_api::wire::AdapterId;
 
 use crate::internal::{FinishRecording, TrackRecording, UntrackRecording};
@@ -761,46 +761,49 @@ impl Recorder {
         let late = self.applied.stop(seq);
         (self.close_adapters(|_| true, now), late)
     }
-}
 
-/// The status behind `GET /api/transcript/:token`.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Status {
-    pub status: StatusKind,
-    pub meeting: MeetingId,
-    /// When recording started.
-    pub started_at: Millis,
-    /// When the meeting ended, once it has.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<Millis>,
-    pub progress: Progress,
-    /// When the job continues after Workers AI refused for its quota.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_at: Option<Millis>,
-    /// Until when the audio is kept, once the transcript is ready.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_until: Option<Millis>,
-    /// `transcript.json`, once ready.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcript: Option<Box<RawValue>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum StatusKind {
-    Recording,
-    Processing,
-    Ready,
-    Failed,
-}
-
-/// Milliseconds of audio the job has finished (transcribed, skipped as silent, or given up
-/// on), of all audio recorded so far.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Progress {
-    pub done: u64,
-    pub total: u64,
+    /// What `GET /api/transcript/:token` answers: where the job stands, with the `progress` of
+    /// the recorded audio, and `transcript.json` once the job is ready. `None` if the job is
+    /// ready but `transcript` is missing, which it never is unless R2 lost the file.
+    pub fn status(
+        &self,
+        progress: Progress,
+        transcript: Option<Transcript>,
+    ) -> Option<TranscriptStatus> {
+        let meeting = self.meeting.clone();
+        let started_at = self.started_at;
+        let RecorderPhase::Ended { at: ended_at, job } = &self.phase else {
+            return Some(TranscriptStatus::Recording {
+                meeting,
+                started_at,
+                progress,
+            });
+        };
+        let ended_at = *ended_at;
+        let processing = |retry_at| TranscriptStatus::Processing {
+            meeting: meeting.clone(),
+            started_at,
+            ended_at,
+            progress,
+            retry_at,
+        };
+        Some(match job {
+            Job::Transcribing { retry_at } => processing(*retry_at),
+            Job::Merging { .. } => processing(None),
+            Job::Ready { audio_until, .. } => TranscriptStatus::Ready {
+                meeting,
+                started_at,
+                ended_at,
+                audio_until: *audio_until,
+                transcript: transcript?,
+            },
+            Job::Failed { .. } => TranscriptStatus::Failed {
+                meeting,
+                started_at,
+                ended_at,
+            },
+        })
+    }
 }
 
 impl RecorderPhase {
@@ -813,18 +816,6 @@ impl RecorderPhase {
                 ..
             }
         )
-    }
-
-    pub fn status(&self) -> (StatusKind, Option<Millis>, Option<Millis>) {
-        match self {
-            Self::Recording => (StatusKind::Recording, None, None),
-            Self::Ended { job, .. } => match job {
-                Job::Transcribing { retry_at, .. } => (StatusKind::Processing, *retry_at, None),
-                Job::Merging { .. } => (StatusKind::Processing, None, None),
-                Job::Ready { audio_until, .. } => (StatusKind::Ready, None, Some(*audio_until)),
-                Job::Failed { .. } => (StatusKind::Failed, None, None),
-            },
-        }
     }
 }
 
@@ -1747,6 +1738,60 @@ mod tests {
         assert_eq!(stop, r#"{"seq":6}"#);
         let old_stop: Option<Ordered<Stop>> = serde_json::from_str("null").unwrap();
         assert!(old_stop.is_none());
+    }
+
+    /// What the recorder serves in every phase is a `TranscriptStatus` the web app reads: the
+    /// job's state, the meeting's times, and the transcript as the job writes it.
+    #[test]
+    fn the_status_of_every_phase_reads_as_a_transcript_status() {
+        let progress = Progress {
+            done: 30_000,
+            total: 60_000,
+        };
+        for (name, recorder) in fixture_recorders() {
+            let ended_at = match recorder.phase {
+                RecorderPhase::Ended { at, .. } => Some(at),
+                RecorderPhase::Recording => None,
+            };
+            let transcript = ended_at.map(|ended_at| {
+                Transcript::new(
+                    recorder.meeting.clone(),
+                    recorder.started_at,
+                    ended_at,
+                    meeting_core::recording::label_speakers(&recorder.speakers),
+                    recorder.consents.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            });
+            let status = recorder
+                .status(progress, transcript.clone())
+                .expect("a status");
+            let served = serde_json::to_string(&status).expect("serializable");
+            let read: TranscriptStatus = serde_json::from_str(&served).expect(name);
+            assert_eq!(read, status, "{name}");
+            let tag = serde_json::from_str::<serde_json::Value>(&served).expect("JSON")["status"]
+                .as_str()
+                .map(str::to_owned);
+            let expected = match name {
+                "recording" | "retrying" => "recording",
+                "transcribing" | "merging" => "processing",
+                other => other,
+            };
+            assert_eq!(tag.as_deref(), Some(expected), "{name}");
+            if let TranscriptStatus::Ready {
+                transcript: served, ..
+            } = read
+            {
+                assert_eq!(Some(served), transcript);
+            }
+        }
+        let ready = fixture_recorders()
+            .into_iter()
+            .find(|(name, _)| *name == "ready")
+            .expect("a ready fixture")
+            .1;
+        assert_eq!(ready.status(progress, None), None, "ready without its file");
     }
 
     /// Recorders the fixtures freeze: one per phase and job step, with speakers, a withdrawn

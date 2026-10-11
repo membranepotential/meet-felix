@@ -7,6 +7,7 @@
 //! one spool row per speaker every 1.5 s, deleted again once its chunk is in R2, plus a few
 //! writes per 30-second chunk, about 5,000 per speaker-hour.
 
+use meeting_core::http::Progress;
 use meeting_core::transcript::{Paragraph, Segment};
 use meeting_core::{Millis, ParticipantId};
 use serde::Deserialize;
@@ -15,7 +16,7 @@ use worker::{Result, SqlStorage, SqlStorageValue, console_error};
 use meeting_core::transcript::GapReason;
 
 use super::state::{
-    ChunkSpan, MAX_CHUNK_ATTEMPTS, MAX_UPLOAD_ATTEMPTS, Progress, SegmentCursor, upload_backoff,
+    ChunkSpan, MAX_CHUNK_ATTEMPTS, MAX_UPLOAD_ATTEMPTS, SegmentCursor, upload_backoff,
 };
 
 /// The schema version this code reads and writes. Durable Objects refuse `PRAGMA user_version`

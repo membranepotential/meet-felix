@@ -44,6 +44,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use meeting_core::Millis;
+use meeting_core::http::ApiErrorCode;
 use worker::{
     Bucket, DurableObject, Env, Method, Request, Response, Result, State, WebSocket,
     WebSocketIncomingMessage, console_error, console_warn, durable_object,
@@ -54,7 +55,7 @@ use self::state::{Recorder, RecorderPhase};
 use self::store::Store;
 use self::streams::Live;
 use crate::internal::{RECORDER_STATUS, RecorderRequest, TRANSCRIPT_JSON, TRANSCRIPT_MD};
-use crate::{is_websocket_upgrade, now};
+use crate::{is_websocket_upgrade, now, reply};
 
 /// R2 bucket of audio chunks and transcripts (EU jurisdiction).
 const RECORDINGS: &str = "RECORDINGS";
@@ -217,8 +218,9 @@ fn no_content() -> Result<Response> {
     Response::empty().map(|r| r.with_status(204))
 }
 
-/// The answer to a request for a path, recorder or stream that does not exist. A recorder that
-/// never started has no record, and its transcript link is unknown like any other.
+/// The answer to a request for a path, recorder, stream or transcript file that does not
+/// exist. A recorder that never started has no record, and its transcript link is unknown like
+/// any other.
 fn not_found() -> Result<Response> {
-    Response::error("not found", 404)
+    reply::error(ApiErrorCode::NotFound)
 }

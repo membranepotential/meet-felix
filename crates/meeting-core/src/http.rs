@@ -343,9 +343,9 @@ mod tests {
         );
     }
 
-    /// A ready status as the recorder sends it: with the progress, which a ready status does
-    /// not need, and `transcript.json` as written, with its version and without `withdrawnAt`
-    /// while consent stands.
+    /// A ready status with `transcript.json` as written, with its version and without
+    /// `withdrawnAt` while consent stands; a progress, which a ready status does not have, is
+    /// ignored.
     #[test]
     fn a_transcript_status_reads_what_the_recorder_sends() {
         let ready = json!({

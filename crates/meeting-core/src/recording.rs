@@ -3,6 +3,8 @@
 //! when the adapter stream has a hole. Pure, so the `RecorderObject` only carries them out.
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "wasm")]
+use tsify::Tsify;
 
 use crate::ids::{DisplayName, Millis, ParticipantId};
 use crate::protocol::Role;
@@ -22,6 +24,7 @@ pub struct RosterEntry {
 /// One participant's consent to recording, for the transcript's consent record (research 11,
 /// item 5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub struct ConsentRecord {
     /// Who.
@@ -34,11 +37,13 @@ pub struct ConsentRecord {
     pub notice_version: u32,
     /// When they withdrew it, if they did and have not given it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "wasm", tsify(optional))]
     pub withdrawn_at: Option<Millis>,
 }
 
 /// A speaker with the label the transcript shows for them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 pub struct Speaker {
     /// Who.
