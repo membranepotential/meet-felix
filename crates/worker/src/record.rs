@@ -335,6 +335,48 @@ pub struct OpenSocket {
     /// Whether the router verified the owner's session cookie on the upgrade; the room passes
     /// it to the core with every message (`Event::Client.owner`).
     pub owner: bool,
+    /// What the socket may still send. Attachments stored before the budget existed load
+    /// with a full one.
+    #[serde(default)]
+    pub budget: MessageBudget,
+}
+
+/// The sustained rate of messages a socket may send: one per this many milliseconds.
+pub const MESSAGE_INTERVAL_MS: u64 = 1_000;
+
+/// How many messages a socket may send at once above the sustained rate. A client sends a few
+/// dozen at most in a burst (a window resize changes the layer of every remote track, at most
+/// once per track per 400 ms), and about one a minute otherwise.
+pub const MESSAGE_BURST: u64 = 120;
+
+/// A socket's budget of messages, so that no client can make the room step, and store its
+/// record, as often as it likes: the daily allowance of rows written is shared by every room and
+/// recorder of the account. A token bucket kept as one time (the generic cell rate algorithm):
+/// the time until which the messages sent so far used up the sustained rate. A socket that
+/// overspends is closed ([`MessageBudget::spend`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MessageBudget {
+    spent_until: Millis,
+}
+
+impl Default for MessageBudget {
+    /// A full budget.
+    fn default() -> Self {
+        Self {
+            spent_until: Millis(0),
+        }
+    }
+}
+
+impl MessageBudget {
+    /// The budget after one more message at `now`, or `None` if the socket has no budget left:
+    /// it sent [`MESSAGE_BURST`] messages more than one per [`MESSAGE_INTERVAL_MS`].
+    pub fn spend(self, now: Millis) -> Option<Self> {
+        let spent_until = self.spent_until.max(now).after(MESSAGE_INTERVAL_MS);
+        (spent_until.0 - now.0 <= MESSAGE_BURST * MESSAGE_INTERVAL_MS)
+            .then_some(Self { spent_until })
+    }
 }
 
 /// When the object's alarm must fire: the earlier of the core's alarm and, while sockets are
@@ -895,18 +937,54 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn attachment_survives_json_with_the_owner_flag() {
+    fn attachment_survives_json_with_the_owner_flag_and_budget() {
+        let budget = MessageBudget::default().spend(T0).unwrap();
         let open = Attachment::Open(OpenSocket {
             participant: ParticipantId(3),
             since: T0,
             owner: true,
+            budget,
         });
         let json = serde_json::to_value(open).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "socket": "open", "participant": 3, "since": T0.0, "owner": true })
+            serde_json::json!({
+                "socket": "open",
+                "participant": 3,
+                "since": T0.0,
+                "owner": true,
+                "budget": T0.0 + MESSAGE_INTERVAL_MS,
+            })
         );
         assert_eq!(serde_json::from_value::<Attachment>(json).unwrap(), open);
+        // An attachment from before the budget loads with a full one.
+        let old = serde_json::json!({ "socket": "open", "participant": 3, "since": T0.0, "owner": false });
+        let Attachment::Open(loaded) = serde_json::from_value(old).unwrap() else {
+            panic!("an open socket")
+        };
+        assert_eq!(loaded.budget, MessageBudget::default());
+    }
+
+    #[test]
+    fn a_socket_may_send_a_burst_then_one_message_per_interval() {
+        let mut budget = MessageBudget::default();
+        for _ in 0..MESSAGE_BURST {
+            budget = budget.spend(T0).expect("within the burst");
+        }
+        assert_eq!(budget.spend(T0), None, "the burst is used up");
+        // One more message per interval, for as long as the socket keeps to the rate.
+        let mut now = T0;
+        for _ in 0..1_000 {
+            now = now.after(MESSAGE_INTERVAL_MS);
+            budget = budget.spend(now).expect("at the sustained rate");
+            assert_eq!(budget.spend(now), None);
+        }
+        // A quiet socket earns its burst back, and no more.
+        let rested = now.after(10 * MESSAGE_BURST * MESSAGE_INTERVAL_MS);
+        for _ in 0..MESSAGE_BURST {
+            budget = budget.spend(rested).expect("a full burst again");
+        }
+        assert_eq!(budget.spend(rested), None);
     }
 
     #[test]

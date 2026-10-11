@@ -113,6 +113,19 @@ the new state, and carries out the effects in order:
 - `ReleaseMeetingId` deletes the words from KV; `EndMeeting` stops accepting
   sockets.
 
+The `RoomObject` stores the record only when a step changed it (2026-10-11):
+a repeated `SetMuted`, a message the core refused or an ignored late SFU reply
+writes no row. Each socket also has a message budget, kept in its attachment
+so it survives hibernation: a burst of 120 messages, then one per second
+(`MESSAGE_BURST`, `MESSAGE_INTERVAL_MS` in `record.rs`). A socket that sends
+more is closed with code 1008 and reported to the core as `SocketClosed`, like
+a socket that stopped pinging; the client resumes on a new socket. Why: the
+Free plan allows 100,000 rows written per day for all rooms and recorders of
+the account together ([cost/](../cost/README.md)), and before, any link
+holder could use it up with a loop of messages. A client that reconnects in
+a loop still gets a fresh budget per socket; limiting that is the router's
+job.
+
 **Browser**: the Svelte app loads the core as WASM. It uses the generated
 types for every message on the signaling socket, and core functions such as
 `validateMeetingId` and `generateMeetingId` instead of restating the rules in

@@ -36,8 +36,8 @@ use crate::internal::{
     TrackRecording, UntrackRecording,
 };
 use crate::record::{
-    Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS, OpenSocket,
-    PendingFinish, Record, alarm_time, is_stale,
+    Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS,
+    MessageBudget, OpenSocket, PendingFinish, Record, alarm_time, is_stale,
 };
 use crate::{
     Jurisdiction, MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu,
@@ -61,8 +61,6 @@ const MAX_OPEN_SOCKETS: usize = 2 * MAX_PRESENT;
 
 /// Close code for sockets the room closes: normal closure.
 const CLOSE_NORMAL: u16 = 1000;
-/// Close code for sockets whose client stopped pinging: going away.
-const CLOSE_STALE: u16 = 1001;
 
 #[durable_object]
 pub struct RoomObject {
@@ -100,6 +98,20 @@ impl DurableObject for RoomObject {
         let Some(Attachment::Open(socket)) = attachment(&ws)? else {
             return Ok(());
         };
+        let Some(budget) = socket.budget.spend(now()) else {
+            console_warn!(
+                "{:?} sent more than its message budget; closing its socket",
+                socket.participant
+            );
+            let input = Input {
+                event: Event::SocketClosed {
+                    who: socket.participant,
+                },
+                close: Some((ws, Closing::OverBudget)),
+            };
+            return self.run(VecDeque::from([input])).await;
+        };
+        ws.serialize_attachment(Attachment::Open(OpenSocket { budget, ..socket }))?;
         let msg = match message {
             WebSocketIncomingMessage::String(text) => serde_json::from_str::<ClientMsg>(&text).ok(),
             WebSocketIncomingMessage::Binary(_) => None,
@@ -179,7 +191,7 @@ impl RoomObject {
                 event: Event::SocketClosed {
                     who: socket.participant,
                 },
-                close_stale: Some(ws),
+                close: Some((ws, Closing::Stale)),
             });
         // The stale reports go first: they make no SFU call, while `AlarmFired` may (a grace
         // that expires closes tracks), and a client could resume on a new socket during that
@@ -264,6 +276,7 @@ impl RoomObject {
             participant,
             since: now(),
             owner,
+            budget: MessageBudget::default(),
         }))?;
         self.arm(alarm).await?;
         Response::from_websocket(client)
@@ -292,20 +305,21 @@ impl RoomObject {
     }
 
     /// Steps the core through `inputs` and every SFU reply that follows from them. After each
-    /// step it stores the record, closes the input's stale socket, if any, and carries out the
-    /// effects.
+    /// step it stores the record if the step changed it, closes the input's socket, if any, and
+    /// carries out the effects. A step that changed nothing (a repeated `SetMuted`, a message
+    /// the core refused) writes nothing, so it costs no row of the daily write allowance.
     async fn run(&self, inputs: VecDeque<Input>) -> Result<()> {
         let mut queue = inputs;
         let mut sfu_calls = 0;
-        while let Some(Input { event, close_stale }) = queue.pop_front() {
-            // A stale socket that a resume on a new socket closed meanwhile (`CloseSocket`
-            // marks it `Closed`) must not report the resumed participant as lost.
-            if let Some(ws) = &close_stale
+        while let Some(Input { event, close }) = queue.pop_front() {
+            // A socket that a resume on a new socket closed meanwhile (`CloseSocket` marks it
+            // `Closed`) must not report the resumed participant as lost.
+            if let Some((ws, _)) = &close
                 && !matches!(attachment(ws)?, Some(Attachment::Open(_)))
             {
                 continue;
             }
-            let Some(Record::Open(open)) = self.load().await? else {
+            let Some((Record::Open(open), stored)) = self.load_stored().await? else {
                 // Ended, or never initialised: nothing listens any more.
                 return Ok(());
             };
@@ -317,9 +331,12 @@ impl RoomObject {
             );
             let (mut record, effects) = open.step(now, event);
             let recorder = self.recorder_link(before, &mut record, &effects);
-            self.store(&record).await?;
-            if let Some(ws) = close_stale {
-                close(&ws, CLOSE_STALE, "no ping");
+            let json = crate::record::encode(&record)?;
+            if json != stored {
+                self.state.storage().put(Record::KEY, json).await?;
+            }
+            if let Some((ws, why)) = close {
+                self::close(&ws, why.code(), why.reason());
             }
             let replies = self
                 .execute_step(effects, recorder.as_ref(), &mut sfu_calls)
@@ -674,15 +691,20 @@ impl RoomObject {
             })
     }
 
-    /// The stored record. A record of an older version is logged and replaced by an ended
-    /// one ([`crate::record::decode`]), which deletes itself like any other.
+    /// The stored record.
     async fn load(&self) -> Result<Option<Record>> {
+        Ok(self.load_stored().await?.map(|(record, _)| record))
+    }
+
+    /// The stored record and its JSON as stored. A record of an older version is logged and
+    /// replaced by an ended one ([`crate::record::decode`]), which deletes itself like any other.
+    async fn load_stored(&self) -> Result<Option<(Record, String)>> {
         let json: Option<String> = self.state.storage().get(Record::KEY).await?;
         let Some(json) = json else {
             return Ok(None);
         };
         match crate::record::decode(&json)? {
-            Decoded::Current(record) => Ok(Some(record)),
+            Decoded::Current(record) => Ok(Some((record, json))),
             Decoded::Outdated { version } => {
                 console_warn!(
                     "room {}: its record has the old version {version}; the meeting counts as ended",
@@ -692,9 +714,10 @@ impl RoomObject {
                     recording_policy: RecordingPolicy::HostDecides,
                     pending_finish: None,
                 });
-                self.store(&ended).await?;
+                let json = crate::record::encode(&ended)?;
+                self.state.storage().put(Record::KEY, &json).await?;
                 self.delete_later().await?;
-                Ok(Some(ended))
+                Ok(Some((ended, json)))
             }
         }
     }
@@ -707,18 +730,43 @@ impl RoomObject {
     }
 }
 
-/// One event for the core and, for a socket the keepalive check found stale, that socket, which
-/// the room closes once the step reporting it is stored.
+/// One event for the core and, for a socket the room closes itself (the keepalive check found
+/// it stale, or it overspent its message budget), that socket, which the room closes once the
+/// step reporting it is stored.
 struct Input {
     event: Event,
-    close_stale: Option<WebSocket>,
+    close: Option<(WebSocket, Closing)>,
 }
 
 impl From<Event> for Input {
     fn from(event: Event) -> Self {
-        Self {
-            event,
-            close_stale: None,
+        Self { event, close: None }
+    }
+}
+
+/// Why the room closes a socket of its own accord.
+#[derive(Debug, Clone, Copy)]
+enum Closing {
+    /// The client stopped pinging.
+    Stale,
+    /// The client sent more than its message budget.
+    OverBudget,
+}
+
+impl Closing {
+    fn code(self) -> u16 {
+        match self {
+            // Going away.
+            Self::Stale => 1001,
+            // Policy violation.
+            Self::OverBudget => 1008,
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Stale => "no ping",
+            Self::OverBudget => "too many messages",
         }
     }
 }
