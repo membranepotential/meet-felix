@@ -1,24 +1,25 @@
 /**
  * One stay in a meeting: the signaling socket, the client state from `client-state.ts`, the
- * two SFU peer connections, the others' voices, notices and the screen wake lock. Created
- * inside the Join tap, disposed when the stay is over.
+ * microphone's mute flag in the room, the others' voices, notices and the screen wake lock.
+ * The SFU peer connections are the `MediaLink`'s. Created inside the Join tap, disposed when the
+ * stay is over.
  */
 import { untrack } from 'svelte';
 import { on } from 'svelte/events';
-import { getIceServers, getMeeting } from './api.ts';
+import { getMeeting } from './api.ts';
 import {
 	awaitingConsent,
+	consentGiven,
 	INITIAL,
+	over,
 	reduce,
 	syncMute,
 	type ClientState,
 	type Command,
 	type SessionEnd
 } from './client-state.ts';
-import { GraceNotice } from './grace.ts';
-import { LayerControl } from './layers.ts';
 import type { LocalMedia } from './local-media.svelte.ts';
-import { IceServers } from './media/ice.ts';
+import { MediaLink } from './media-link.svelte.ts';
 import { RemoteAudio } from './media/remote-audio.svelte.ts';
 import { holdWakeLock } from './media/wakelock.ts';
 import {
@@ -28,21 +29,8 @@ import {
 	type MeetingId,
 	type ParticipantId,
 	type ParticipantView,
-	type ServerMsg,
-	type SessionEpoch,
-	type SessionEpochs,
-	type SessionKind,
-	type TrackKind
+	type ServerMsg
 } from './protocol.ts';
-import { SessionResets } from './resets.ts';
-import {
-	NO_REMOTE_TRACKS,
-	peerConnection,
-	Publisher,
-	Subscriber,
-	type PublishFailure,
-	type RemoteTracks
-} from './sfu.ts';
 import { SignalingClient, type ConnectionStatus } from './signaling.ts';
 import { Toasts } from './toasts.svelte.ts';
 
@@ -51,21 +39,6 @@ export interface JoinRequest {
 	/** Whether the user accepted recording on the pre-join screen. */
 	consent: boolean;
 }
-
-/** How long a failed subscribe may take to recover before the user hears about it. */
-const SUBSCRIBE_GRACE_MS = 10_000;
-
-const KIND_LABEL: Record<TrackKind, string> = {
-	audio: 'microphone',
-	video: 'camera',
-	screen: 'screen'
-};
-
-/** The quiet notice while the room replaces a session whose connection failed. */
-const RECONNECTING: Record<SessionKind, string> = {
-	publish: 'Reconnecting your camera and microphone…',
-	subscribe: 'Reconnecting to the others…'
-};
 
 /** Shown once each time the mic stalls (`LocalMedia.micStalled`); the button then restarts it. */
 const MIC_STALLED = 'Microphone was interrupted. Tap the microphone button to turn it on again.';
@@ -98,12 +71,10 @@ export class Session {
 	readonly toasts = new Toasts();
 	/** The others' voices and the `AudioContext` for the level meters. */
 	readonly audio: RemoteAudio;
+	/** The SFU peer connections: received tracks (`remote`) and layer requests (`layers`). */
+	readonly link: MediaLink;
 	connection: ConnectionStatus = $state.raw({ kind: 'connecting', attempt: 1 });
 	state: ClientState = $state.raw(INITIAL);
-	/** Received tracks by `trackKey`. */
-	remote: RemoteTracks = $state.raw(NO_REMOTE_TRACKS);
-	/** Sends `SetLayer` as tiles change size. */
-	readonly layers: LayerControl;
 
 	stage = $derived(this.state.stage);
 	end: SessionEnd | null = $derived(this.stage.kind === 'over' ? this.stage.end : null);
@@ -124,22 +95,9 @@ export class Session {
 	readonly #meeting: MeetingId;
 	readonly #media: LocalMedia;
 	readonly #signaling: SignalingClient;
-	readonly #ice: IceServers;
 	#join: JoinRequest;
-	/** The two SFU peer connections; `null` until the first welcome. */
-	#publisher: Promise<Publisher> | null = null;
-	#subscriber: Promise<Subscriber> | null = null;
-	/** The epochs of the room's sessions the two connections belong to. */
-	#epochs: SessionEpochs = { publish: 0, subscribe: 0 };
-	/** The last mic switch was not reported, because the socket was down. */
-	#unsentMute = false;
-	readonly #resets = new SessionResets((kind, epoch) =>
-		this.#signaling.send({ type: 'resetSession', kind, epoch })
-	);
-	/** The first pull often races the publisher's connection and succeeds on the room's retry. */
-	readonly #subscribeNotice = new GraceNotice(SUBSCRIBE_GRACE_MS, (text) =>
-		this.toasts.show(text, 'alert')
-	);
+	/** The mute flag this client last got through to the room for its participant (`syncMute`). */
+	#reportedMuted: boolean | null = null;
 	#releaseWakeLock: () => void = () => {};
 	/** Stops what `start` runs while the session lives: publishing, the mic and mute effects, the `pagehide` leave. */
 	#stopEffects: () => void = () => {};
@@ -157,17 +115,11 @@ export class Session {
 			onMessage: (msg) => this.receive(msg),
 			onStatus: (status) => this.#onStatus(status)
 		});
-		this.layers = new LayerControl((track, rid) =>
-			this.#signaling.send({ type: 'setLayer', track, rid })
-		);
-		// Fetched while the socket connects, and again before the TURN credentials expire; the
-		// open peer connections get each new set.
-		this.#ice = new IceServers(
-			() => getIceServers(meeting),
-			(servers) => {
-				void this.#publisher?.then((publisher) => publisher.setIceServers(servers));
-				void this.#subscriber?.then((subscriber) => subscriber.setIceServers(servers));
-			}
+		this.link = new MediaLink(
+			meeting,
+			(msg) => this.#signaling.send(msg),
+			() => media.outgoing,
+			(text, tone) => this.toasts.show(text, tone)
 		);
 	}
 
@@ -178,7 +130,7 @@ export class Session {
 			// Publishing follows the local tracks: device switches, camera on/off, screen share.
 			$effect(() => {
 				const outgoing = this.#media.outgoing;
-				void this.#publisher?.then((publisher) => publisher.sync(outgoing));
+				untrack(() => this.link.publish(outgoing));
 			});
 			$effect(() => {
 				if (this.#media.micStalled) untrack(() => this.toasts.show(MIC_STALLED, 'alert'));
@@ -192,12 +144,11 @@ export class Session {
 				})
 			);
 			// Everyone sees our mic switch. A report that could not go out (the socket was down)
-			// is made on the next welcome instead of adopting the room's view (`#welcomed`).
+			// is made on the next welcome (`#syncMute`).
 			$effect(() => {
 				const muted = !this.#media.micOn;
 				untrack(() => {
-					if (this.stage.kind !== 'in') return;
-					this.#unsentMute = !this.#signaling.send({ type: 'setMuted', muted });
+					if (this.stage.kind === 'in') this.#reportMuted(muted);
 				});
 			});
 		});
@@ -212,7 +163,7 @@ export class Session {
 
 	acceptRecording(): void {
 		this.#join = { ...this.#join, consent: true };
-		this.state = { ...this.state, consentAsked: false };
+		this.state = consentGiven(this.state);
 		this.send({ type: 'setConsent', consent: true });
 	}
 
@@ -231,14 +182,12 @@ export class Session {
 
 	/** Handles one server message. */
 	receive(msg: ServerMsg): void {
-		const [next, commands] = reduce(this.state, msg);
-		this.state = next;
-		for (const command of commands) this.#run(command);
-		if (next.stage.kind === 'in') {
-			const published = next.stage.room.participants.flatMap((p) =>
-				p.tracks.map((kind) => ({ owner: p.id, kind }))
+		this.#apply(reduce(this.state, msg));
+		const { stage } = this.state;
+		if (stage.kind === 'in') {
+			this.link.retain(
+				stage.room.participants.flatMap((p) => p.tracks.map((kind) => ({ owner: p.id, kind })))
 			);
-			void this.#subscriber?.then((subscriber) => subscriber.retain(published));
 		}
 	}
 
@@ -248,13 +197,14 @@ export class Session {
 		this.#disposed = true;
 		this.#stopEffects();
 		this.#signaling.close();
-		this.#ice.dispose();
-		this.#closeLink();
-		this.#resets.cancel();
-		this.#subscribeNotice.cancel();
-		this.layers.dispose();
+		this.link.dispose();
 		this.audio.dispose();
 		this.#releaseWakeLock();
+	}
+
+	#apply([next, commands]: [ClientState, Command[]]): void {
+		this.state = next;
+		for (const command of commands) this.#run(command);
 	}
 
 	#run(command: Command): void {
@@ -265,36 +215,8 @@ export class Session {
 			case 'warn':
 				console.warn(command.text);
 				return;
-			case 'welcomed':
-				this.#welcomed(command.fresh, command.epochs);
-				return;
-			case 'publish-answer':
-				void this.#publisher?.then((publisher) => publisher.answer(command.sdp, command.rejected));
-				return;
-			case 'publish-rejected':
-				void this.#publisher?.then((publisher) => publisher.rejected());
-				return;
-			case 'publish-reset':
-				this.#openPublisher(command.epoch);
-				return;
-			case 'subscribe-offer':
-				this.#subscribeNotice.cancel();
-				void this.#subscriber?.then((subscriber) => subscriber.offer(command.sdp, command.tracks));
-				return;
-			case 'subscribe-reset':
-				this.#openSubscriber(command.epoch);
-				return;
-			case 'subscribe-retrying':
-				this.#subscribeNotice.start(command.notice);
-				return;
-			case 'layer-refused':
-				this.layers.notSubscribed();
-				return;
 			case 'mute-mic':
 				this.#media.mute();
-				return;
-			case 'report-muted':
-				this.#signaling.send({ type: 'setMuted', muted: true });
 				return;
 			case 'teardown':
 				this.#over();
@@ -302,106 +224,33 @@ export class Session {
 			case 'reload':
 				reloadOutdated();
 				return;
+			case 'welcomed':
+				this.link.run(command);
+				this.#syncMute(command.fresh);
+				return;
+			default:
+				this.link.run(command);
 		}
 	}
 
-	/**
-	 * A new participant opens new peer connections. After a reconnect, the old ones stay,
-	 * except a connection whose session the room replaced while the socket was down: its reset
-	 * never arrived, but the welcome's epochs tell. Either way the mic switch and the room's mute
-	 * flag are made to agree.
-	 */
-	#welcomed(fresh: boolean, epochs: SessionEpochs): void {
-		this.#ice.recover();
-		const current = (kind: SessionKind) => !fresh && this.#epochs[kind] === epochs[kind];
-		if (this.#publisher === null || !current('publish')) this.#openPublisher(epochs.publish);
-		else void this.#publisher.then((publisher) => publisher.retryFailed());
-		if (this.#subscriber === null || !current('subscribe')) this.#openSubscriber(epochs.subscribe);
-		if (this.#unsentMute) {
-			this.#unsentMute = !this.#signaling.send({ type: 'setMuted', muted: !this.#media.micOn });
-			return;
+	/** After a welcome, makes the mic switch and the room's mute flag agree (`syncMute`). */
+	#syncMute(fresh: boolean): void {
+		if (fresh) this.#reportedMuted = null;
+		const { micOn } = this.#media;
+		switch (syncMute(this.me?.muted ?? false, micOn, this.#reportedMuted)) {
+			case 'mute-mic':
+				this.#media.mute();
+				return;
+			case 'report':
+				this.#reportMuted(!micOn);
+				return;
+			case 'none':
+				return;
 		}
-		for (const command of syncMute(this.me?.muted ?? false, this.#media.micOn)) this.#run(command);
 	}
 
-	/**
-	 * The room's publish session of `epoch`: a new peer connection that publishes it all again.
-	 */
-	#openPublisher(epoch: SessionEpoch): void {
-		this.#closePublisher();
-		this.#epochs = { ...this.#epochs, publish: epoch };
-		const publisher: Promise<Publisher> = this.#ice.latest.then((iceServers) => {
-			const created = new Publisher(
-				peerConnection(iceServers),
-				(msg) => this.#signaling.send(msg),
-				(kinds, reason) => this.#onPublishFailed(kinds, reason),
-				() => {
-					if (this.#publisher === publisher) this.#onConnectionFailed('publish', epoch);
-				}
-			);
-			created.sync(this.#media.outgoing);
-			return created;
-		});
-		this.#publisher = publisher;
-	}
-
-	/** The room's subscribe session of `epoch`: a new peer connection that receives nothing yet. */
-	#openSubscriber(epoch: SessionEpoch): void {
-		this.#closeSubscriber();
-		this.#epochs = { ...this.#epochs, subscribe: epoch };
-		const subscriber: Promise<Subscriber> = this.#ice.latest.then(
-			(iceServers) =>
-				new Subscriber(
-					peerConnection(iceServers),
-					(sdp) => this.#signaling.send({ type: 'subscribeAnswer', sdp }),
-					(tracks, delivered) => {
-						// A late answer from a replaced connection must not overwrite the current tracks.
-						if (this.#subscriber !== subscriber) return;
-						this.remote = tracks;
-						this.layers.received(delivered);
-					},
-					() => {
-						if (this.#subscriber === subscriber) this.#onConnectionFailed('subscribe', epoch);
-					}
-				)
-		);
-		this.#subscriber = subscriber;
-	}
-
-	#closeLink(): void {
-		this.#closePublisher();
-		this.#closeSubscriber();
-	}
-
-	#closePublisher(): void {
-		void this.#publisher?.then((publisher) => publisher.close());
-		this.#publisher = null;
-		this.#resets.done('publish');
-	}
-
-	#closeSubscriber(): void {
-		void this.#subscriber?.then((subscriber) => subscriber.close());
-		this.#subscriber = null;
-		this.#resets.done('subscribe');
-		this.remote = NO_REMOTE_TRACKS;
-		this.layers.reset();
-	}
-
-	/** The peer connection for a session failed: ask the room for a new one, quietly. */
-	#onConnectionFailed(kind: SessionKind, epoch: SessionEpoch): void {
-		if (this.#resets.failed(kind, epoch)) this.toasts.show(RECONNECTING[kind], 'info');
-	}
-
-	#onPublishFailed(kinds: TrackKind[], reason: PublishFailure): void {
-		// The room's rejection already produced a notice from its error code.
-		if (reason === 'rejected') return;
-		const what = kinds.map((k) => KIND_LABEL[k]).join(' and ');
-		this.toasts.show(
-			reason === 'not-sent'
-				? `Your ${what} is shared once the connection is back.`
-				: `Your ${what} could not be shared. Turn it off and on to try again.`,
-			'alert'
-		);
+	#reportMuted(muted: boolean): void {
+		if (this.#signaling.send({ type: 'setMuted', muted })) this.#reportedMuted = muted;
 	}
 
 	#sendJoin(): void {
@@ -446,8 +295,7 @@ export class Session {
 
 	#finish(end: SessionEnd): void {
 		if (this.end !== null) return;
-		this.state = { ...this.state, stage: { kind: 'over', end }, consentAsked: false };
-		this.#over();
+		this.#apply(over(this.state, end));
 	}
 
 	/** Releases camera and mic as soon as the stay is over, not only when the page closes. */

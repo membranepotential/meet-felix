@@ -13,6 +13,9 @@
  * A peer connection whose `connectionState` becomes `failed` does not recover by itself: both
  * classes report it once, and the session asks the room for a new SFU session (D33,
  * `ClientMsg::ResetSession`), after which it replaces the whole class.
+ *
+ * Both classes take their peer connection as a promise, because it waits for the ICE servers,
+ * and work on it once it is there; a class that was closed reports nothing more.
  */
 import {
 	trackKey,
@@ -39,14 +42,23 @@ function setIceServers(pc: RTCPeerConnection, iceServers: RTCIceServer[]): void 
 	pc.setConfiguration({ ...pc.getConfiguration(), iceServers });
 }
 
-/** Calls `onFailed` once, when `pc.connectionState` first becomes `failed`. */
-function watchFailure(pc: RTCPeerConnection, onFailed: () => void): void {
-	const check = () => {
-		if (pc.connectionState !== 'failed') return;
-		pc.removeEventListener('connectionstatechange', check);
-		onFailed();
-	};
-	pc.addEventListener('connectionstatechange', check);
+/**
+ * Calls `onFailed` once, when `pc.connectionState` first becomes `failed`, unless `closed()` says
+ * the connection was given up by then.
+ */
+function watchFailure(
+	pc: Promise<RTCPeerConnection>,
+	closed: () => boolean,
+	onFailed: () => void
+): void {
+	void pc.then((connection) => {
+		const check = () => {
+			if (connection.connectionState !== 'failed') return;
+			connection.removeEventListener('connectionstatechange', check);
+			if (!closed()) onFailed();
+		};
+		connection.addEventListener('connectionstatechange', check);
+	});
 }
 
 /**
@@ -127,7 +139,7 @@ interface Published {
 	track: MediaStreamTrack;
 }
 
-/** Stops the transceiver of a track the room did not publish. */
+/** Stops a transceiver whose track is no longer published, or never was. */
 function stopTransceiver(transceiver: RTCRtpTransceiver): void {
 	try {
 		transceiver.stop();
@@ -150,7 +162,7 @@ interface Answer {
  * leaves every subscriber at once; turning it on publishes a new track.
  */
 export class Publisher {
-	readonly #pc: RTCPeerConnection;
+	readonly #pc: Promise<RTCPeerConnection>;
 	/** Sends a message to the room; returns `false` if the socket is down. */
 	readonly #send: (msg: ClientMsg) => boolean;
 	readonly #onFailed: (kinds: TrackKind[], reason: PublishFailure) => void;
@@ -170,7 +182,7 @@ export class Publisher {
 	 * once that the peer connection failed.
 	 */
 	constructor(
-		pc: RTCPeerConnection,
+		pc: Promise<RTCPeerConnection>,
 		send: (msg: ClientMsg) => boolean,
 		onFailed: (kinds: TrackKind[], reason: PublishFailure) => void,
 		onConnectionFailed: () => void
@@ -178,7 +190,7 @@ export class Publisher {
 		this.#pc = pc;
 		this.#send = send;
 		this.#onFailed = onFailed;
-		watchFailure(pc, onConnectionFailed);
+		watchFailure(pc, () => this.#closed, onConnectionFailed);
 	}
 
 	sync(desired: Outgoing): void {
@@ -212,27 +224,28 @@ export class Publisher {
 	}
 
 	setIceServers(iceServers: RTCIceServer[]): void {
-		setIceServers(this.#pc, iceServers);
+		void this.#pc.then((pc) => setIceServers(pc, iceServers));
 	}
 
 	close(): void {
 		this.#closed = true;
 		this.#pendingAnswer?.reject(new PublishError('local'));
 		this.#pendingAnswer = null;
-		this.#pc.close();
+		void this.#pc.then((pc) => pc.close());
 	}
 
 	async #run(): Promise<void> {
 		if (this.#running) return;
 		this.#running = true;
 		try {
+			const pc = await this.#pc;
 			while (!this.#closed) {
 				const published = new Map([...this.#published].map(([kind, p]) => [kind, p.track]));
 				const plan = planPublish(published, this.#desired, this.#failed);
 				if (plan.unpublish.length + plan.replace.length + plan.add.length === 0) break;
 				for (const kind of plan.unpublish) this.#unpublish(kind);
 				for (const kind of plan.replace) await this.#replace(kind);
-				if (plan.add.length > 0) await this.#publish(plan.add);
+				if (plan.add.length > 0) await this.#publish(pc, plan.add);
 			}
 		} finally {
 			this.#running = false;
@@ -244,11 +257,7 @@ export class Publisher {
 		const published = this.#published.get(kind);
 		this.#published.delete(kind);
 		this.#sendUnpublish(kind);
-		try {
-			published?.transceiver.stop();
-		} catch {
-			// Already stopped, or the connection is closed.
-		}
+		if (published) stopTransceiver(published.transceiver);
 	}
 
 	#sendUnpublish(kind: TrackKind): void {
@@ -269,11 +278,11 @@ export class Publisher {
 		}
 	}
 
-	async #publish(kinds: TrackKind[]): Promise<void> {
+	async #publish(pc: RTCPeerConnection, kinds: TrackKind[]): Promise<void> {
 		const added = kinds.flatMap((kind) => {
 			const track = this.#desired[kind];
 			if (!track) return [];
-			const transceiver = this.#pc.addTransceiver(track, {
+			const transceiver = pc.addTransceiver(track, {
 				direction: 'sendonly',
 				...(kind === 'video' ? { sendEncodings: CAMERA_SIMULCAST.map((e) => ({ ...e })) } : {})
 			});
@@ -281,8 +290,8 @@ export class Publisher {
 			return [{ kind, track, transceiver }];
 		});
 		try {
-			await this.#pc.setLocalDescription(await this.#pc.createOffer());
-			const sdp = this.#pc.localDescription?.sdp;
+			await pc.setLocalDescription(await pc.createOffer());
+			const sdp = pc.localDescription?.sdp;
 			if (!sdp) throw new PublishError('local');
 			const tracks = added.map(({ kind, transceiver }): LocalTrack => {
 				// `mid` is assigned by `setLocalDescription`.
@@ -290,7 +299,7 @@ export class Publisher {
 				return { mid: transceiver.mid, kind, name: trackName(kind, ++this.#generation) };
 			});
 			const answer = await this.#exchange(sdp, tracks);
-			await this.#pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+			await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
 			for (const { kind, track, transceiver } of added) {
 				if (answer.rejected.includes(kind)) {
 					this.#failed.set(kind, track);
@@ -306,8 +315,8 @@ export class Publisher {
 			if (refused.length > 0) this.#onFailed(refused, 'refused');
 		} catch (e) {
 			if (this.#closed) return;
-			if (this.#pc.signalingState === 'have-local-offer') {
-				await this.#pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+			if (pc.signalingState === 'have-local-offer') {
+				await pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
 			}
 			for (const { kind, track, transceiver } of added) {
 				this.#failed.set(kind, track);
@@ -357,27 +366,56 @@ export type RemoteTracks = ReadonlyMap<string, RemoteTrack>;
 export const NO_REMOTE_TRACKS: RemoteTracks = new Map();
 
 /**
+ * Pure: `tracks` without those the room no longer lists as `published`: participants who left
+ * and kinds unpublished. The same map if none goes.
+ */
+function retained(tracks: RemoteTracks, published: readonly TrackRef[]): RemoteTracks {
+	const keys = new Set(published.map(trackKey));
+	const kept = new Map([...tracks].filter(([key]) => keys.has(key)));
+	return kept.size === tracks.size ? tracks : kept;
+}
+
+/** Pure: `tracks` with `arrived`, each in place of what its transceiver (`mid`) carried before. */
+function withArrived(tracks: RemoteTracks, arrived: readonly RemoteTrack[]): RemoteTracks {
+	const next = new Map(tracks);
+	for (const remote of arrived) {
+		// The SFU may reuse a transceiver for another track: one entry per mid.
+		for (const [key, t] of next) if (t.mid === remote.mid) next.delete(key);
+		next.set(trackKey(remote.ref), remote);
+	}
+	return next;
+}
+
+/**
  * The subscribe session: applies the room's offers one at a time and maps each transceiver
- * to the participant track the offer names.
+ * to the participant track the offer names. It keeps no tracks itself: it hands its owner
+ * each change as a function of the tracks the owner holds.
  */
 export class Subscriber {
-	readonly #pc: RTCPeerConnection;
+	readonly #pc: Promise<RTCPeerConnection>;
 	readonly #sendAnswer: (sdp: Sdp) => void;
-	readonly #onTracks: (tracks: RemoteTracks, delivered: TrackRef[]) => void;
-	#tracks = new Map<string, RemoteTrack>();
+	readonly #onTracks: (update: (tracks: RemoteTracks) => RemoteTracks) => void;
+	readonly #onDelivered: (delivered: TrackRef[]) => void;
 	#queue: Promise<void> = Promise.resolve();
+	#closed = false;
 
-	/** `onConnectionFailed` hears once that the peer connection failed. */
+	/**
+	 * `onTracks` gets each change of the received tracks; `onDelivered` hears which tracks each
+	 * answered offer delivered; `onConnectionFailed` hears once that the peer connection failed.
+	 * None of them hears anything after `close()`.
+	 */
 	constructor(
-		pc: RTCPeerConnection,
+		pc: Promise<RTCPeerConnection>,
 		sendAnswer: (sdp: Sdp) => void,
-		onTracks: (tracks: RemoteTracks, delivered: TrackRef[]) => void,
+		onTracks: (update: (tracks: RemoteTracks) => RemoteTracks) => void,
+		onDelivered: (delivered: TrackRef[]) => void,
 		onConnectionFailed: () => void
 	) {
 		this.#pc = pc;
 		this.#sendAnswer = sendAnswer;
 		this.#onTracks = onTracks;
-		watchFailure(pc, onConnectionFailed);
+		this.#onDelivered = onDelivered;
+		watchFailure(pc, () => this.#closed, onConnectionFailed);
 	}
 
 	offer(sdp: Sdp, incoming: IncomingTrack[]): void {
@@ -390,50 +428,42 @@ export class Subscriber {
 	}
 
 	/**
-	 * Drops the tracks the room no longer lists as `published`: participants who left and
-	 * kinds unpublished. The room's `State` comes before the SFU closes the tracks.
+	 * Drops the tracks the room no longer lists as `published`. The room's `State` comes before
+	 * the SFU closes the tracks.
 	 */
 	retain(published: readonly TrackRef[]): void {
-		const keys = new Set(published.map(trackKey));
-		const kept = new Map([...this.#tracks].filter(([key]) => keys.has(key)));
-		if (kept.size === this.#tracks.size) return;
-		this.#tracks = kept;
-		this.#onTracks(kept, []);
+		if (!this.#closed) this.#onTracks((tracks) => retained(tracks, published));
 	}
 
 	setIceServers(iceServers: RTCIceServer[]): void {
-		setIceServers(this.#pc, iceServers);
+		void this.#pc.then((pc) => setIceServers(pc, iceServers));
 	}
 
+	/** Closes the connection; an offer still being applied then answers and delivers nothing. */
 	close(): void {
-		this.#pc.close();
+		this.#closed = true;
+		void this.#pc.then((pc) => pc.close());
 	}
 
 	async #apply(sdp: Sdp, incoming: IncomingTrack[]): Promise<void> {
-		await this.#pc.setRemoteDescription({ type: 'offer', sdp });
-		const byMid = new Map(this.#pc.getTransceivers().map((t) => [t.mid, t]));
+		const pc = await this.#pc;
+		if (this.#closed) return;
+		await pc.setRemoteDescription({ type: 'offer', sdp });
+		const byMid = new Map(pc.getTransceivers().map((t) => [t.mid, t]));
 		// An offer may carry no track the room could pull (its publisher is not connected
 		// yet); the SFU still waits for the answer.
 		const arrived = incoming.flatMap(({ mid, track: ref }): RemoteTrack[] => {
 			const transceiver = byMid.get(mid);
 			return transceiver ? [{ ref, mid, track: transceiver.receiver.track }] : [];
 		});
-		await this.#pc.setLocalDescription(await this.#pc.createAnswer());
-		const answer = this.#pc.localDescription?.sdp;
+		await pc.setLocalDescription(await pc.createAnswer());
+		if (this.#closed) return;
+		const answer = pc.localDescription?.sdp;
 		if (!answer) throw new Error('subscribe answer has no local description');
 		this.#sendAnswer(answer);
-		// Applied to the tracks as they are now: `retain` may have dropped some meanwhile.
-		const tracks = new Map(this.#tracks);
-		for (const remote of arrived) {
-			// The SFU may reuse a transceiver for another track: one entry per mid.
-			for (const [key, t] of tracks) if (t.mid === remote.mid) tracks.delete(key);
-			tracks.set(trackKey(remote.ref), remote);
-		}
-		this.#tracks = tracks;
-		this.#onTracks(
-			tracks,
-			arrived.map((t) => t.ref)
-		);
+		// Applied to the tracks as they are then: `retain` may have dropped some meanwhile.
+		this.#onTracks((tracks) => withArrived(tracks, arrived));
+		this.#onDelivered(arrived.map((t) => t.ref));
 	}
 }
 

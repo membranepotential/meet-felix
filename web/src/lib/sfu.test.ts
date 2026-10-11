@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
 	NO_OUTGOING,
+	NO_REMOTE_TRACKS,
 	orderVideoCodecs,
 	planPublish,
 	Publisher,
 	Subscriber,
-	trackName,
-	type RemoteTracks
+	trackName
 } from './sfu.ts';
 import type { ClientMsg, Sdp, TrackKind, TrackRef } from './protocol.ts';
 
@@ -121,7 +121,7 @@ describe('Publisher', () => {
 		const connectionFailed = vi.fn();
 		let connected = true;
 		const publisher: Publisher = new Publisher(
-			pc,
+			Promise.resolve(pc),
 			(msg) => {
 				if (!connected) return false;
 				sent.push(msg);
@@ -137,11 +137,19 @@ describe('Publisher', () => {
 		return { publisher, sent, transceivers, setConnected, fail, publishFailed, connectionFailed };
 	}
 
-	it('reports a failed connection once', () => {
-		const { fail, connectionFailed } = setup();
+	it('reports a failed connection once, and not after it was closed', async () => {
+		const { publisher, fail, connectionFailed } = setup();
+		await Promise.resolve();
 		fail();
 		fail();
 		expect(connectionFailed).toHaveBeenCalledOnce();
+
+		const closed = setup();
+		await Promise.resolve();
+		closed.publisher.close();
+		closed.fail();
+		expect(closed.connectionFailed).not.toHaveBeenCalled();
+		publisher.close();
 	});
 
 	it('counts a kind the SFU rejected as failed and does not offer it again', async () => {
@@ -206,34 +214,39 @@ describe('Subscriber', () => {
 	function setup() {
 		const { pc, offerMids, fail } = fakeSubscribePeerConnection();
 		const answers: Sdp[] = [];
-		const updates: { tracks: RemoteTracks; delivered: TrackRef[] }[] = [];
+		const delivered: TrackRef[][] = [];
 		const connectionFailed = vi.fn();
+		/** The received tracks, held as the subscriber's owner holds them. */
+		const held = { tracks: NO_REMOTE_TRACKS };
 		const subscriber = new Subscriber(
-			pc as unknown as RTCPeerConnection,
+			Promise.resolve(pc as unknown as RTCPeerConnection),
 			(sdp) => answers.push(sdp),
-			(tracks, delivered) => updates.push({ tracks, delivered }),
+			(update) => (held.tracks = update(held.tracks)),
+			(refs) => delivered.push(refs),
 			connectionFailed
 		);
-		return { subscriber, pc, offerMids, answers, updates, fail, connectionFailed };
+		return { subscriber, pc, offerMids, answers, delivered, held, fail, connectionFailed };
 	}
 
-	it('reports a failed connection once', () => {
+	it('reports a failed connection once', async () => {
 		const { fail, connectionFailed } = setup();
+		await Promise.resolve();
 		fail();
 		fail();
 		expect(connectionFailed).toHaveBeenCalledOnce();
 	});
 
 	it('answers an offer that carries no track', async () => {
-		const { subscriber, pc, answers, updates } = setup();
+		const { subscriber, pc, answers, delivered, held } = setup();
 		subscriber.offer('offer', []);
 		await vi.waitFor(() => expect(answers).toEqual(['answer']));
 		expect(pc.setRemoteDescription).toHaveBeenCalledWith({ type: 'offer', sdp: 'offer' });
-		expect(updates).toEqual([{ tracks: new Map(), delivered: [] }]);
+		expect(delivered).toEqual([[]]);
+		expect(held.tracks.size).toBe(0);
 	});
 
 	it("drops an unpublished kind but keeps the owner's other tracks", async () => {
-		const { subscriber, offerMids, updates } = setup();
+		const { subscriber, offerMids, delivered, held } = setup();
 		const audio: TrackRef = { owner: 2, kind: 'audio' };
 		const video: TrackRef = { owner: 2, kind: 'video' };
 		offerMids(['0', '1']);
@@ -241,10 +254,23 @@ describe('Subscriber', () => {
 			{ mid: '0', track: audio },
 			{ mid: '1', track: video }
 		]);
-		await vi.waitFor(() => expect(updates).toHaveLength(1));
+		await vi.waitFor(() => expect(delivered).toEqual([[audio, video]]));
 		subscriber.retain([audio]);
-		expect([...(updates.at(-1)?.tracks.keys() ?? [])]).toEqual(['2:audio']);
+		const kept = held.tracks;
+		expect([...kept.keys()]).toEqual(['2:audio']);
 		subscriber.retain([audio]);
-		expect(updates).toHaveLength(2);
+		expect(held.tracks).toBe(kept);
+	});
+
+	it('answers and delivers nothing once closed', async () => {
+		const { subscriber, offerMids, answers, delivered, held } = setup();
+		offerMids(['0']);
+		subscriber.offer('offer', [{ mid: '0', track: { owner: 2, kind: 'audio' } }]);
+		subscriber.close();
+		subscriber.retain([]);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(answers).toEqual([]);
+		expect(delivered).toEqual([]);
+		expect(held.tracks).toBe(NO_REMOTE_TRACKS);
 	});
 });

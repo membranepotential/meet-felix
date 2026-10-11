@@ -19,6 +19,8 @@ Decisions on this page:
 Code: [`crates/meeting-core/src/shell.rs`](../../crates/meeting-core/src/shell.rs)
 (the SFU effects and replies), [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
 (`Rid`, `TrackKind`), [`web/src/lib/sfu.ts`](../../web/src/lib/sfu.ts),
+[`web/src/lib/media-link.svelte.ts`](../../web/src/lib/media-link.svelte.ts) (the two
+connections of a stay, replaced by epoch),
 [`web/src/lib/layers.ts`](../../web/src/lib/layers.ts),
 [`web/src/lib/signaling.ts`](../../web/src/lib/signaling.ts),
 [`web/src/lib/media/`](../../web/src/lib/media/), [`crates/sfu-api`](../../crates/sfu-api/).

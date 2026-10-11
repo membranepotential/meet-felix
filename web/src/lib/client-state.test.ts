@@ -3,6 +3,7 @@ import {
 	awaitingConsent,
 	describeError,
 	INITIAL,
+	over,
 	reduce,
 	syncMute,
 	type ClientState
@@ -171,17 +172,35 @@ describe('reduce', () => {
 });
 
 describe('syncMute', () => {
-	it('switches the mic off when the room shows us muted, since muting wins', () => {
-		expect(syncMute(true, true)).toEqual([{ kind: 'mute-mic' }]);
+	it('switches the mic off when the room muted us, since muting wins', () => {
+		// A host muted us while the socket was down: the room has our last report, "unmuted".
+		expect(syncMute(true, true, false)).toBe('mute-mic');
+		// Muted when we joined, as the room records without our consent.
+		expect(syncMute(true, true, null)).toBe('mute-mic');
 	});
 
-	it('reports a mic that is off while the room shows it on', () => {
-		expect(syncMute(false, false)).toEqual([{ kind: 'report-muted' }]);
+	it('reports a mic switched off before joining', () => {
+		expect(syncMute(false, false, null)).toBe('report');
+	});
+
+	it('reports a switch the room did not hear of while the socket was down', () => {
+		expect(syncMute(true, true, true)).toBe('report');
+		expect(syncMute(false, false, false)).toBe('report');
 	});
 
 	it('does nothing when both agree', () => {
-		expect(syncMute(true, false)).toEqual([]);
-		expect(syncMute(false, true)).toEqual([]);
+		expect(syncMute(true, false, true)).toBe('none');
+		expect(syncMute(false, true, null)).toBe('none');
+	});
+});
+
+describe('over', () => {
+	it('ends the stay, forgets a pending consent question and tears down', () => {
+		const asked: ClientState = { ...INITIAL, consentAsked: true };
+		expect(over(asked, { kind: 'left' })).toEqual([
+			{ ...INITIAL, stage: { kind: 'over', end: { kind: 'left' } } },
+			[{ kind: 'teardown' }]
+		]);
 	});
 });
 

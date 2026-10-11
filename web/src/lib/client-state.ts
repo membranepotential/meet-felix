@@ -56,9 +56,20 @@ export type Command =
 	| { kind: 'toast'; text: string; tone: ToastTone }
 	/** Harmless for the user, but worth a line in the console. */
 	| { kind: 'warn'; text: string }
+	/** Switch the local microphone off. */
+	| { kind: 'mute-mic' }
+	/** The stay is over: release media and close the socket. */
+	| { kind: 'teardown' }
+	/** This page speaks a protocol the room no longer serves: load it again. */
+	| { kind: 'reload' }
+	| MediaCommand;
+
+/** A side effect for the SFU peer connections (`MediaLink`). */
+export type MediaCommand =
 	/**
 	 * We are in. `fresh` means a new participant: open new SFU peer connections. `epochs` names
-	 * the room's current sessions; a connection made for an older one must be replaced.
+	 * the room's current sessions; a connection made for an older one must be replaced. The
+	 * session also makes the mic switch and the room's mute flag agree (`syncMute`).
 	 */
 	| { kind: 'welcomed'; fresh: boolean; epochs: SessionEpochs }
 	/** The answer to our publish offer; the SFU did not publish the `rejected` kinds. */
@@ -76,15 +87,7 @@ export type Command =
 	 */
 	| { kind: 'subscribe-retrying'; notice: string }
 	/** The room refused a `SetLayer` for a track it does not deliver yet: ask again later. */
-	| { kind: 'layer-refused' }
-	/** Switch the local microphone off. */
-	| { kind: 'mute-mic' }
-	/** Tell the room our microphone is off (`SetMuted`). */
-	| { kind: 'report-muted' }
-	/** The stay is over: release media and close the socket. */
-	| { kind: 'teardown' }
-	/** This page speaks a protocol the room no longer serves: load it again. */
-	| { kind: 'reload' };
+	| { kind: 'layer-refused' };
 
 /** Errors that answer a `PublishOffer`: the publish in flight failed. */
 const PUBLISH_ERRORS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
@@ -123,16 +126,22 @@ export function describeError(code: ErrorCode): string | null {
 	}
 }
 
+/** What makes the mic switch and the room's mute flag agree: switch the mic off, or report it. */
+export type MuteSync = 'none' | 'mute-mic' | 'report';
+
 /**
- * After a welcome, makes the local mic switch and the room's mute flag agree. Muting wins: the
- * room shows us muted when a host muted us, perhaps while the socket was down, or when it records
- * without our consent, so the mic goes off; a mic switched off before joining or while the socket
- * was down is reported to the room. Later switches are reported as they happen.
+ * After a welcome, how to make the local mic switch and the room's mute flag (`roomMuted`)
+ * agree. `reported` is the flag this client last got through to the room for this participant,
+ * `null` before the first. A switch the user made while the socket was down is reported. Any
+ * other difference was made by the room, and muting wins: a host muted us, perhaps while the
+ * socket was down, or the room records without our consent, so the mic goes off; a mic switched
+ * off before joining is reported. Later switches are reported as they happen.
  */
-export function syncMute(shownMuted: boolean, micOn: boolean): Command[] {
-	if (shownMuted && micOn) return [{ kind: 'mute-mic' }];
-	if (!shownMuted && !micOn) return [{ kind: 'report-muted' }];
-	return [];
+export function syncMute(roomMuted: boolean, micOn: boolean, reported: boolean | null): MuteSync {
+	const muted = !micOn;
+	if (roomMuted === muted) return 'none';
+	if (reported !== null && reported !== muted) return 'report';
+	return roomMuted ? 'mute-mic' : 'report';
 }
 
 /** Where a participant counts for the recording: in the room, or let in but waiting for consent. */
@@ -154,10 +163,17 @@ export function awaitingConsent(room: RoomView, you: ParticipantId): Participant
 	);
 }
 
-const over = (state: ClientState, end: SessionEnd): [ClientState, Command[]] => [
+/** The stay is over, because of the room's message or the client's own decision. */
+export const over = (state: ClientState, end: SessionEnd): [ClientState, Command[]] => [
 	{ ...state, stage: { kind: 'over', end }, consentAsked: false },
 	[{ kind: 'teardown' }]
 ];
+
+/** The user accepted the recording the room asked about. */
+export const consentGiven = (state: ClientState): ClientState => ({
+	...state,
+	consentAsked: false
+});
 
 /** Applies one server message. Messages after the stay is over change nothing. */
 export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Command[]] {

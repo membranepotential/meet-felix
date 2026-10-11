@@ -41,7 +41,7 @@
 	 */
 	function remoteStream(p: ParticipantView, kind: TrackKind): MediaStream | null {
 		if (!p.tracks.includes(kind)) return null;
-		const track = session.remote.get(trackKey({ owner: p.id, kind }))?.track;
+		const track = session.link.remote.get(trackKey({ owner: p.id, kind }))?.track;
 		return track && isLive(track) ? streamFor(track) : null;
 	}
 
@@ -199,7 +199,7 @@
 	{/if}
 
 	<div class="stage-wrap">
-		<Stage {tiles} {featured} {expanded} layers={session.layers} onexpand={expand} />
+		<Stage {tiles} {featured} {expanded} layers={session.link.layers} onexpand={expand} />
 	</div>
 
 	<!-- Notices hang above the bar, over the stage's lower edge, so the tiles never jump. -->
