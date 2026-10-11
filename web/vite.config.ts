@@ -30,7 +30,28 @@ export default defineConfig({
 			},
 			// Fully static SPA: every route renders in the browser from `index.html`.
 			// The Worker serves `build/` as static assets with SPA fallback.
-			adapter: adapter({ fallback: 'index.html' })
+			adapter: adapter({ fallback: 'index.html' }),
+			// The pages' Content-Security-Policy, as a `<meta>` tag with the hash of SvelteKit's
+			// inline bootstrap script. A meta tag cannot carry `frame-ancestors`; `static/_headers`
+			// sends that, with `nosniff`, for every static file.
+			csp: {
+				mode: 'hash',
+				directives: {
+					'default-src': ['self'],
+					// The meeting core is WebAssembly, which needs `wasm-unsafe-eval` to compile.
+					'script-src': ['self', 'wasm-unsafe-eval'],
+					// Svelte writes `style` attributes, and `app.html` has one.
+					'style-src': ['self', 'unsafe-inline'],
+					// The API and the room's WebSocket are same-origin; media goes over
+					// `RTCPeerConnection`, which `connect-src` does not govern.
+					'connect-src': ['self'],
+					'img-src': ['self', 'data:'],
+					'font-src': ['self'],
+					'object-src': ['none'],
+					'base-uri': ['self'],
+					'form-action': ['self']
+				}
+			}
 		})
 	],
 	server: {

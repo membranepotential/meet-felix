@@ -93,7 +93,11 @@ binding = "AI"
 
 # The built SvelteKit app (web/build) is served as static assets; unknown paths fall back to
 # index.html for the SPA router. /api/*, /ws/* and the recorder's /rec/* always reach the
-# Worker first. web/static/_headers keeps /t/* (transcript links) out of referrers and indexes.
+# Worker first. web/static/_headers sends `nosniff` and `frame-ancestors 'none'` with every
+# static file (the SPA fallback included) and keeps /t/* (transcript links) out of referrers and
+# indexes. The script policy is a <meta> tag in each page (`csp` in web/vite.config.ts), which
+# cannot carry frame-ancestors. Rules matching one path join a repeated header with commas
+# (https://developers.cloudflare.com/workers/static-assets/headers/), so no header is in two.
 [assets]
 directory = "web/build"
 not_found_handling = "single-page-application"

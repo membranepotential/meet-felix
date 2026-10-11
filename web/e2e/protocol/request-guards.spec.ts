@@ -134,3 +134,20 @@ test('a host socket from another origin is refused; a guest socket is not', asyn
 	expect(await status({ origin: FOREIGN }), 'a guest from anywhere').toBe(101);
 	expect(await status({ ...owner.headers, origin: stack.baseUrl })).toBe(101);
 });
+
+test('static pages forbid framing and sniffing, and carry the script policy', async ({ stack }) => {
+	const transcriptPage = `/t/${'0'.repeat(32)}`;
+	// The index; a meeting page, which the SPA fallback serves; a transcript page.
+	for (const path of ['/', '/abide-acid-acorn', transcriptPage]) {
+		const page = await fetch(`${stack.baseUrl}${path}`);
+		expect(page.status, path).toBe(200);
+		expect(page.headers.get('x-content-type-options'), path).toBe('nosniff');
+		expect(page.headers.get('content-security-policy'), path).toBe("frame-ancestors 'none'");
+		const policy = /<meta http-equiv="content-security-policy" content="([^"]+)"/.exec(
+			await page.text()
+		)?.[1];
+		expect(policy, path).toContain("script-src 'self' 'wasm-unsafe-eval' 'sha256-");
+	}
+	const transcript = await fetch(`${stack.baseUrl}${transcriptPage}`);
+	expect(transcript.headers.get('referrer-policy')).toBe('no-referrer');
+});
