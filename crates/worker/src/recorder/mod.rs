@@ -213,7 +213,7 @@ impl Inner {
         };
         match recorder.phase.clone() {
             RecorderPhase::Recording => self.look_after(&mut recorder, now).await,
-            RecorderPhase::Ended { at, job } => self.run_job(&mut recorder, at, job, now).await,
+            RecorderPhase::Ended { at, job } => self.run_job(&recorder, at, job, now).await,
         }
     }
 }

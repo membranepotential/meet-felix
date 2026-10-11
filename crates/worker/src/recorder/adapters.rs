@@ -17,17 +17,19 @@ use crate::{now, sfu};
 const RECORDER_ORIGIN: &str = "RECORDER_ORIGIN";
 
 impl Inner {
-    /// Asks the SFU for `adapter` and stores what came of it ([`Recorder::settle`]). After a
+    /// Asks the SFU for the adapter of `key`, if it is still to be created
+    /// ([`Recorder::to_create`]), and stores what came of it ([`Recorder::settle`]). After a
     /// failure the alarm calls again ([`Inner::retry_adapters`]), armed for the next call
-    /// unless it is due sooner. The record is read again after the call: it may have changed
-    /// while the call was out.
-    pub(super) async fn create_adapter(
-        self: &Rc<Self>,
-        secret: &str,
-        adapter: &Adapter,
-    ) -> Result<()> {
-        let key: StreamKey = (adapter.who, adapter.generation);
-        let created = match self.endpoint(secret, key) {
+    /// unless it is due sooner. The record is read right before the call, since an earlier
+    /// call may have let a `/stop` or `/untrack` in, and again after it.
+    pub(super) async fn create_adapter(self: &Rc<Self>, key: StreamKey) -> Result<()> {
+        let Some(recorder) = self.load().await? else {
+            return Ok(());
+        };
+        let Some(adapter) = recorder.to_create(key, now()) else {
+            return Ok(());
+        };
+        let created = match self.endpoint(&recorder.secret, key) {
             Ok(endpoint) => {
                 self.call_create(
                     adapter.session.clone(),
@@ -77,8 +79,8 @@ impl Inner {
         if due.is_empty() {
             return Ok(recorder.next_adapter_call());
         }
-        for adapter in &due {
-            self.create_adapter(&recorder.secret, adapter).await?;
+        for key in due {
+            self.create_adapter(key).await?;
         }
         Ok(self
             .load()

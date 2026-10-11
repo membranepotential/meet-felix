@@ -261,8 +261,18 @@ As built (2026-10-09):
   until the adapter exists or closes, the speaker's audio is missing, and the
   transcript shows that stretch as a "missing" gap if it lasts at least 1 s.
   The rule is `Recorder::settle` in `crates/worker/src/recorder/state.rs`.
-  Not covered: an eviction during the first call, which leaves the adapter
-  asked for and never answered, as before.
+  Every call has its own generation, so its own endpoint: a failed call
+  closes its generation, and the next call is made for the next one. The SFU
+  has no endpoint that lists or looks up adapters, and an adapter's
+  connection carries no id (WebSocket adapter docs, checked 2026-10-11), so
+  if a call failed only on the way back, the adapter it created cannot be
+  closed; it streams to a closed generation, is refused at the upgrade, and
+  closes itself after the SFU's 15 s of reconnecting. Until it does, the SFU
+  pulls the speaker's track for nothing. Right before each call the recorder
+  reads the record again and skips an adapter that a `/stop` or `/untrack`
+  closed meanwhile (`Recorder::to_create`). Not covered: an eviction during
+  the first call, which leaves the adapter asked for and never answered, as
+  before.
 - A message whose `sequenceNumber` is not newer than the last, by at most
   1,000, is a duplicate and dropped; a step back of more than 1,000 means the
   counter restarted (a new connection, or a 16-bit RTP counter wrapping inside
@@ -377,7 +387,11 @@ end later, or a step that runs later, gives up every chunk still waiting as
 "not transcribed", so the transcript is written and the audio deleted on
 time. Until then the job waited up to seven days without progress, while the
 R2 lifecycle rule deleted the chunks under it after three, and the deleted
-chunks ended up "not transcribed" after three wasted attempts. A chunk that
+chunks ended up "not transcribed" after three wasted attempts. A wait that
+older code stored ends at that time too (`Job::step`). A job step that
+awaits Workers AI or R2 stores its progress on the record as it is
+afterwards, not as it loaded it, so a `/end` that arrived meanwhile keeps
+its roster and consents. A chunk that
 R2 no longer holds is now lost at once and appears as "missing". On Workers
 Free, which allows about 214 Whisper minutes a day ([cost/](../cost/README.md)),
 a meeting whose speech exceeds about two days' allowance, roughly 430

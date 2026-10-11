@@ -13,7 +13,7 @@ use worker::{Bucket, Data, HttpMetadata, Result, console_error, console_log, con
 
 use super::Inner;
 use super::state::{
-    self, AUDIO_RETENTION_MS, Job, MAX_STEP_FAILURES, Recorder, RecorderPhase, Refusal,
+    self, AUDIO_RETENTION_MS, Job, JobStep, MAX_STEP_FAILURES, Recorder, RecorderPhase, Refusal,
     SegmentCursor, audio_prefix, backoff, chunk_key, gaps, on_refusal, transcript_key,
 };
 use super::store::{ChunkRow, ChunkState};
@@ -36,43 +36,40 @@ enum ChunkError {
 }
 
 impl Inner {
-    /// The transcript job's next step.
+    /// The transcript job's next step ([`Job::step`]). `recorder` is the record as the alarm
+    /// loaded it; a step that awaits anything stores its job on the record as it is then
+    /// ([`Inner::store_job`]), so a `/end` that arrived meanwhile is kept.
     pub(super) async fn run_job(
         self: &Rc<Self>,
-        recorder: &mut Recorder,
-        at: Millis,
+        recorder: &Recorder,
+        ended_at: Millis,
         job: Job,
         now: Millis,
     ) -> Result<Option<Millis>> {
-        match job {
-            Job::Transcribing {
-                retry_at: Some(retry_at),
-                ..
-            } if retry_at > now => Ok(Some(retry_at)),
-            Job::Transcribing { .. } => {
-                self.transcribe(recorder, at.after(AUDIO_RETENTION_MS), now)
-                    .await
+        match job.step(ended_at, now) {
+            JobStep::Wait(at) => Ok(Some(at)),
+            JobStep::Transcribe { audio_until } => self.transcribe(audio_until, now).await,
+            JobStep::Merge { after, failures } => {
+                self.merge(recorder, ended_at, after, failures, now).await
             }
-            Job::Merging { after, failures } => {
-                self.merge(recorder, at, after, failures, now).await
-            }
-            Job::Ready {
-                audio_until,
-                audio_deleted_at: None,
-            } if audio_until <= now => self.delete_audio(recorder, now).await,
-            Job::Ready {
-                audio_until,
-                audio_deleted_at: None,
-            } => Ok(Some(audio_until)),
-            Job::Ready { .. } | Job::Failed { .. } => Ok(None),
+            JobStep::DeleteAudio { audio_until } => self.delete_audio(audio_until, now).await,
+            JobStep::Done => Ok(None),
         }
+    }
+
+    /// Stores `job` as the transcript job's step, on the record as it is now.
+    async fn store_job(&self, job: Job) -> Result<()> {
+        let Some(mut recorder) = self.load().await? else {
+            return Ok(());
+        };
+        recorder.set_job(job);
+        self.save(&recorder).await
     }
 
     /// Transcribes the next few stored chunks, once every chunk is in R2. The audio is kept
     /// until `audio_until` (D18), so a chunk not transcribed by then is given up.
     async fn transcribe(
         self: &Rc<Self>,
-        recorder: &mut Recorder,
         audio_until: Millis,
         now: Millis,
     ) -> Result<Option<Millis>> {
@@ -92,14 +89,11 @@ impl Inner {
         }
         let batch = self.store.chunks_in(ChunkState::Stored, TRANSCRIBE_BATCH)?;
         if batch.is_empty() {
-            set_job(
-                recorder,
-                Job::Merging {
-                    after: None,
-                    failures: 0,
-                },
-            );
-            self.save(recorder).await?;
+            self.store_job(Job::Merging {
+                after: None,
+                failures: 0,
+            })
+            .await?;
             return Ok(Some(now));
         }
         let transcriber = WhisperTurbo(self.env.ai(AI)?);
@@ -143,8 +137,7 @@ impl Inner {
             self.store.give_up_stored()?;
             retry_at = None;
         }
-        set_job(recorder, Job::Transcribing { retry_at });
-        self.save(recorder).await?;
+        self.store_job(Job::Transcribing { retry_at }).await?;
         Ok(Some(match retry_at {
             Some(at) => at,
             None if failed => now.after(backoff(0)),
@@ -201,7 +194,7 @@ impl Inner {
     /// transcript.
     async fn merge(
         &self,
-        recorder: &mut Recorder,
+        recorder: &Recorder,
         ended_at: Millis,
         after: Option<SegmentCursor>,
         failures: u32,
@@ -212,27 +205,21 @@ impl Inner {
             let last = self.store.take_last_paragraph()?;
             let paragraphs = merge_segments(last, batch.into_iter().map(|(_, s)| s));
             self.store.append_paragraphs(&paragraphs)?;
-            set_job(
-                recorder,
-                Job::Merging {
-                    after: Some(cursor),
-                    failures,
-                },
-            );
-            self.save(recorder).await?;
+            self.store_job(Job::Merging {
+                after: Some(cursor),
+                failures,
+            })
+            .await?;
             return Ok(Some(now));
         }
         match self.write_transcript(recorder, ended_at).await {
             Ok(()) => {
                 let audio_until = ended_at.after(AUDIO_RETENTION_MS);
-                set_job(
-                    recorder,
-                    Job::Ready {
-                        audio_until,
-                        audio_deleted_at: None,
-                    },
-                );
-                self.save(recorder).await?;
+                self.store_job(Job::Ready {
+                    audio_until,
+                    audio_deleted_at: None,
+                })
+                .await?;
                 console_log!("recorder {}: transcript ready", self.id());
                 Ok(Some(audio_until.max(now)))
             }
@@ -247,8 +234,7 @@ impl Inner {
                         Some(now.after(backoff(failures))),
                     )
                 };
-                set_job(recorder, job);
-                self.save(recorder).await?;
+                self.store_job(job).await?;
                 Ok(next)
             }
         }
@@ -309,7 +295,7 @@ impl Inner {
     }
 
     /// Deletes the meeting's audio from R2, a thousand objects per run (D18).
-    async fn delete_audio(&self, recorder: &mut Recorder, now: Millis) -> Result<Option<Millis>> {
+    async fn delete_audio(&self, audio_until: Millis, now: Millis) -> Result<Option<Millis>> {
         let bucket = self.bucket()?;
         let listed = bucket
             .list()
@@ -325,23 +311,12 @@ impl Inner {
             return Ok(Some(now));
         }
         self.store.clear_spool()?;
-        if let RecorderPhase::Ended {
-            job: Job::Ready {
-                audio_deleted_at, ..
-            },
-            ..
-        } = &mut recorder.phase
-        {
-            *audio_deleted_at = Some(now);
-        }
-        self.save(recorder).await?;
+        self.store_job(Job::Ready {
+            audio_until,
+            audio_deleted_at: Some(now),
+        })
+        .await?;
         console_log!("recorder {}: audio deleted", self.id());
         Ok(None)
-    }
-}
-
-fn set_job(recorder: &mut Recorder, new: Job) {
-    if let RecorderPhase::Ended { job, .. } = &mut recorder.phase {
-        *job = new;
     }
 }

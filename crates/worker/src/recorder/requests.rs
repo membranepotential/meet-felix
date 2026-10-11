@@ -85,7 +85,8 @@ impl Inner {
         self.end_streams(&replaced);
         self.close_sfu_adapters(&replaced).await;
         // A failed call is the recorder's to retry, not the room's: the answer is the same.
-        self.create_adapter(&recorder.secret, &adapter).await?;
+        self.create_adapter((adapter.who, adapter.generation))
+            .await?;
         no_content()
     }
 

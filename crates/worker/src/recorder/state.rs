@@ -278,6 +278,11 @@ impl Adapter {
         }
     }
 
+    /// Whether a failed call's retry is due at `now`.
+    fn call_due(&self, now: Millis) -> bool {
+        matches!(self.creation, Creation::Failing(Failing { retry_at: Some(at), .. }) if at <= now)
+    }
+
     /// Whether the recorder stopped asking the SFU for it.
     fn gave_up(&self) -> bool {
         matches!(
@@ -290,6 +295,12 @@ impl Adapter {
 /// Where creating an adapter at the SFU stands. Stored as the adapter's `id` once created, and
 /// as `failing` while creating it fails; neither while the first call is out, as before
 /// creating could fail (2026-10-11).
+///
+/// Every call has its own generation, so its own endpoint: a failed call closes its
+/// generation, and the next call is made for the next one ([`Recorder::settle`]). The SFU has
+/// no way to list or look up adapters, and the adapter's connection carries no id, so if a
+/// call failed only on the way back, the adapter it created streams to a closed generation,
+/// is refused at the upgrade, and closes itself after the SFU's 15 s of reconnecting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "CreationFields", into = "CreationFields")]
 pub enum Creation {
@@ -297,11 +308,12 @@ pub enum Creation {
     Asked,
     /// The SFU created it.
     Created(AdapterId),
-    /// Calls to create it failed.
+    /// Calls for the speaker's track failed. Open: this generation is the next call's. Closed:
+    /// this generation's call failed.
     Failing(Failing),
 }
 
-/// Calls to create an adapter that failed, and when the recorder calls again.
+/// Calls for a speaker's track that failed, and when the recorder calls again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Failing {
@@ -430,6 +442,51 @@ pub enum Job {
     Failed { at: Millis },
 }
 
+/// What the transcript job does next ([`Job::step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStep {
+    /// Nothing is due before then.
+    Wait(Millis),
+    /// Transcribe the next chunks; the audio is kept until `audio_until`.
+    Transcribe { audio_until: Millis },
+    /// Merge the segments after `after`, then write the transcript.
+    Merge {
+        after: Option<SegmentCursor>,
+        failures: u32,
+    },
+    /// Delete the audio; it was kept until `audio_until`.
+    DeleteAudio { audio_until: Millis },
+    /// The job is over.
+    Done,
+}
+
+impl Job {
+    /// The step due at `now` for a meeting that ended at `ended_at`. A wait for Workers AI ends
+    /// when the audio is due to go, also one that a record stored before 2026-10-11 set later
+    /// ([`on_refusal`]).
+    pub fn step(&self, ended_at: Millis, now: Millis) -> JobStep {
+        let keep_until = ended_at.after(AUDIO_RETENTION_MS);
+        match *self {
+            Self::Transcribing { retry_at: Some(at) } if at.min(keep_until) > now => {
+                JobStep::Wait(at.min(keep_until))
+            }
+            Self::Transcribing { .. } => JobStep::Transcribe {
+                audio_until: keep_until,
+            },
+            Self::Merging { after, failures } => JobStep::Merge { after, failures },
+            Self::Ready {
+                audio_until,
+                audio_deleted_at: None,
+            } if audio_until <= now => JobStep::DeleteAudio { audio_until },
+            Self::Ready {
+                audio_until,
+                audio_deleted_at: None,
+            } => JobStep::Wait(audio_until),
+            Self::Ready { .. } | Self::Failed { .. } => JobStep::Done,
+        }
+    }
+}
+
 /// The last merged segment, in merge order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -513,8 +570,9 @@ impl Recorder {
     }
 
     /// Stores what the call to create the adapter of `(who, generation)` came to at `now`:
-    /// the SFU's id, or a failure, after which the next call is due at the [`adapter_retry`]
-    /// wait. A late success ends the adapter's unrecorded stretch.
+    /// the SFU's id, or a failure. A failure closes the generation and opens the next one for
+    /// the next call, due after the [`adapter_retry`] wait ([`Creation`] says why). A late
+    /// success ends the speaker's unrecorded stretch.
     pub fn settle(
         &mut self,
         (who, generation): (ParticipantId, u32),
@@ -551,27 +609,65 @@ impl Recorder {
             Err(()) if !adapter.open => Settled::Moot,
             Err(()) => {
                 let failures = failing.map_or(0, |f| f.failures) + 1;
+                let since = failing.map_or(now, |f| f.since);
                 let retry_at = adapter_retry(failures).map(|wait| now.after(wait));
+                // Closed without an unrecorded stretch: the next generation carries it on.
+                adapter.open = false;
                 adapter.creation = Creation::Failing(Failing {
-                    since: failing.map_or(now, |f| f.since),
+                    since,
                     failures,
-                    retry_at,
+                    retry_at: None,
                 });
+                let (session, track_name) = (adapter.session.clone(), adapter.track_name.clone());
+                let next = Adapter {
+                    who,
+                    generation: self.next_generation(who),
+                    session,
+                    track_name,
+                    creation: Creation::Failing(Failing {
+                        since,
+                        failures,
+                        retry_at,
+                    }),
+                    open: true,
+                };
+                self.adapters.push(next);
                 retry_at.map_or(Settled::GaveUp, Settled::RetryAt)
             }
         }
     }
 
-    /// The open adapters whose next call to create them is due at `now`.
-    pub fn adapters_due(&self, now: Millis) -> Vec<Adapter> {
+    /// The streams of the open adapters whose next call is due at `now`.
+    pub fn adapters_due(&self, now: Millis) -> Vec<(ParticipantId, u32)> {
         self.adapters
             .iter()
-            .filter(|a| {
-                a.open
-                    && matches!(a.creation, Creation::Failing(Failing { retry_at: Some(at), .. }) if at <= now)
-            })
-            .cloned()
+            .filter(|a| a.open && a.call_due(now))
+            .map(|a| (a.who, a.generation))
             .collect()
+    }
+
+    /// The adapter of `(who, generation)`, if the recorder is to call the SFU for it at `now`:
+    /// open, and either just opened by a `/track` or failing with its next call due. Read from
+    /// the stored record right before each call, so a `/stop` or `/untrack` that arrived during
+    /// an earlier call makes the SFU pull nothing for a closed adapter.
+    pub fn to_create(
+        &self,
+        (who, generation): (ParticipantId, u32),
+        now: Millis,
+    ) -> Option<&Adapter> {
+        self.adapters.iter().find(|a| {
+            a.who == who
+                && a.generation == generation
+                && a.open
+                && (a.creation == Creation::Asked || a.call_due(now))
+        })
+    }
+
+    /// Sets the transcript job's step, once the meeting ended.
+    pub fn set_job(&mut self, new: Job) {
+        if let RecorderPhase::Ended { job, .. } = &mut self.phase {
+            *job = new;
+        }
     }
 
     /// When the next call to create an open adapter is due, if one is.
@@ -1356,23 +1452,42 @@ mod tests {
     fn a_failed_adapter_is_called_for_again_and_the_audio_it_missed_is_a_gap() {
         let (mut recorder, key) = asked_for_one_track();
         assert_eq!(
+            recorder.to_create(key, Millis(0)).map(|a| a.generation),
+            Some(0)
+        );
+        assert_eq!(
             recorder.settle(key, Err(()), Millis(100)),
             Settled::RetryAt(Millis(1_100))
         );
+        // The failed call's generation is closed; the next call has its own.
+        let next = (ParticipantId(0), 1);
+        assert_eq!(recorder.to_create(key, Millis(1_100)), None);
         assert_eq!(recorder.next_adapter_call(), Some(Millis(1_100)));
         assert!(recorder.adapters_due(Millis(1_099)).is_empty());
-        assert_eq!(recorder.adapters_due(Millis(1_100)).len(), 1);
+        assert_eq!(recorder.to_create(next, Millis(1_099)), None);
+        assert_eq!(recorder.adapters_due(Millis(1_100)), [next]);
         assert_eq!(
-            recorder.settle(key, Err(()), Millis(1_100)),
+            recorder.settle(next, Err(()), Millis(1_100)),
             Settled::RetryAt(Millis(3_100))
         );
+        let last = (ParticipantId(0), 2);
         let id = AdapterId::new("adapter-0");
         assert_eq!(
-            recorder.settle(key, Ok(id.clone()), Millis(3_100)),
+            recorder.settle(last, Ok(id.clone()), Millis(3_100)),
             Settled::Created
         );
-        assert_eq!(recorder.adapters[0].id(), Some(&id));
+        assert_eq!(recorder.adapters[2].id(), Some(&id));
+        assert_eq!(recorder.to_create(last, Millis(3_100)), None);
         assert_eq!(recorder.next_adapter_call(), None);
+        // Only the generation that exists is open, so a duplicate the SFU made for an earlier
+        // call is refused at the upgrade.
+        let open: Vec<u32> = recorder
+            .adapters
+            .iter()
+            .filter(|a| a.open)
+            .map(|a| a.generation)
+            .collect();
+        assert_eq!(open, [2]);
         // The speaker was not recorded from the first failure until the adapter existed.
         assert_eq!(
             recorder.unrecorded,
@@ -1386,11 +1501,11 @@ mod tests {
 
     #[test]
     fn a_given_up_adapter_misses_audio_until_it_closes_and_the_same_track_asks_again() {
-        let (mut recorder, key) = asked_for_one_track();
+        let (mut recorder, _) = asked_for_one_track();
         let mut now = Millis(100);
         let mut last = Settled::Moot;
-        for _ in 0..MAX_ADAPTER_CALLS {
-            last = recorder.settle(key, Err(()), now);
+        for generation in 0..MAX_ADAPTER_CALLS {
+            last = recorder.settle((ParticipantId(0), generation), Err(()), now);
             now = now.after(60_000);
         }
         assert_eq!(last, Settled::GaveUp);
@@ -1405,7 +1520,7 @@ mod tests {
         else {
             panic!("a new adapter")
         };
-        assert_eq!((adapter.generation, replaced.len()), (1, 1));
+        assert_eq!((adapter.generation, replaced.len()), (11, 1));
         assert_eq!(
             recorder.unrecorded,
             [Unrecorded {
@@ -1413,6 +1528,78 @@ mod tests {
                 start: Millis(100),
                 end: now,
             }]
+        );
+    }
+
+    #[test]
+    fn a_retry_due_while_a_stop_arrived_calls_nothing() {
+        let (mut recorder, key) = asked_for_one_track();
+        recorder.settle(key, Err(()), Millis(100));
+        let next = (ParticipantId(0), 1);
+        // The alarm found the retry due, then a `/stop` arrived during another call.
+        assert_eq!(recorder.adapters_due(Millis(1_100)), [next]);
+        recorder.stop(RequestSeq(2), Millis(1_050));
+        assert_eq!(recorder.to_create(next, Millis(1_100)), None);
+        assert_eq!(recorder.unrecorded.len(), 1);
+    }
+
+    #[test]
+    fn a_job_step_stored_on_the_record_as_it_is_now_keeps_an_end_that_arrived_meanwhile() {
+        // A meeting the recorder ended itself; a transcribe step loads it and awaits Whisper.
+        let mut stored = empty_recorder();
+        stored.phase = RecorderPhase::Ended {
+            at: Millis(5),
+            job: Job::Transcribing { retry_at: None },
+        };
+        let loaded_by_the_step = stored.clone();
+        // Meanwhile the room's `/end` arrives and is stored.
+        let end = FinishRecording {
+            roster: vec![entry(0, "Ada")],
+            consents: vec![consent(ParticipantId(0), false)],
+        };
+        assert!(stored.learn(Learned::Everyone(end.clone())));
+        // The step stores its job on the record as it is now, not on what it loaded.
+        let job = Job::Merging {
+            after: None,
+            failures: 0,
+        };
+        stored.set_job(job.clone());
+        assert_eq!(stored.speakers, end.roster);
+        assert_eq!(stored.consents, end.consents);
+        assert_eq!(stored.phase, RecorderPhase::Ended { at: Millis(5), job });
+        assert!(
+            loaded_by_the_step.speakers.is_empty(),
+            "what the old code saved"
+        );
+    }
+
+    #[test]
+    fn a_wait_stored_by_older_code_ends_when_the_audio_is_due_to_go() {
+        let (_, json) = fixtures::read("recorder", "older")
+            .into_iter()
+            .find(|(name, _)| name == "v2-transcribing-with-waiting-since.json")
+            .expect("the fixture");
+        let recorder = decode(&json).unwrap();
+        let RecorderPhase::Ended { at, job } = recorder.phase else {
+            panic!("ended")
+        };
+        let Job::Transcribing {
+            retry_at: Some(retry_at),
+        } = job
+        else {
+            panic!("waiting")
+        };
+        let audio_until = at.after(AUDIO_RETENTION_MS);
+        assert_eq!(job.step(at, at), JobStep::Wait(retry_at));
+        assert_eq!(job.step(at, retry_at), JobStep::Transcribe { audio_until });
+        // A week-long wait from before 2026-10-11 ends when the audio is due to go.
+        let week = Job::Transcribing {
+            retry_at: Some(at.after(7 * DAY_MS)),
+        };
+        assert_eq!(week.step(at, retry_at), JobStep::Wait(audio_until));
+        assert_eq!(
+            week.step(at, audio_until),
+            JobStep::Transcribe { audio_until }
         );
     }
 
