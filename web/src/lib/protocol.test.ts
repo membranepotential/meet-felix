@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { initSync } from './wasm/meeting_core.js';
 import {
 	encodeClientMsg,
+	meetingWords,
 	parseMeetingId,
 	parseServerMsg,
 	trackKey,
@@ -85,6 +86,12 @@ const CLIENT_SAMPLES: Samples<ClientMsg> = {
 	end: { type: 'end' },
 	leave: { type: 'leave' }
 };
+
+describe('meetingWords', () => {
+	it('splits an id into its words', () => {
+		expect(meetingWords('abide-acid-acorn')).toEqual(['abide', 'acid', 'acorn']);
+	});
+});
 
 describe('parseMeetingId', () => {
 	it('accepts listed words and lowercases what phones capitalise', () => {

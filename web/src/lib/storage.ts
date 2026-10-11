@@ -6,7 +6,9 @@
 const DISPLAY_NAME = 'meet-felix:name';
 /**
  * Secrets earlier versions kept: the Worker's create secret, and one host token per meeting.
- * The owner's session cookie replaces both; `dropLegacySecrets` removes the old copies.
+ * The owner's session cookie replaces both; `dropLegacySecrets` removes the old copies. The
+ * create secret is the owner's password in plain text (D24), so the cleanup stays until every
+ * browser that created a meeting before 2026-10-09 has opened the start page once.
  */
 const LEGACY_CREATE_SECRET = 'meet-felix:create-secret';
 const LEGACY_HOST_TOKEN_PREFIX = 'meet-felix:host:';

@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { createMeeting, type ApiError } from '#lib/api.ts';
+	import { describeApiError, type ApiErrorWording } from '#lib/api-messages.ts';
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import LoginForm from '#lib/components/LoginForm.svelte';
 	import ShareButton from '#lib/components/ShareButton.svelte';
 	import { OwnerSession } from '#lib/owner-session.svelte.ts';
-	import type { MeetingId } from '#lib/protocol.ts';
+	import { meetingWords, type MeetingId } from '#lib/protocol.ts';
 	import { dropLegacySecrets } from '#lib/storage.ts';
 
 	type HostState =
@@ -45,20 +46,11 @@
 		if (!owner.signedIn) hostState = { kind: 'idle' };
 	}
 
-	function describe(error: ApiError): string {
-		switch (error.kind) {
-			case 'unauthorized':
-				return 'Your login has expired. Log in again.';
-			case 'rate-limited':
-				return 'Too many new meetings in a short time. Wait a minute, then try again.';
-			case 'network':
-				return 'The server could not be reached. Check your connection, then try again.';
-			case 'server':
-				return `The server could not create a meeting (error ${error.status}). Try again.`;
-			case 'malformed':
-				return 'The server sent a reply this page does not understand. Try again.';
-		}
-	}
+	const WORDING: ApiErrorWording = {
+		action: 'create a meeting',
+		rateLimited: 'new meetings',
+		unauthorized: 'Your login has expired. Log in again.'
+	};
 </script>
 
 <svelte:head>
@@ -100,8 +92,9 @@
 		<section class="created" aria-labelledby="link-heading">
 			<h1 id="link-heading" class="eyebrow">Your meeting</h1>
 			<p class="words">
-				{#each meeting.split('-') as word, i (i)}{#if i > 0}<span class="dash">-</span
-						>{/if}{word}{/each}
+				{#each meetingWords(meeting) as word, i (i)}
+					{#if i > 0}<span class="dash">-</span>{/if}{word}
+				{/each}
 			</p>
 			<p class="link"><span class="host">{window.location.origin}/</span>{meeting}</p>
 			<p class="hint">The link works until the meeting ends.</p>
@@ -127,7 +120,9 @@
 				<input type="checkbox" role="switch" bind:checked={record} />
 			</label>
 			{#if hostState.kind === 'failed'}
-				<p class="error" role="alert"><Icon name="alert" size={18} />{describe(hostState.error)}</p>
+				<p class="error" role="alert">
+					<Icon name="alert" size={18} />{describeApiError(hostState.error, WORDING)}
+				</p>
 			{/if}
 			<div class="spacer"></div>
 			<button class="button primary big" type="submit" disabled={hostState.kind === 'creating'}>

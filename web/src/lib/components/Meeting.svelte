@@ -15,7 +15,7 @@
 	import type { Session } from '../session.svelte.ts';
 	import ControlBar from './ControlBar.svelte';
 	import Stage from './Stage.svelte';
-	import type { TileModel } from './Tile.svelte';
+	import { screenTile, type TileModel } from './Tile.svelte';
 	import Toasts from './Toasts.svelte';
 
 	let {
@@ -67,30 +67,16 @@
 				actions: null
 			}
 		];
-		if (media.screenStream) {
-			self.push({
-				key: 'self-screen',
-				name: 'Your screen',
-				self: false,
-				host: false,
-				source: 'screen',
-				stream: media.screenStream,
-				micOn: true,
-				unrecorded: false,
-				reconnecting: false,
-				level: () => 0,
-				layerTrack: null,
-				actions: null
-			});
-		}
+		if (media.screenStream) self.push(screenTile('self-screen', 'Your screen', media.screenStream));
 		const others = session.others.flatMap((p): TileModel[] => {
 			const camera = remoteStream(p, 'video');
 			const screen = remoteStream(p, 'screen');
-			const base = { name: p.name, self: false, host: p.role === 'host', actions: null };
 			return [
 				{
-					...base,
 					key: String(p.id),
+					name: p.name,
+					self: false,
+					host: p.role === 'host',
 					source: 'camera',
 					stream: camera,
 					micOn: p.tracks.includes('audio') && !p.muted,
@@ -105,22 +91,7 @@
 							}
 						: null
 				},
-				...(screen
-					? [
-							{
-								...base,
-								key: `${p.id}-screen`,
-								name: `${p.name}’s screen`,
-								source: 'screen' as const,
-								stream: screen,
-								micOn: true,
-								unrecorded: false,
-								reconnecting: false,
-								level: () => 0,
-								layerTrack: null
-							}
-						]
-					: [])
+				...(screen ? [screenTile(`${p.id}-screen`, `${p.name}’s screen`, screen)] : [])
 			];
 		});
 		return [...self, ...others];
@@ -179,10 +150,10 @@
 		}
 	}
 
-	// Nothing expanded any more (Exit, or the share ended): forget the screen, leave fullscreen.
+	// Nothing expanded any more (Exit, or the share ended): leave fullscreen. `expandedRef` may
+	// keep a stale screen; `expanded` ignores it, and a new share has a new stream.
 	$effect(() => {
 		if (expanded !== null) return;
-		if (expandedRef !== null) expandedRef = null;
 		if (root && document.fullscreenElement === root) document.exitFullscreen().catch(() => {});
 	});
 
@@ -329,7 +300,7 @@
 	/* The expanded screen fills the stage edge to edge, on black; only the phone's safe areas stay. */
 	.expanded .stage-wrap {
 		padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
-		background: #000;
+		background: var(--stage);
 	}
 
 	.dock {

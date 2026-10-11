@@ -52,5 +52,8 @@ export function parseMeetingId(segment: string): MeetingId | null {
 	return validateMeetingId(id) ? id : null;
 }
 
+/** The words of a meeting id, in order (D6: three words joined by `-`). */
+export const meetingWords = (id: MeetingId): string[] => id.split('-');
+
 /** A map key for a track: `TrackRef` is an object, so it cannot be one itself. */
 export const trackKey = ({ owner, kind }: TrackRef): string => `${owner}:${kind}`;

@@ -18,7 +18,7 @@
 	import type { MeetingId, RecordingPolicy } from '../protocol.ts';
 	import DevicePickers from './DevicePickers.svelte';
 	import Icon from './Icon.svelte';
-	import LoginForm from './LoginForm.svelte';
+	import HostLogin from './HostLogin.svelte';
 
 	let {
 		meeting,
@@ -81,7 +81,7 @@
 		<video {@attach showStream(media.cameraStream)} class={[!media.camOn && 'hidden']}></video>
 		{#if !media.camOn}
 			<p class="camera-off">
-				{media.starting ? 'Starting camera…' : 'Camera is off'}
+				{media.starting || lookup.kind === 'loading' ? 'Starting camera…' : 'Camera is off'}
 			</p>
 		{/if}
 		<div class="toggles">
@@ -188,10 +188,7 @@
 		</form>
 
 		{#if offer.kind === 'form'}
-			<section class="host-login" aria-labelledby="host-heading">
-				<h2 id="host-heading">Join as host</h2>
-				<LoginForm {owner} onlogin={loggedIn} />
-			</section>
+			<HostLogin {owner} onlogin={loggedIn} />
 		{/if}
 	</div>
 </main>
@@ -279,7 +276,7 @@
 		height: var(--touch);
 		border: 0;
 		border-radius: 50%;
-		background: rgb(14 28 34 / 0.72);
+		background: var(--scrim);
 		color: var(--fog);
 		backdrop-filter: blur(6px);
 	}
@@ -333,20 +330,6 @@
 		color: var(--fog);
 	}
 
-	.host-login {
-		display: grid;
-		gap: 1rem;
-		padding: 1rem;
-		border-radius: var(--radius-s);
-		background: var(--water);
-		box-shadow: inset 0 0 0 1px var(--reed);
-	}
-
-	.host-login h2 {
-		font-size: var(--step-0);
-		font-weight: 650;
-	}
-
 	h1.meeting {
 		color: var(--lichen);
 		font-size: var(--step-0);
@@ -391,7 +374,7 @@
 		gap: 0.375rem;
 		padding: 1rem 1.125rem;
 		border-radius: var(--radius-s);
-		background: rgb(229 72 77 / 0.1);
+		background: var(--signal-wash);
 		font-size: var(--step--1);
 		line-height: 1.5;
 	}

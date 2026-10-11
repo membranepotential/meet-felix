@@ -15,15 +15,23 @@
 	--lamp-ink: #2a1c02;
 	--signal: #e5484d;
 	--signal-ink: #fff4f4;
+	--lamp-hover: #f7c76d;
+	/* Black behind an expanded screen share; the dark grey behind a screen tile. */
+	--stage: #000;
+	--screen-bg: #08100f;
+	/* Translucent lake over a picture (tile captions, preview buttons); the soft one is fainter. */
+	--scrim: color-mix(in srgb, var(--lake) 78%, transparent);
+	--scrim-soft: color-mix(in srgb, var(--lake) 62%, transparent);
+	--signal-wash: color-mix(in srgb, var(--signal) 10%, transparent);
+	--backdrop: rgb(6 12 15 / 0.7);
 
 	--font: 'Atkinson Hyperlegible Next Variable', system-ui, sans-serif;
-	/* Type scale: 15 · 17 · 21 · 28 · 40 · 64 (≈ perfect fourth from 17) */
+	/* Type scale: 15 · 17 · 21 · 28 · 40 (≈ perfect fourth from 17) */
 	--step--1: 0.9375rem;
 	--step-0: 1.0625rem;
 	--step-1: 1.3125rem;
 	--step-2: 1.75rem;
 	--step-3: 2.5rem;
-	--step-4: clamp(2.5rem, 9vw, 4rem);
 
 	--radius-s: 10px;
 	--radius-m: 16px;
@@ -102,7 +110,7 @@ button {
 }
 
 .button.primary:hover {
-	background: #f7c76d;
+	background: var(--lamp-hover);
 }
 
 .button.quiet {
@@ -167,7 +175,7 @@ button {
 }
 
 .dialog::backdrop {
-	background: rgb(6 12 15 / 0.7);
+	background: var(--backdrop);
 }
 
 .dialog h2 {

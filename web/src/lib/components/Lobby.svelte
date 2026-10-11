@@ -3,7 +3,7 @@
 	import { hostOffer } from '../owner-state.ts';
 	import type { MeetingId } from '../protocol.ts';
 	import type { Session } from '../session.svelte.ts';
-	import LoginForm from './LoginForm.svelte';
+	import HostLogin from './HostLogin.svelte';
 
 	/** Shown from pressing Join until the room lets us in. */
 	let {
@@ -61,10 +61,7 @@
 				Join as host
 			</button>
 		{:else if offer.kind === 'form'}
-			<section class="host-login" aria-labelledby="host-heading">
-				<h2 id="host-heading">Join as host</h2>
-				<LoginForm {owner} onlogin={() => session.reconnect()} />
-			</section>
+			<HostLogin {owner} onlogin={() => session.reconnect()} />
 		{/if}
 	{/if}
 </main>
@@ -119,20 +116,5 @@
 
 	.host-link:hover {
 		color: var(--fog);
-	}
-
-	.host-login {
-		display: grid;
-		gap: 1rem;
-		max-width: 26rem;
-		padding: 1rem;
-		border-radius: var(--radius-s);
-		background: var(--water);
-		box-shadow: inset 0 0 0 1px var(--reed);
-	}
-
-	.host-login h2 {
-		font-size: var(--step-0);
-		font-weight: 650;
 	}
 </style>

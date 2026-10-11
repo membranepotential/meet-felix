@@ -34,6 +34,24 @@
 		key: string;
 	}
 
+	/** A shared screen: it has no voice, connection state, layer or host actions of its own. */
+	export function screenTile(key: string, name: string, stream: MediaStream): TileModel {
+		return {
+			key,
+			name,
+			self: false,
+			host: false,
+			source: 'screen',
+			stream,
+			micOn: true,
+			unrecorded: false,
+			reconnecting: false,
+			level: () => 0,
+			layerTrack: null,
+			actions: null
+		};
+	}
+
 	/**
 	 * `tile`: a grid or featured tile. `strip`: small, next to a shared screen. `chip`: a round
 	 * face below a shared screen on a phone; the name is for screen readers only. `expanded`: a
@@ -209,13 +227,13 @@
 	/* Shared screens keep every pixel visible. */
 	.screen {
 		object-fit: contain;
-		background: #08100f;
+		background: var(--screen-bg);
 	}
 
 	/* Expanded: the screen on black, every pixel visible, no rounded frame. */
 	.expanded {
 		border-radius: 0;
-		background: #000;
+		background: var(--stage);
 	}
 
 	.expanded::after {
@@ -223,7 +241,7 @@
 	}
 
 	.expanded .screen {
-		background: #000;
+		background: var(--stage);
 	}
 
 	.mirror {
@@ -262,7 +280,7 @@
 		max-width: calc(100% - 1rem);
 		padding: 0.2rem 0.625rem;
 		border-radius: 999px;
-		background: rgb(14 28 34 / 0.78);
+		background: var(--scrim);
 		font-size: var(--step--1);
 		line-height: 1.4;
 	}
@@ -300,7 +318,7 @@
 		height: 44px;
 		border: 0;
 		border-radius: 50%;
-		background: rgb(14 28 34 / 0.78);
+		background: var(--scrim);
 		color: var(--fog);
 	}
 
@@ -314,7 +332,7 @@
 		height: 48px;
 		border: 0;
 		border-radius: 50%;
-		background: rgb(14 28 34 / 0.62);
+		background: var(--scrim-soft);
 		color: var(--fog);
 		transition: background-color 120ms ease;
 	}

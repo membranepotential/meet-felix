@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { listMeetings, type ApiError, type PastMeeting } from '#lib/api.ts';
+	import { describeApiError, type ApiErrorWording } from '#lib/api-messages.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import LoginForm from '#lib/components/LoginForm.svelte';
 	import { OwnerSession } from '#lib/owner-session.svelte.ts';
@@ -47,22 +48,11 @@
 			: { kind: 'failed', error: result.error };
 	}
 
-	function describe(error: ApiError): string {
-		switch (error.kind) {
-			case 'unauthorized':
-				return 'Your login has expired. Log in again.';
-			case 'rate-limited':
-				return 'Too many requests in a short time. Wait a minute, then try again.';
-			case 'network':
-				return 'The server could not be reached. Check your connection, then try again.';
-			case 'server':
-				return error.status === 404
-					? 'This server cannot list meetings yet. Update the Worker, then try again.'
-					: `The server could not list meetings (error ${error.status}). Try again.`;
-			case 'malformed':
-				return 'The server sent a reply this page does not understand. Try again.';
-		}
-	}
+	const WORDING: ApiErrorWording = {
+		action: 'list meetings',
+		rateLimited: 'requests',
+		unauthorized: 'Your login has expired. Log in again.'
+	};
 </script>
 
 <svelte:head>
@@ -81,7 +71,9 @@
 	{:else if listState.kind === 'loading'}
 		<p class="hint" role="status">Loading…</p>
 	{:else if listState.kind === 'failed'}
-		<p class="error" role="alert"><Icon name="alert" size={18} />{describe(listState.error)}</p>
+		<p class="error" role="alert">
+			<Icon name="alert" size={18} />{describeApiError(listState.error, WORDING)}
+		</p>
 		<button class="button quiet" type="button" onclick={load}>Try again</button>
 	{:else}
 		{#if listState.meetings.length === 0}
