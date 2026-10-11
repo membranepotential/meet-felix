@@ -64,10 +64,55 @@ opaque_string!(
     /// An SDP offer or answer.
     Sdp
 );
-opaque_string!(
-    /// The opaque token in a transcript link (`/t/{token}`).
-    TranscriptRef
-);
+/// The token in a transcript link (`/t/{token}`): 128 random bits as 32 lowercase hex digits
+/// (D9 in `docs/links`). It is the link's only secret.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
+#[serde(try_from = "String")]
+pub struct TranscriptRef(String);
+
+/// The string is not 32 lowercase hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidTranscriptRef;
+
+impl fmt::Display for InvalidTranscriptRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a transcript token is 32 lowercase hex digits")
+    }
+}
+
+impl core::error::Error for InvalidTranscriptRef {}
+
+impl TranscriptRef {
+    /// The token of 128 random bits.
+    #[must_use]
+    pub fn from_random(random: [u8; 16]) -> Self {
+        Self(random.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// Validates `s`; accepts exactly what [`TranscriptRef::from_random`] can produce.
+    pub fn parse(s: &str) -> Result<Self, InvalidTranscriptRef> {
+        let valid = s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if valid {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(InvalidTranscriptRef)
+        }
+    }
+
+    /// The token as it appears in the link.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for TranscriptRef {
+    type Error = InvalidTranscriptRef;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
+}
 
 /// Counts the SFU sessions of one kind a participant has had: 0 for the session created when
 /// they joined, one more for each replacement (D33 in `docs/media`). The client names the
@@ -257,6 +302,32 @@ impl TryFrom<String> for DisplayName {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transcript_token_is_32_lowercase_hex_digits() {
+        let made = TranscriptRef::from_random([0xab; 16]);
+        assert_eq!(made.as_str(), "ab".repeat(16));
+        assert_eq!(TranscriptRef::parse(made.as_str()), Ok(made.clone()));
+        assert_eq!(
+            serde_json::from_value::<TranscriptRef>(serde_json::to_value(&made).unwrap()).ok(),
+            Some(made)
+        );
+        for bad in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdeg",
+            "../../index",
+        ] {
+            assert_eq!(
+                TranscriptRef::parse(bad),
+                Err(InvalidTranscriptRef),
+                "{bad:?}"
+            );
+            assert!(serde_json::from_str::<TranscriptRef>(&format!("{bad:?}")).is_err());
+        }
+    }
 
     #[test]
     fn meeting_id_accepts_generated_ids_only() {

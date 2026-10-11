@@ -20,7 +20,10 @@ pub fn no_store(response: Response) -> Result<Response> {
 pub fn private(response: Response) -> Result<Response> {
     with_headers(
         response,
-        &[("Referrer-Policy", "no-referrer"), ("X-Robots-Tag", "noindex")],
+        &[
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Robots-Tag", "noindex"),
+        ],
     )
 }
 

@@ -174,7 +174,12 @@ mod tests {
         assert_eq!(bearer_token(Some("Bearer s3cret")), Some("s3cret"));
         assert_eq!(bearer_token(Some("Bearer s3cret ")), Some("s3cret "));
         assert_eq!(bearer_token(Some("Bearer ")), Some(""));
-        for header in [None, Some("s3cret"), Some("bearer s3cret"), Some("Basic s3cret")] {
+        for header in [
+            None,
+            Some("s3cret"),
+            Some("bearer s3cret"),
+            Some("Basic s3cret"),
+        ] {
             assert_eq!(bearer_token(header), None, "{header:?}");
         }
     }

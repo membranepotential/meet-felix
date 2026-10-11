@@ -105,7 +105,7 @@ fn every_server_msg_round_trips_through_json() {
         ServerMsg::Muted,
         ServerMsg::Kicked,
         ServerMsg::Ended {
-            transcript: Some(TranscriptRef::new("t-1")),
+            transcript: Some(TranscriptRef::from_random([1; 16])),
         },
         ServerMsg::Error {
             code: ErrorCode::NotPublished,

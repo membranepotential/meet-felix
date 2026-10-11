@@ -169,7 +169,11 @@ pub enum Initiator {
 /// development. Browsers send `Origin` on every POST and WebSocket handshake
 /// (<https://fetch.spec.whatwg.org/#origin-header>), so a browser request without either
 /// header does not occur in current browsers.
-pub fn initiator(sec_fetch_site: Option<&str>, origin: Option<&str>, own_origin: &str) -> Initiator {
+pub fn initiator(
+    sec_fetch_site: Option<&str>,
+    origin: Option<&str>,
+    own_origin: &str,
+) -> Initiator {
     match (sec_fetch_site, origin) {
         (Some(site), _) if site.eq_ignore_ascii_case("same-origin") => Initiator::SameOrigin,
         (Some(_), _) => Initiator::Foreign,
@@ -302,7 +306,11 @@ mod tests {
         for (site, origin, expected) in [
             (Some("same-origin"), None, SameOrigin),
             // Behind Vite's proxy the origin differs, but the browser knows better.
-            (Some("same-origin"), Some("http://localhost:5173"), SameOrigin),
+            (
+                Some("same-origin"),
+                Some("http://localhost:5173"),
+                SameOrigin,
+            ),
             (Some("same-site"), Some(OWN), Foreign),
             (Some("cross-site"), None, Foreign),
             (Some("none"), None, Foreign),
@@ -312,7 +320,11 @@ mod tests {
             (None, Some("null"), Foreign),
             (None, None, Unknown),
         ] {
-            assert_eq!(initiator(site, origin, OWN), expected, "{site:?} {origin:?}");
+            assert_eq!(
+                initiator(site, origin, OWN),
+                expected,
+                "{site:?} {origin:?}"
+            );
         }
     }
 

@@ -624,7 +624,7 @@ pub(crate) mod tests {
     fn open_room() -> OpenRoom {
         let (room, effects) = RoomState::new(
             MeetingId::from_random([1, 2, 3]),
-            TranscriptRef::new("transcript"),
+            TranscriptRef::from_random([0; 16]),
             RecordingPolicy::HostDecides,
             T0,
         );
@@ -1104,7 +1104,7 @@ pub(crate) mod tests {
     fn scheduled_fixture_room() -> OpenRoom {
         let (room, effects) = RoomState::new(
             MeetingId::from_random([4, 5, 6]),
-            TranscriptRef::new("0123456789abcdef0123456789abcdef"),
+            TranscriptRef::parse("0123456789abcdef0123456789abcdef").unwrap(),
             RecordingPolicy::FromStart,
             T0,
         );
@@ -1121,7 +1121,7 @@ pub(crate) mod tests {
     fn live_fixture_room() -> OpenRoom {
         let (room, effects) = RoomState::new(
             MeetingId::from_random([7, 8, 9]),
-            TranscriptRef::new("fedcba9876543210fedcba9876543210"),
+            TranscriptRef::parse("fedcba9876543210fedcba9876543210").unwrap(),
             RecordingPolicy::HostDecides,
             T0,
         );

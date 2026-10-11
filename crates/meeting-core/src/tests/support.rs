@@ -10,7 +10,7 @@ use crate::{
 pub(super) const T0: Millis = Millis(1_700_000_000_000);
 
 pub(super) fn transcript() -> TranscriptRef {
-    TranscriptRef::new("t-123")
+    TranscriptRef::from_random([0x12; 16])
 }
 
 pub(super) fn meeting() -> MeetingId {

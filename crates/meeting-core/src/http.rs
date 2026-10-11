@@ -313,7 +313,10 @@ mod tests {
             json!({ "phase": "scheduled", "recordingPolicy": "hostDecides" })
         );
         assert_eq!(
-            wire(&MeetingLookup::new(Phase::Ended, RecordingPolicy::FromStart)),
+            wire(&MeetingLookup::new(
+                Phase::Ended,
+                RecordingPolicy::FromStart
+            )),
             json!({ "phase": "ended" })
         );
         let open: Result<MeetingLookup, _> = serde_json::from_value(json!({ "phase": "live" }));
@@ -333,9 +336,10 @@ mod tests {
             wire(&past(None)),
             json!({ "meeting": meeting, "createdAt": 1, "phase": "ended" })
         );
+        let token = TranscriptRef::from_random([0xab; 16]);
         assert_eq!(
-            wire(&past(Some(TranscriptRef::new("t")))),
-            json!({ "meeting": meeting, "createdAt": 1, "phase": "ended", "transcript": "t" })
+            wire(&past(Some(token.clone()))),
+            json!({ "meeting": meeting, "createdAt": 1, "phase": "ended", "transcript": token })
         );
     }
 
@@ -370,7 +374,8 @@ mod tests {
 
         let recording = json!({ "status": "recording", "meeting": "amber-otter-ocean",
             "startedAt": 1_000, "progress": { "done": 0, "total": 0 } });
-        let status: TranscriptStatus = serde_json::from_value(recording.clone()).expect("recording");
+        let status: TranscriptStatus =
+            serde_json::from_value(recording.clone()).expect("recording");
         assert_eq!(wire(&status), recording);
 
         for broken in [
@@ -440,9 +445,7 @@ mod tests {
             r#"{ status: "recording"; meeting: MeetingId; startedAt: Millis; progress: Progress }"#
         ));
         assert!(TranscriptStatus::DECL.contains("retryAt?: Millis }"));
-        assert!(
-            TranscriptStatus::DECL.contains("audioUntil: Millis; transcript: Transcript }")
-        );
+        assert!(TranscriptStatus::DECL.contains("audioUntil: Millis; transcript: Transcript }"));
         assert!(ApiErrorCode::DECL.contains(r#""notFound""#));
     }
 }

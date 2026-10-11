@@ -35,10 +35,15 @@ async fn pass_on(req: &Request, ctx: &RouteContext<Config>, path: &str) -> Resul
     if !limits::allows(&ctx.env, Limit::Public, req).await? {
         return limits::too_many_requests();
     }
-    let Some(token) = ctx.param("token").and_then(|token| parse_token(token)) else {
+    let Some(Ok(token)) = ctx.param("token").map(|token| TranscriptRef::parse(token)) else {
         return reply::error(ApiErrorCode::NotFound);
     };
-    let Some(recorder) = ctx.kv(MEETINGS)?.get(&transcript_key(&token)).text().await? else {
+    let Some(recorder) = ctx
+        .kv(MEETINGS)?
+        .get(&transcript_key(&token))
+        .text()
+        .await?
+    else {
         return reply::error(ApiErrorCode::NotFound);
     };
     let recorder = RecorderId::new(recorder).stub(&ctx.durable_object(RECORDERS)?)?;
@@ -49,38 +54,6 @@ async fn pass_on(req: &Request, ctx: &RouteContext<Config>, path: &str) -> Resul
         status => {
             console_error!("a recorder answered {path} with {status}");
             reply::error(ApiErrorCode::Internal)
-        }
-    }
-}
-
-/// The token in a transcript link: 32 lowercase hex digits, as `random::transcript_ref` makes
-/// them (D9). Anything else is no token, without a KV lookup.
-fn parse_token(token: &str) -> Option<TranscriptRef> {
-    (token.len() == 32
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-    .then(|| TranscriptRef::new(token))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::random;
-
-    #[test]
-    fn a_token_is_32_lowercase_hex_digits() {
-        let made = random::transcript_ref().unwrap();
-        assert_eq!(parse_token(made.as_str()), Some(made));
-        for bad in [
-            "",
-            "0123456789abcdef0123456789abcde",
-            "0123456789abcdef0123456789abcdef0",
-            "0123456789ABCDEF0123456789ABCDEF",
-            "0123456789abcdef0123456789abcdeg",
-            "../../index",
-        ] {
-            assert_eq!(parse_token(bad), None, "{bad:?}");
         }
     }
 }

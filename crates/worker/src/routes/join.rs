@@ -35,7 +35,9 @@ pub async fn room_info(room: &Stub) -> Result<Option<RoomInfo>> {
     match response.status_code() {
         200 => Ok(Some(response.json().await?)),
         404 => Ok(None),
-        status => Err(worker::Error::RustError(format!("{INFO} answered {status}"))),
+        status => Err(worker::Error::RustError(format!(
+            "{INFO} answered {status}"
+        ))),
     }
 }
 

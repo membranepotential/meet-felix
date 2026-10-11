@@ -82,8 +82,9 @@ pub mod words;
 mod tests;
 
 pub use ids::{
-    DisplayName, InvalidDisplayName, InvalidMeetingId, MeetingId, Mid, Millis, NegotiationId,
-    ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId, TrackName, TranscriptRef,
+    DisplayName, InvalidDisplayName, InvalidMeetingId, InvalidTranscriptRef, MeetingId, Mid,
+    Millis, NegotiationId, ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId, TrackName,
+    TranscriptRef,
 };
 pub use protocol::{
     AfterClose, ClientMsg, CloseCode, ErrorCode, IncomingTrack, LocalTrack, MIN_PROTOCOL_VERSION,

@@ -239,7 +239,7 @@ mod tests {
             meeting: MeetingId::from_random([0, 1, 2]),
             room: RoomId::new(format!("room{n}")),
             created_at: Millis(n),
-            transcript: TranscriptRef::new(format!("t{n}")),
+            transcript: TranscriptRef::from_random([n as u8; 16]),
             ended: None,
         }
     }
@@ -261,7 +261,7 @@ mod tests {
     /// The lists `fixtures/index/current/` freezes.
     fn fixture_lists() -> [(&'static str, Vec<Entry>); 1] {
         let room = |c: char| RoomId::new(c.to_string().repeat(64));
-        let token = |c: char| TranscriptRef::new(c.to_string().repeat(32));
+        let token = |c: char| TranscriptRef::parse(&c.to_string().repeat(32)).unwrap();
         let words = |w| MeetingId::parse(w).expect("listed words");
         [(
             "every-state.json",
@@ -418,7 +418,7 @@ mod tests {
             json!({ "meetings": [
                 { "meeting": meeting, "createdAt": 5, "phase": "live" },
                 { "meeting": meeting, "createdAt": 4, "phase": "scheduled" },
-                { "meeting": meeting, "createdAt": 3, "phase": "ended", "transcript": "t3" },
+                { "meeting": meeting, "createdAt": 3, "phase": "ended", "transcript": "03".repeat(16) },
                 { "meeting": meeting, "createdAt": 2, "phase": "ended" },
                 { "meeting": meeting, "createdAt": 1, "phase": "ended" },
             ]})
