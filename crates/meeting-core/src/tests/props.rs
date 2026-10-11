@@ -120,6 +120,15 @@ enum Msg {
     Leave,
 }
 
+/// Whether bit `i` of `refuse` is set: the `i`-th track of an SFU call is refused. Tracks past
+/// the mask's width are never refused; a subscribe call can carry more tracks than it has bits.
+fn refused(refuse: u8, i: usize) -> bool {
+    u32::try_from(i)
+        .ok()
+        .and_then(|i| 1u8.checked_shl(i))
+        .is_some_and(|bit| refuse & bit != 0)
+}
+
 fn who() -> impl Strategy<Value = u32> {
     1..=POOL
 }
@@ -419,7 +428,7 @@ impl Sim {
                         let (rejected, accepted): (Vec<_>, Vec<_>) = tracks
                             .into_iter()
                             .enumerate()
-                            .partition(|&(i, _)| refuse & (1 << i) != 0);
+                            .partition(|&(i, _)| refused(refuse, i));
                         self.accepted
                             .extend(accepted.into_iter().map(|(_, t)| RemoteTrack {
                                 session: session.clone(),
@@ -461,7 +470,7 @@ impl Sim {
                         let found: Vec<_> = tracks
                             .into_iter()
                             .enumerate()
-                            .filter(|&(i, _)| refuse & (1 << i) == 0)
+                            .filter(|&(i, _)| !refused(refuse, i))
                             .map(|(_, track)| track)
                             .collect();
                         let tracks = found
