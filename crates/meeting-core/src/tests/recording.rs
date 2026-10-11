@@ -255,6 +255,28 @@ fn the_transcript_labels_paragraphs_and_renders_markdown_with_gaps() {
         "{}",
         marked.markdown()
     );
+    // Names and speech never become HTML in viewers that render it; the JSON keeps the text.
+    let mut html = marked.clone();
+    html.speakers[0].label = "<img src=x onerror=alert(1)>".into();
+    html.paragraphs[0].label = html.speakers[0].label.clone();
+    html.paragraphs[0].text = "Tom & Jerry <script>alert(1)</script>".into();
+    let md = html.markdown();
+    assert!(
+        md.contains("Speakers: &lt;img src=x onerror=alert(1)&gt;"),
+        "{md}"
+    );
+    assert!(
+        md.ends_with(
+            "**&lt;img src=x onerror=alert(1)&gt;** 14:00 — \
+             Tom &amp; Jerry &lt;script&gt;alert(1)&lt;/script&gt;\n\n"
+        ),
+        "{md}"
+    );
+    assert!(!md.contains('<') && !md.contains('>'), "{md}");
+    assert_eq!(
+        serde_json::to_value(&html).unwrap()["paragraphs"][0]["text"],
+        "Tom & Jerry <script>alert(1)</script>"
+    );
     assert_eq!(json["paragraphs"][0]["startMs"], NOON_UTC);
     assert_eq!(json["speakers"][0]["label"], "Robin (host)");
     assert_eq!(json["gaps"][0]["reason"], "missing");

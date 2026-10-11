@@ -242,14 +242,22 @@ fn write_gap(md: &mut String, gap: &Gap, label: &str) {
 }
 
 /// Escapes the characters that would turn names or speech into Markdown emphasis, links or
-/// code.
+/// code, or into raw HTML. `<`, `>` and `&` become entities rather than backslash escapes:
+/// original Markdown does not honour a backslash before `<`, so a name like `<img …>` would
+/// still reach a viewer that renders inline HTML.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if matches!(c, '\\' | '*' | '_' | '[' | ']' | '`') {
-            out.push('\\');
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '\\' | '*' | '_' | '[' | ']' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
         }
-        out.push(c);
     }
     out
 }
