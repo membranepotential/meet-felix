@@ -3,6 +3,55 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-11 — Audit fixes, wave 2: protocol, recorder, HTTP contract
+
+Three branches with disjoint files (core protocol and room; recorder; router
+and HTTP contract), each reviewed independently, then one integration pass
+that built them together and applied the follow-ups across areas, reviewed
+again.
+
+- **Protocol and room (D36).** The core defines the close codes and what each
+  means for the client: kicked (4001), ended (4002) and room full (4003) are
+  final, an outdated page (4004) reloads, everything else reconnects. `Join`
+  carries a protocol version; version 1 (cached pages) is still served. A
+  join the SFU refuses closes with 1013 and the client backs off; a
+  participant who leaves before joining is forgotten. The alarm reports
+  participants whose socket a deploy dropped, lets go of one still
+  connecting after 15 s, and is derived from everything it serves, so a new
+  socket no longer postpones it. Recorder effects carry their own data and
+  `Effect::target()` routes every effect; `SfuReply::TrackClosed`, which the
+  SFU never sends, is gone. The web client refreshes ICE servers before the
+  TURN credentials expire (the Worker now sends their `ttl`) and after a 429
+  (`Retry-After`).
+- **Recorder.** Split by concern. A failed adapter call is retried from the
+  alarm with backoff, each call with its own generation, and the audio it
+  missed shows as a "missing" gap. The transcript job waits for Workers AI
+  only while the audio is kept (48 h after the end); chunks R2 lost show as
+  missing. Names and consents have one write path. One socket per stream.
+  Transcript downloads send `nosniff`.
+- **HTTP contract.** Every HTTP body is defined once in
+  `meeting-core/src/http.rs` and parsed in the browser by the same serde
+  types; every error answer is `{"error": code}` without internal detail.
+  The router is split into `routes/`. The `ended` flag and other fallbacks
+  for deployments that never existed are gone (the lookup keeps `ended` for
+  one release, for pages cached before this deploy). The meeting index in KV
+  has a versioned envelope; the owner's list links a transcript only for a
+  recorded meeting. The room and the recorder share one request type,
+  `RecorderRequest`, pinned by a wire test.
+- **Do not roll back across this deploy:** wave-1 code cannot read the new
+  meeting index or ended room records (docs/recording lists what else
+  degrades).
+- Deployed version 4e1f4a76 (no meeting was live). Production check: error
+  bodies and `no-store`, login, the 14-meeting index migrated, four real
+  transcripts served. One RecorderObject cold start used 15 ms CPU, above the
+  Free plan's nominal 10 ms but answered fine; watch for `exceededCpu`.
+- Checks: worker 98, core 92, sfu-api 16, web 158, e2e 94 passed 3 skipped.
+- Next: wave 3 (web session refactor, sweep of the remaining P3s), plus three
+  low findings from the final review: a host joining a recording room
+  without consent resets the client's backoff while the SFU is down; an
+  unbound socket at the meeting's end gets the "refused" screen instead of
+  the ended one; `IceServers.recover()` ignores `Retry-After`.
+
 ## 2026-10-11 — Audit fixes, wave 1: P1s and security
 
 The codebase audit of 2026-10-11 found 4 P1 and 29 P2 findings; the owner

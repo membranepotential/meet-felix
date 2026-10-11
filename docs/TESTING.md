@@ -97,6 +97,22 @@ that both caps are reached). Web unit tests cover late `start()` and
 error text (`api-messages.test.ts`) and `RoomFull` as final
 (`client-state.test.ts`).
 
+Wave 2 added: the core rules for refused and timed-out joins, forgotten
+unjoined leavers, outdated clients, close codes and effect targets; the room
+→ recorder wire contract (`room.rs`: every request serialized by the room
+parses with `RecorderRequest::parse`); the recorder's served status per phase
+parsing as the core's `TranscriptStatus`; `Recorder::settle` (adapter retry
+backoff, give-up, missing gaps), `Recorder::to_create` (no SFU call for an
+adapter a stop closed), `Recorder::learn`, `Job::step` (old waits end at the
+48 h deadline, on the frozen v2 record); the derived alarm time and orphan
+sweep; meeting-index fixtures (`crates/worker/fixtures/index/`) and a test
+that route prefixes agree with `run_worker_first` and the Vite proxy; HTTP
+wire and declaration tests in `meeting-core/src/http.rs`; web
+`SignalingClient` backoff and close handling with a fake WebSocket, and the
+`IceServers` refresh. New e2e specs: `protocol/close-codes.spec.ts`,
+`protocol/http-errors.spec.ts` (error bodies and `no-store` on the 404
+fallback, 405 and 500s, the 500s planted with `wrangler kv key put --local`).
+
 ## End-to-end tests (Playwright)
 
 The end-to-end tests live in [`web/e2e/`](../web/e2e/) and run with
