@@ -18,7 +18,21 @@ use super::state::{
     ChunkSpan, MAX_CHUNK_ATTEMPTS, MAX_UPLOAD_ATTEMPTS, Progress, SegmentCursor, upload_backoff,
 };
 
-const SCHEMA: &str = "
+/// The schema version this code reads and writes. Durable Objects refuse `PRAGMA user_version`
+/// (workerd allows only the pragmas in `ALLOWED_PRAGMAS`, checked 2026-10-11), so the version
+/// lives in the table `schema_version`; a database without it predates the table and has
+/// version 1.
+const SCHEMA_VERSION: u32 = 1;
+
+/// The statements that bring a database of version `n` to `n + 1`, at index `n - 1`. Its
+/// length follows from [`SCHEMA_VERSION`], so raising the version without a migration fails to
+/// compile. A migration must keep every existing row readable: a recorder's tables hold its
+/// transcript job and the paragraphs until the transcript is written.
+const MIGRATIONS: [&str; SCHEMA_VERSION as usize - 1] = [];
+
+/// The tables as version 1 created them. Never change this: a new database is created at
+/// version 1 and brought up to date by [`MIGRATIONS`], like every older one.
+const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS chunks (
     who INTEGER NOT NULL,
     generation INTEGER NOT NULL,
@@ -53,7 +67,19 @@ CREATE TABLE IF NOT EXISTS paragraphs (
     end_ms INTEGER NOT NULL,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
 ";
+
+/// The migrations a database of version `stored` still needs, or the newer version if newer
+/// code wrote it.
+fn pending_migrations(stored: u32) -> std::result::Result<&'static [&'static str], u32> {
+    if stored > SCHEMA_VERSION {
+        return Err(stored);
+    }
+    Ok(&MIGRATIONS[stored.saturating_sub(1) as usize..])
+}
 
 /// A chunk: speaker, adapter generation, and its number within that adapter's stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,13 +176,49 @@ fn key(id: ChunkId) -> Vec<SqlStorageValue> {
 const WHERE_CHUNK: &str = "who = ? AND generation = ? AND idx = ?";
 
 impl Store {
-    /// Opens the database, creating the tables on first use. A failure is logged; every later
-    /// query then fails and is logged too.
+    /// Opens the database: creates the version 1 tables on first use and runs the migrations
+    /// the database still needs. A failure is logged; every later query then fails and is
+    /// logged too.
     pub fn open(sql: SqlStorage) -> Self {
-        if let Err(e) = sql.exec(SCHEMA, None) {
-            console_error!("recorder: creating the tables failed: {e}");
+        let store = Self(sql);
+        if let Err(e) = store.migrate() {
+            console_error!("recorder: preparing the tables failed: {e}");
         }
-        Self(sql)
+        store
+    }
+
+    /// Brings the tables to [`SCHEMA_VERSION`]. The migrations and the new version go in one
+    /// `exec`, which the SQL API docs say is wrapped in an implicit transaction, so they commit
+    /// together.
+    fn migrate(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Row {
+            version: u32,
+        }
+        self.0.exec(SCHEMA_V1, None)?;
+        let rows: Vec<Row> = self
+            .0
+            .exec("SELECT version FROM schema_version", None)?
+            .to_array()?;
+        let stored = rows.first().map(|row| row.version);
+        let pending = pending_migrations(stored.unwrap_or(1)).map_err(|newer| {
+            worker::Error::RustError(format!(
+                "the tables have version {newer}, newer than this code's {SCHEMA_VERSION}"
+            ))
+        })?;
+        if stored == Some(SCHEMA_VERSION) {
+            return Ok(());
+        }
+        let statements = pending.concat();
+        self.0.exec(
+            &format!(
+                "{statements}
+                 DELETE FROM schema_version;
+                 INSERT INTO schema_version (version) VALUES ({SCHEMA_VERSION});"
+            ),
+            None,
+        )?;
+        Ok(())
     }
 
     fn exec(&self, query: &str, bindings: Vec<SqlStorageValue>) -> Result<()> {
@@ -516,5 +578,21 @@ impl Store {
     /// Drops what is left of the spool once the audio is deleted.
     pub fn clear_spool(&self) -> Result<()> {
         self.exec("DELETE FROM spool", Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_gets_the_migrations_after_its_version_and_a_newer_one_none() {
+        // Version 1 is every database created before the version table, and every new one.
+        assert_eq!(pending_migrations(1), Ok(&MIGRATIONS[..]));
+        assert_eq!(pending_migrations(SCHEMA_VERSION), Ok(&[][..]));
+        assert_eq!(
+            pending_migrations(SCHEMA_VERSION + 1),
+            Err(SCHEMA_VERSION + 1)
+        );
     }
 }

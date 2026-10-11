@@ -215,16 +215,16 @@ impl DurableObject for RecorderObject {
 }
 
 impl Inner {
+    /// The stored record, of whichever version stored it ([`state::decode`]).
     async fn load(&self) -> Result<Option<Recorder>> {
         let json: Option<String> = self.state.storage().get(state::KEY).await?;
-        json.map(|json| serde_json::from_str(&json).map_err(worker::Error::from))
-            .transpose()
+        Ok(json.map(|json| state::decode(&json)).transpose()?)
     }
 
     async fn save(&self, recorder: &Recorder) -> Result<()> {
         self.state
             .storage()
-            .put(state::KEY, serde_json::to_string(recorder)?)
+            .put(state::KEY, state::encode(recorder)?)
             .await
     }
 

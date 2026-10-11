@@ -8,8 +8,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sfu_api::wire::AdapterId;
 
+use crate::record::{DecodeError, Stored, stored_record, stored_version};
+
 /// The recorder's storage key.
 pub const KEY: &str = "recorder";
+
+/// The version of the stored recorder's shape. 1 is the bare [`Recorder`] stored before
+/// 2026-10-11; 2 wraps it in the [`Stored`] envelope the room uses.
+pub const RECORDER_VERSION: u32 = 2;
+
+/// The stored JSON of `recorder`.
+pub fn encode(recorder: &Recorder) -> serde_json::Result<String> {
+    serde_json::to_string(&Stored {
+        version: RECORDER_VERSION,
+        record: recorder,
+    })
+}
+
+/// Reads a stored recorder. Unlike a room, a recorder lives as long as its transcript (D18),
+/// and its status page needs the record, so every version ever stored keeps a reader here: a
+/// change of shape adds a version and an arm that migrates the old one. Frozen records in
+/// `crates/worker/fixtures/recorder/` pin every version (see `crate::record` tests).
+pub fn decode(json: &str) -> Result<Recorder, DecodeError> {
+    match stored_version(json, RECORDER_VERSION)? {
+        // Unversioned: the record itself, of today's shape.
+        1 => Ok(serde_json::from_str(json)?),
+        _ => stored_record(json),
+    }
+}
 
 /// How long the audio stays after the meeting ended (D18).
 pub const AUDIO_RETENTION_MS: u64 = 48 * 60 * 60 * 1000;
@@ -336,6 +362,7 @@ mod tests {
     use meeting_core::{DisplayName, Role};
 
     use super::*;
+    use crate::record::tests::fixtures;
 
     #[test]
     fn quota_errors_wait_for_the_daily_reset_and_rate_limits_an_hour() {
@@ -578,17 +605,57 @@ mod tests {
         ]
     }
 
+    /// Writes the `current/` fixtures from [`fixture_recorders`]; see
+    /// `crate::record::tests::fixtures` for when.
     #[test]
-    fn the_frozen_unversioned_recorders_load() {
+    #[ignore = "writes the fixtures of the current shape; run it only after a shape change"]
+    fn capture_recorder_fixtures() {
+        for (name, recorder) in fixture_recorders() {
+            fixtures::capture("recorder", &format!("{name}.json"), &encode(&recorder).unwrap());
+        }
+    }
+
+    #[test]
+    fn the_current_code_stores_the_frozen_recorders_unchanged() {
+        for (name, json) in fixtures::read("recorder", "current") {
+            assert_eq!(
+                stored_version(&json, RECORDER_VERSION).unwrap(),
+                RECORDER_VERSION,
+                "{name}"
+            );
+            let recorder = decode(&json).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                fixtures::same_json(&json, &encode(&recorder).unwrap()),
+                "{name} no longer stores as frozen: the stored shape changed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_recorder_deployed_code_stored_still_loads() {
         let built = fixture_recorders();
-        for (name, json) in crate::record::tests::fixtures::read("recorder", "older") {
-            let recorder: Recorder =
-                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let (_, expected) = built
+        for (name, json) in fixtures::read("recorder", "older") {
+            let version = fixtures::version_in_name(&name);
+            assert_eq!(stored_version(&json, RECORDER_VERSION).unwrap(), version);
+            let recorder = decode(&json).unwrap_or_else(|e| panic!("{name}: {e}"));
+            // The unversioned records were captured from these scenarios.
+            if let Some((_, expected)) = built
                 .iter()
                 .find(|(n, _)| format!("v1-{n}.json") == name)
-                .expect("a fixture recorder");
-            assert_eq!(&recorder, expected, "{name}");
+            {
+                assert_eq!(&recorder, expected, "{name}");
+            }
         }
+    }
+
+    #[test]
+    fn a_recorder_from_newer_code_is_refused() {
+        assert!(matches!(
+            decode(r#"{"version":3,"record":{}}"#),
+            Err(DecodeError::Newer {
+                found: 3,
+                supported: RECORDER_VERSION
+            })
+        ));
     }
 }
