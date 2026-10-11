@@ -94,7 +94,7 @@ pub struct Recorder {
     #[serde(default)]
     pub consents: Vec<ConsentRecord>,
     pub adapters: Vec<Adapter>,
-    pub phase: Phase,
+    pub phase: RecorderPhase,
     /// The newest of the room's requests the recorder applied, so it can drop one that arrives
     /// after a newer one ([`RequestSeq`]). Recorders stored before it existed load as having
     /// applied none.
@@ -242,9 +242,11 @@ pub struct Adapter {
     pub open: bool,
 }
 
+/// Where the recording stands. Not `meeting_core::Phase`, the meeting's phase: a recorder
+/// ends with its meeting, but has no phase before recording starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum Phase {
+pub enum RecorderPhase {
     /// The meeting runs; adapters come and go.
     Recording,
     /// The meeting ended at `at`; the transcript job runs or ran.
@@ -444,7 +446,7 @@ pub struct Progress {
     pub total: u64,
 }
 
-impl Phase {
+impl RecorderPhase {
     pub fn status(&self) -> (StatusKind, Option<Millis>, Option<Millis>) {
         match self {
             Self::Recording => (StatusKind::Recording, None, None),
@@ -721,7 +723,7 @@ mod tests {
             speakers: Vec::new(),
             consents: Vec::new(),
             adapters: Vec::new(),
-            phase: Phase::Recording,
+            phase: RecorderPhase::Recording,
             applied: Applied::default(),
         };
         let who = ParticipantId(4);
@@ -795,7 +797,7 @@ mod tests {
             speakers: Vec::new(),
             consents: Vec::new(),
             adapters: Vec::new(),
-            phase: Phase::Recording,
+            phase: RecorderPhase::Recording,
             applied: Applied::default(),
         }
     }
@@ -1109,7 +1111,7 @@ mod tests {
                     open: true,
                 },
             ],
-            phase: Phase::Recording,
+            phase: RecorderPhase::Recording,
             applied: Applied {
                 stop: RequestSeq(4),
                 speakers: vec![(ada, RequestSeq(3)), (bo, RequestSeq(7))],
@@ -1117,7 +1119,7 @@ mod tests {
         };
         let at = Millis(1_791_586_800_000);
         let ended = |job| Recorder {
-            phase: Phase::Ended { at, job },
+            phase: RecorderPhase::Ended { at, job },
             ..recording.clone()
         };
         vec![

@@ -111,17 +111,20 @@ pub enum ChunkState {
     Failed,
 }
 
-impl ChunkState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::Closed => "closed",
-            Self::Stored => "stored",
-            Self::Done => "done",
-            Self::Skipped => "skipped",
-            Self::Lost => "lost",
-            Self::Failed => "failed",
-        }
+/// A state as the `state` column holds it. Every statement binds states through this, so the
+/// column holds only the names [`ChunkState`] reads back.
+impl From<ChunkState> for SqlStorageValue {
+    fn from(state: ChunkState) -> Self {
+        let name = match state {
+            ChunkState::Open => "open",
+            ChunkState::Closed => "closed",
+            ChunkState::Stored => "stored",
+            ChunkState::Done => "done",
+            ChunkState::Skipped => "skipped",
+            ChunkState::Lost => "lost",
+            ChunkState::Failed => "failed",
+        };
+        name.into()
     }
 }
 
@@ -227,10 +230,10 @@ impl Store {
 
     pub fn chunk_started(&self, id: ChunkId, start: Millis) -> Result<()> {
         let mut values = key(id);
-        values.push(ms(start.0));
+        values.extend([ms(start.0), ChunkState::Open.into()]);
         self.exec(
             "INSERT OR REPLACE INTO chunks (who, generation, idx, start_ms, state)
-             VALUES (?, ?, ?, ?, 'open')",
+             VALUES (?, ?, ?, ?, ?)",
             values,
         )
     }
@@ -245,11 +248,15 @@ impl Store {
     }
 
     pub fn chunk_closed(&self, id: ChunkId, duration_ms: u64, silent: bool) -> Result<()> {
-        let mut values = vec![ms(duration_ms), int(i64::from(silent))];
+        let mut values = vec![
+            ms(duration_ms),
+            int(i64::from(silent)),
+            ChunkState::Closed.into(),
+        ];
         values.extend(key(id));
         self.exec(
             &format!(
-                "UPDATE chunks SET duration_ms = ?, silent = ?, state = 'closed' WHERE {WHERE_CHUNK}"
+                "UPDATE chunks SET duration_ms = ?, silent = ?, state = ? WHERE {WHERE_CHUNK}"
             ),
             values,
         )
@@ -284,7 +291,7 @@ impl Store {
         self.0
             .exec(
                 "SELECT * FROM chunks WHERE state = ? ORDER BY start_ms LIMIT ?",
-                vec![state.as_str().into(), int(limit)],
+                vec![state.into(), int(limit)],
             )?
             .to_array()
     }
@@ -317,9 +324,11 @@ impl Store {
 
     /// Marks a chunk without audio as silent and skipped.
     pub fn skip_empty(&self, id: ChunkId) -> Result<()> {
+        let mut values = vec![ChunkState::Skipped.into()];
+        values.extend(key(id));
         self.exec(
-            &format!("UPDATE chunks SET silent = 1, state = 'skipped' WHERE {WHERE_CHUNK}"),
-            key(id),
+            &format!("UPDATE chunks SET silent = 1, state = ? WHERE {WHERE_CHUNK}"),
+            values,
         )
     }
 
@@ -342,7 +351,7 @@ impl Store {
         let mut values = vec![
             int(failures),
             ms(now.after(upload_backoff(failures)).0),
-            state.as_str().into(),
+            state.into(),
         ];
         values.extend(key(id));
         self.exec(
@@ -376,7 +385,7 @@ impl Store {
     }
 
     fn set_state(&self, id: ChunkId, state: ChunkState) -> Result<()> {
-        let mut values = vec![state.as_str().into()];
+        let mut values = vec![state.into()];
         values.extend(key(id));
         self.exec(
             &format!("UPDATE chunks SET state = ? WHERE {WHERE_CHUNK}"),
@@ -387,8 +396,8 @@ impl Store {
     /// Marks stored silent chunks as skipped.
     pub fn skip_silent(&self) -> Result<()> {
         self.exec(
-            "UPDATE chunks SET state = 'skipped' WHERE state = 'stored' AND silent = 1",
-            Vec::new(),
+            "UPDATE chunks SET state = ? WHERE state = ? AND silent = 1",
+            vec![ChunkState::Skipped.into(), ChunkState::Stored.into()],
         )
     }
 
@@ -410,12 +419,12 @@ impl Store {
 
     /// Counts a failed attempt; after [`MAX_CHUNK_ATTEMPTS`] the chunk is failed for good.
     pub fn attempt_failed(&self, id: ChunkId) -> Result<()> {
-        let mut values = vec![int(MAX_CHUNK_ATTEMPTS)];
+        let mut values = vec![int(MAX_CHUNK_ATTEMPTS), ChunkState::Failed.into()];
         values.extend(key(id));
         self.exec(
             &format!(
                 "UPDATE chunks SET attempts = attempts + 1,
-                 state = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE state END
+                 state = CASE WHEN attempts + 1 >= ? THEN ? ELSE state END
                  WHERE {WHERE_CHUNK}"
             ),
             values,
@@ -433,10 +442,17 @@ impl Store {
             .0
             .exec(
                 "SELECT COALESCE(SUM(duration_ms), 0) AS total,
-                 COALESCE(SUM(CASE WHEN state IN ('done', 'skipped', 'failed', 'lost')
+                 COALESCE(SUM(CASE WHEN state IN (?, ?, ?, ?)
                      THEN duration_ms ELSE 0 END), 0) AS done
                  FROM chunks",
-                None,
+                [
+                    ChunkState::Done,
+                    ChunkState::Skipped,
+                    ChunkState::Failed,
+                    ChunkState::Lost,
+                ]
+                .map(SqlStorageValue::from)
+                .to_vec(),
             )?
             .to_array()?;
         Ok(rows
