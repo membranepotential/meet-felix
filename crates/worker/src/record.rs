@@ -213,6 +213,7 @@ impl Record {
             next_participant: 0,
             recorder: None,
             next_recorder_request: RequestSeq::FIRST,
+            write_budgets: Vec::new(),
         }
         .settle(effects)
     }
@@ -264,6 +265,11 @@ pub struct OpenRoom {
     /// at [`RequestSeq::FIRST`].
     #[serde(default = "first_request")]
     pub next_recorder_request: RequestSeq,
+    /// Each participant's budget of writes their messages cause ([`OpenRoom::charge_write`]).
+    /// Unlike a socket's message budget it survives a resume on a new socket and hibernation.
+    /// Records stored before it existed load with every budget full.
+    #[serde(default)]
+    pub write_budgets: Vec<(ParticipantId, MessageBudget)>,
 }
 
 fn first_request() -> RequestSeq {
@@ -306,6 +312,34 @@ impl OpenRoom {
             .settle(&effects),
             effects,
         )
+    }
+
+    /// Charges participant `who` at `now` for one write of the record that their message
+    /// caused; `false` if they used up their budget, and the room must drop the step. Only
+    /// participants on the roster are charged, so the budgets stay as bounded as the roster
+    /// (a resume's `Join` comes from a socket id that is no participant).
+    ///
+    /// A socket's [`MessageBudget`] alone does not protect the daily write allowance: a client
+    /// that overspends resumes on a new socket with a full one. This budget belongs to the
+    /// participant and is stored with the record, in the write it charges for.
+    pub fn charge_write(&mut self, who: ParticipantId, now: Millis) -> bool {
+        if !self.room.roster().iter().any(|entry| entry.id == who) {
+            return true;
+        }
+        let entry = match self.write_budgets.iter().position(|(id, _)| *id == who) {
+            Some(i) => &mut self.write_budgets[i].1,
+            None => {
+                self.write_budgets.push((who, MessageBudget::default()));
+                &mut self.write_budgets.last_mut().expect("just pushed").1
+            }
+        };
+        match entry.spend(now) {
+            Some(spent) => {
+                *entry = spent;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Hands out the next participant id.
@@ -376,11 +410,12 @@ pub const MESSAGE_INTERVAL_MS: u64 = 1_000;
 /// once per track per 400 ms), and about one a minute otherwise.
 pub const MESSAGE_BURST: u64 = 120;
 
-/// A socket's budget of messages, so that no client can make the room step, and store its
-/// record, as often as it likes: the daily allowance of rows written is shared by every room and
-/// recorder of the account. A token bucket kept as one time (the generic cell rate algorithm):
-/// the time until which the messages sent so far used up the sustained rate. A socket that
-/// overspends is closed ([`MessageBudget::spend`]).
+/// A budget of messages, so that no client can make the room step, and store its record, as
+/// often as it likes: the daily allowance of rows written is shared by every room and recorder
+/// of the account. A token bucket kept as one time (the generic cell rate algorithm): the time
+/// until which the messages sent so far used up the sustained rate. Each socket has one for
+/// every message ([`OpenSocket::budget`]); each participant has one for the messages that
+/// change the record ([`OpenRoom::charge_write`]). A socket that overspends either is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MessageBudget {
@@ -921,11 +956,13 @@ pub(crate) mod tests {
         ] {
             open = step(open, event).0;
         }
-        OpenRoom {
+        let mut open = OpenRoom {
             next_participant: 6,
             recorder: Some(RECORDER_ID.into()),
             ..open
-        }
+        };
+        assert!(open.charge_write(ParticipantId(host), now));
+        open
     }
 
     /// Writes the `current/` fixtures from [`fixture_rooms`]; see [`fixtures`] for when.
@@ -1016,6 +1053,26 @@ pub(crate) mod tests {
             panic!("an open socket")
         };
         assert_eq!(loaded.budget, MessageBudget::default());
+    }
+
+    #[test]
+    fn a_participants_write_budget_holds_across_their_sockets() {
+        let mut open = room_with_host();
+        for _ in 0..MESSAGE_BURST {
+            assert!(open.charge_write(HOST, T0));
+        }
+        assert!(!open.charge_write(HOST, T0), "the burst is used up");
+        // A resume reaches the room as a `Join` from the new socket's id, which is no
+        // participant: it is not charged and adds no budget.
+        assert!(open.charge_write(ParticipantId(42), T0));
+        assert_eq!(open.write_budgets.len(), 1);
+        // The budget is stored with the record, so it holds after the resume.
+        let json = encode(&Record::Open(open)).unwrap();
+        let Decoded::Current(Record::Open(mut loaded)) = decode(&json).unwrap() else {
+            panic!("an open room")
+        };
+        assert!(!loaded.charge_write(HOST, T0));
+        assert!(loaded.charge_write(HOST, T0.after(MESSAGE_INTERVAL_MS)));
     }
 
     #[test]

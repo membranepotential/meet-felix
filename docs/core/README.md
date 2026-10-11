@@ -119,12 +119,17 @@ writes no row. Each socket also has a message budget, kept in its attachment
 so it survives hibernation: a burst of 120 messages, then one per second
 (`MESSAGE_BURST`, `MESSAGE_INTERVAL_MS` in `record.rs`). A socket that sends
 more is closed with code 1008 and reported to the core as `SocketClosed`, like
-a socket that stopped pinging; the client resumes on a new socket. Why: the
-Free plan allows 100,000 rows written per day for all rooms and recorders of
-the account together ([cost/](../cost/README.md)), and before, any link
-holder could use it up with a loop of messages. A client that reconnects in
-a loop still gets a fresh budget per socket; limiting that is the router's
-job.
+a socket that stopped pinging; the client resumes on a new socket. Because a
+resumed socket starts with a full budget, each participant also has a budget
+of the same size for the messages that change the record, stored in the room
+record itself (`write_budgets`, charged in the write it pays for, so it costs
+no extra row). A message beyond it is dropped unstored and the participant's
+sockets are closed the same way. Why: the Free plan allows 100,000 rows
+written per day for all rooms and recorders of the account together
+([cost/](../cost/README.md)), and before, any link holder could use it up
+with a loop of messages. What remains: every WebSocket upgrade writes the
+record once (the next participant id), so a client that reconnects in a loop
+still costs a row per connection; limiting upgrades is the router's job.
 
 **Browser**: the Svelte app loads the core as WASM. It uses the generated
 types for every message on the signaling socket, and core functions such as

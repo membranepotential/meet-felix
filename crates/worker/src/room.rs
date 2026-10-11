@@ -331,10 +331,31 @@ impl RoomObject {
                 transcript: open.room.transcript().clone(),
                 next_request: open.next_recorder_request,
             };
+            let writer = match &event {
+                Event::Client { from, .. } => Some(*from),
+                _ => None,
+            };
             let (mut record, effects) = open.step(now, event);
             let recorder = self.recorder_link(before, &mut record, &effects);
-            let json = crate::record::encode(&record)?;
+            let mut json = crate::record::encode(&record)?;
             if json != stored {
+                if let (Some(who), Record::Open(open)) = (writer, &mut record) {
+                    if !open.charge_write(who, now) {
+                        // Dropped as if never received; the client resumes and catches up
+                        // from its welcome, its budget still spent.
+                        console_warn!("{who:?} used up its write budget; closing its sockets");
+                        queue.extend(
+                            self.open_sockets()
+                                .filter(|(_, s)| s.participant == who)
+                                .map(|(ws, _)| Input {
+                                    event: Event::SocketClosed { who },
+                                    close: Some((ws, Closing::OverBudget)),
+                                }),
+                        );
+                        continue;
+                    }
+                    json = crate::record::encode(&record)?;
+                }
                 self.state.storage().put(Record::KEY, json).await?;
             }
             if let Some((ws, why)) = close {

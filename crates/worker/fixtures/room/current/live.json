@@ -189,7 +189,13 @@
         },
         "recording_policy": "hostDecides",
         "transcript": "fedcba9876543210fedcba9876543210"
-      }
+      },
+      "writeBudgets": [
+        [
+          0,
+          1024000
+        ]
+      ]
     }
   },
   "version": 2

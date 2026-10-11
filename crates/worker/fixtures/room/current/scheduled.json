@@ -29,7 +29,8 @@
         "recording": "NeverStarted",
         "recording_policy": "fromStart",
         "transcript": "0123456789abcdef0123456789abcdef"
-      }
+      },
+      "writeBudgets": []
     }
   },
   "version": 2
