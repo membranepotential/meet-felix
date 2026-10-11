@@ -73,7 +73,9 @@ Research: [09 — post-meeting transcription and recording](../research/09-post-
   records is no longer recorded (`Effect::StopRecordingTrack`), and gets
   `ConsentRequired` and `Muted`. A host may enter a recording room without
   consent, so they can stop the recording; they are muted and not recorded
-  like everyone else without consent.
+  like everyone else without consent. Nobody without consent unmutes while
+  the room records: their `SetMuted { muted: false }` is refused with
+  `ConsentRequired` and `Muted` again (2026-10-11).
 - Hosts see who has not accepted the running recording (as built
   2026-10-10). The list comes from the room view: every other participant
   with `consentRecording` false who is joined, connecting, or waiting in

@@ -214,7 +214,18 @@ impl RoomState {
         );
         match msg {
             ClientMsg::SetMuted { muted } => {
-                participant.muted = muted;
+                // Whoever is in a recording room without consent stays muted until they consent
+                // (D15): an unmute is answered like the mute that asked for consent. Muting is
+                // always allowed.
+                if !muted
+                    && self.recording.current().is_some()
+                    && participant.connection.is_admitted()
+                    && !participant.consents()
+                {
+                    self.ask_consent(from, fx);
+                } else {
+                    participant.muted = muted;
+                }
                 Ok(())
             }
             ClientMsg::Join { .. } => {

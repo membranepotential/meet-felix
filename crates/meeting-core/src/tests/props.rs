@@ -1205,6 +1205,11 @@ impl Sim {
             if newly_admitted && p.role == Role::Guest {
                 prop_assert!(!recording || p.consents(), "{who:?} admitted");
             }
+            // Nobody admitted without consent is unmuted while the room records, whatever they
+            // switch.
+            if recording && p.connection.is_admitted() && !p.consents() {
+                prop_assert!(p.muted, "{who:?} unmuted without consent");
+            }
             // Whoever is in a recording room without consent was asked for it and muted.
             let unconsented = |r: &RoomState, p: &crate::state::Participant| {
                 r.recording.current().is_some() && p.connection.is_admitted() && !p.consents()

@@ -247,7 +247,11 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   (2026-10-10). A client reports its own switch with `SetMuted`. A host's
   `Mute` and the consent rule above set the flag at once and send `Muted`, so
   the host sees the result without waiting for the muted client; only the
-  participant unmutes themselves. A participant joins unmuted, unless the
+  participant unmutes themselves, and not while the room records without
+  their consent: that `SetMuted { muted: false }` changes nothing and is
+  answered like the mute that asked for consent, with `ConsentRequired` and
+  `Muted` (a client that unmuted while offline, or before the recording
+  started, reports its stale switch after reconnecting). A participant joins unmuted, unless the
   room records without their consent. A muted microphone may still publish
   its silent audio track, so a client shows a microphone as on only if the
   participant publishes audio and is not muted.
@@ -514,7 +518,9 @@ after every step that:
   is gone;
 - a participant's mute flag follows their own `SetMuted` and otherwise only
   turns on, together with a `Muted` to them; whoever gets `Muted` is shown
-  muted;
+  muted; nobody admitted without consent is unmuted while the room records
+  (their `SetMuted { muted: false }` is answered with `ConsentRequired` and
+  `Muted`, 2026-10-11);
 - guests never succeed with `Lock`, `Admit`, `Kick`, `Mute`, `SetRecording`
   or `End`: the state stays the same and they get an `Error`;
 - a host is never locked out of their own room (only guests wait for the

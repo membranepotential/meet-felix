@@ -738,6 +738,45 @@ fn ending_closes_every_participants_socket_before_the_meeting_ends_so_the_shell_
 }
 
 #[test]
+fn nobody_without_consent_unmutes_while_the_room_records() {
+    let mut room = meeting_room();
+    // The guest switched the microphone on before the recording; consent was never given.
+    room.join(OTHER, false, false);
+    room.connect(OTHER);
+    assert_eq!(muted(&room, OTHER), Some(false));
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    assert_eq!(muted(&room, OTHER), Some(true));
+
+    // A client that reports its stale switch after reconnecting is told to keep it off.
+    let refused = room.client(OTHER, ClientMsg::SetMuted { muted: false });
+    assert_eq!(
+        refused,
+        [
+            Effect::Send {
+                to: OTHER,
+                msg: ServerMsg::ConsentRequired
+            },
+            Effect::Send {
+                to: OTHER,
+                msg: ServerMsg::Muted
+            },
+        ]
+    );
+    assert_eq!(muted(&room, OTHER), Some(true));
+    // Muting is always allowed, and consenting lets them unmute themselves.
+    room.client(OTHER, ClientMsg::SetMuted { muted: true });
+    room.client(OTHER, ClientMsg::SetConsent { consent: true });
+    assert_eq!(muted(&room, OTHER), Some(true), "consent does not unmute");
+    room.client(OTHER, ClientMsg::SetMuted { muted: false });
+    assert_eq!(muted(&room, OTHER), Some(false));
+    // Without a recording, anyone unmutes.
+    room.client(OTHER, ClientMsg::SetConsent { consent: false });
+    room.client(HOST, ClientMsg::SetRecording { on: false });
+    room.client(OTHER, ClientMsg::SetMuted { muted: false });
+    assert_eq!(muted(&room, OTHER), Some(false));
+}
+
+#[test]
 fn the_view_flags_whoever_a_running_recording_leaves_out_for_lack_of_consent() {
     let flagged = |room: &Room| -> Vec<ParticipantId> {
         room.state
