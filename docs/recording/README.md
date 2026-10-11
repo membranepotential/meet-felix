@@ -371,13 +371,24 @@ thresholds. An
 error whose text names a quota, the daily allowance or neurons waits until
 00:05 UTC, and one that says 429, "rate limit" or "too many requests" waits an
 hour; the status shows `retryAt`, and the transcript never fails for that.
-After seven days of such waiting without any chunk going through, the waiting
-chunks are given up like other failures. Bare words such as "limit" do not
-count, since an input size limit would otherwise retry forever. Before the
-first transcription step the job closes every stream still in memory. Any other error
-counts against the chunk, which after three attempts appears as a gap ("not
-transcribed"); a failing merge or write fails the transcript after six tries
-in a row. `WhisperTurbo` is the only `Transcriber`; `Nova3Http` is not built.
+The job waits only while the audio is kept, until the meeting's end plus
+48 hours (D18; changed 2026-10-11, audit finding P2-028): a wait that would
+end later, or a step that runs later, gives up every chunk still waiting as
+"not transcribed", so the transcript is written and the audio deleted on
+time. Until then the job waited up to seven days without progress, while the
+R2 lifecycle rule deleted the chunks under it after three, and the deleted
+chunks ended up "not transcribed" after three wasted attempts. A chunk that
+R2 no longer holds is now lost at once and appears as "missing". On Workers
+Free, which allows about 214 Whisper minutes a day ([cost/](../cost/README.md)),
+a meeting whose speech exceeds about two days' allowance, roughly 430
+speaker-minutes beyond what other meetings use, is therefore partly not
+transcribed. Bare words such as "limit" do
+not count, since an input size limit would otherwise retry forever. Every
+transcription step first lets go of any adapter stream still open. Any other
+error counts against the chunk, which after three attempts appears as a gap
+("not transcribed"); a failing merge or write fails the transcript after six
+tries in a row. `WhisperTurbo` is the only `Transcriber`; `Nova3Http` is not
+built.
 
 Open: the maximum audio size per Workers AI speech request is undocumented;
 a 30 s Opus chunk is under 100 KB, far from any plausible limit. Spike 3
@@ -408,8 +419,13 @@ file for the transcript page (D17, later) is available only within those
 
 As built (2026-10-09): once the transcript is written, the recorder's alarm
 fires at the meeting's end plus 48 hours (at once if the transcript took
-longer) and deletes everything under `audio/{recorder}/`. The backstop rule
-expires `audio/` after 3 days; it is set once with
+longer) and deletes everything under `audio/{recorder}/`. The transcript job
+never waits past those 48 hours for Workers AI (D17, changed 2026-10-11), so
+"at once if the transcript took longer" means minutes, not days, and the
+audio goes on time. The backstop rule
+expires `audio/` after 3 days, counted from each chunk's upload; only a
+meeting that ran for more than a day could lose early chunks to it before
+its job reaches them, and those show as "missing". It is set once with
 `pnpm exec wrangler r2 bucket lifecycle add meet-felix-recordings audio-3-days audio/ --expire-days 3 --jurisdiction eu`
 (wrangler 4.147, flags checked with `--help`). Transcripts live under
 `transcripts/`, untouched by it. The link itself is a KV entry

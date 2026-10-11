@@ -105,9 +105,11 @@ pub enum ChunkState {
     Done,
     /// Silent, or without any audio; not sent to the speech model.
     Skipped,
-    /// Its upload failed [`MAX_UPLOAD_ATTEMPTS`] times; the transcript shows it as missing.
+    /// Its upload failed [`MAX_UPLOAD_ATTEMPTS`] times, or R2 no longer held it when the job
+    /// came to it; the transcript shows it as missing.
     Lost,
-    /// The speech model failed on it [`MAX_CHUNK_ATTEMPTS`] times.
+    /// The speech model failed on it [`MAX_CHUNK_ATTEMPTS`] times, or the job gave it up
+    /// rather than wait past the audio's deletion ([`super::state::on_refusal`]).
     Failed,
 }
 
@@ -431,9 +433,18 @@ impl Store {
         )
     }
 
-    /// Gives a chunk up: the transcript shows it as not transcribed.
-    pub fn give_up(&self, id: ChunkId) -> Result<()> {
-        self.set_state(id, ChunkState::Failed)
+    /// Gives up every chunk still waiting for the speech model: the transcript shows them as
+    /// not transcribed.
+    pub fn give_up_stored(&self) -> Result<()> {
+        self.exec(
+            "UPDATE chunks SET state = ? WHERE state = ?",
+            vec![ChunkState::Failed.into(), ChunkState::Stored.into()],
+        )
+    }
+
+    /// Marks a chunk that R2 no longer holds as lost: the transcript shows it as missing.
+    pub fn chunk_gone(&self, id: ChunkId) -> Result<()> {
+        self.set_state(id, ChunkState::Lost)
     }
 
     /// Milliseconds of recorded audio the job has finished, of all recorded so far.

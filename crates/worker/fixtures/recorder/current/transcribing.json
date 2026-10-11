@@ -59,8 +59,7 @@
         "at": 1791586800000,
         "job": {
           "transcribing": {
-            "retryAt": 1791590400000,
-            "waitingSince": 1791586800000
+            "retryAt": 1791590400000
           }
         }
       }

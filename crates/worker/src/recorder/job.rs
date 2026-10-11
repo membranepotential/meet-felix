@@ -9,12 +9,12 @@ use futures_util::future::join_all;
 use meeting_core::recording::{RosterEntry, label_speakers};
 use meeting_core::transcript::{Segment, Transcript, merge_segments};
 use meeting_core::{Millis, ParticipantId};
-use worker::{Bucket, Data, HttpMetadata, Result, console_error, console_log};
+use worker::{Bucket, Data, HttpMetadata, Result, console_error, console_log, console_warn};
 
 use super::Inner;
 use super::state::{
-    self, AUDIO_RETENTION_MS, Job, MAX_QUOTA_WAIT_MS, MAX_STEP_FAILURES, Recorder, RecorderPhase,
-    SegmentCursor, audio_prefix, backoff, chunk_key, gaps, quota_retry, transcript_key,
+    self, AUDIO_RETENTION_MS, Job, MAX_STEP_FAILURES, Recorder, RecorderPhase, Refusal,
+    SegmentCursor, audio_prefix, backoff, chunk_key, gaps, on_refusal, transcript_key,
 };
 use super::store::{ChunkRow, ChunkState};
 use super::whisper::{TranscribeError, Transcriber, WhisperTurbo};
@@ -26,6 +26,14 @@ const AI: &str = "AI";
 const TRANSCRIBE_BATCH: u32 = 4;
 /// Segments merged per alarm invocation.
 const MERGE_BATCH: u32 = 300;
+
+/// Why a chunk did not come back transcribed.
+enum ChunkError {
+    /// R2 no longer holds it; the lifecycle rule of D18 deleted it.
+    Gone,
+    /// Reading it or the speech model failed.
+    Failed(TranscribeError),
+}
 
 impl Inner {
     /// The transcript job's next step.
@@ -41,8 +49,9 @@ impl Inner {
                 retry_at: Some(retry_at),
                 ..
             } if retry_at > now => Ok(Some(retry_at)),
-            Job::Transcribing { waiting_since, .. } => {
-                self.transcribe(recorder, waiting_since, now).await
+            Job::Transcribing { .. } => {
+                self.transcribe(recorder, at.after(AUDIO_RETENTION_MS), now)
+                    .await
             }
             Job::Merging { after, failures } => {
                 self.merge(recorder, at, after, failures, now).await
@@ -59,12 +68,12 @@ impl Inner {
         }
     }
 
-    /// Transcribes the next few stored chunks, once every chunk is in R2. `waiting_since` is
-    /// when Workers AI first refused for its quota since a chunk last went through.
+    /// Transcribes the next few stored chunks, once every chunk is in R2. The audio is kept
+    /// until `audio_until` (D18), so a chunk not transcribed by then is given up.
     async fn transcribe(
         self: &Rc<Self>,
         recorder: &mut Recorder,
-        waiting_since: Option<Millis>,
+        audio_until: Millis,
         now: Millis,
     ) -> Result<Option<Millis>> {
         // `finish` let go of every stream already; this repeats it in case the object went
@@ -78,6 +87,9 @@ impl Inner {
             return Ok(Some(Millis(due).max(now.after(2_000))));
         }
         self.store.skip_silent()?;
+        if now >= audio_until {
+            self.store.give_up_stored()?;
+        }
         let batch = self.store.chunks_in(ChunkState::Stored, TRANSCRIBE_BATCH)?;
         if batch.is_empty() {
             set_job(
@@ -100,46 +112,38 @@ impl Inner {
         .await;
         let mut retry_at: Option<Millis> = None;
         let mut failed = false;
-        let mut went_through = false;
-        let waited_too_long =
-            waiting_since.is_some_and(|since| now.0.saturating_sub(since.0) > MAX_QUOTA_WAIT_MS);
+        let mut give_up = false;
         for (row, result) in batch.iter().zip(results) {
             let id = row.id();
             match result {
-                Ok(segments) => {
-                    self.store.transcribed(id, &segments)?;
-                    went_through = true;
+                Ok(segments) => self.store.transcribed(id, &segments)?,
+                Err(ChunkError::Gone) => {
+                    console_warn!("recorder: chunk {id:?} is no longer in R2");
+                    self.store.chunk_gone(id)?;
                 }
-                Err(e) => {
+                Err(ChunkError::Failed(e)) => {
                     console_error!(
                         "recorder: transcribing chunk {id:?} failed ({:?}): {}",
                         e.class,
                         e.message
                     );
-                    match quota_retry(e.class, now) {
-                        // A week of waiting without progress: give the chunk up.
-                        Some(_) if waited_too_long => self.store.give_up(id)?,
-                        Some(at) => retry_at = Some(retry_at.map_or(at, |r| r.max(at))),
-                        None => {
+                    match on_refusal(e.class, now, audio_until) {
+                        Refusal::Attempt => {
                             self.store.attempt_failed(id)?;
                             failed = true;
                         }
+                        Refusal::WaitUntil(at) => retry_at = retry_at.max(Some(at)),
+                        Refusal::GiveUp => give_up = true,
                     }
                 }
             }
         }
-        // Quota and rate limits wait without counting as failures, for up to a week.
-        let waiting_since = match (retry_at, went_through) {
-            (Some(_), false) => Some(waiting_since.unwrap_or(now)),
-            _ => None,
-        };
-        set_job(
-            recorder,
-            Job::Transcribing {
-                retry_at,
-                waiting_since,
-            },
-        );
+        if give_up {
+            console_warn!("recorder: Workers AI refuses until after the audio goes; giving up");
+            self.store.give_up_stored()?;
+            retry_at = None;
+        }
+        set_job(recorder, Job::Transcribing { retry_at });
         self.save(recorder).await?;
         Ok(Some(match retry_at {
             Some(at) => at,
@@ -153,26 +157,31 @@ impl Inner {
         transcriber: &impl Transcriber,
         bucket: &Bucket,
         row: &ChunkRow,
-    ) -> std::result::Result<Vec<Segment>, TranscribeError> {
+    ) -> std::result::Result<Vec<Segment>, ChunkError> {
         let id = row.id();
         let key = chunk_key(&self.id(), id.who, id.generation, id.index);
-        let other = |message: String| TranscribeError {
-            class: state::AiFailure::Other,
-            message,
+        let other = |message: String| {
+            ChunkError::Failed(TranscribeError {
+                class: state::AiFailure::Other,
+                message,
+            })
         };
         let object = bucket
             .get(key)
             .execute()
             .await
             .map_err(|e| other(e.to_string()))?
-            .ok_or_else(|| other("the chunk is missing from R2".into()))?;
+            .ok_or(ChunkError::Gone)?;
         let audio = object
             .body()
             .ok_or_else(|| other("the chunk has no body".into()))?
             .bytes()
             .await
             .map_err(|e| other(e.to_string()))?;
-        let texts = transcriber.transcribe(&audio).await?;
+        let texts = transcriber
+            .transcribe(&audio)
+            .await
+            .map_err(ChunkError::Failed)?;
         let at = |seconds: f64| {
             let offset = (seconds.max(0.0) * 1000.0).round() as u64;
             Millis(row.start_ms + offset.min(row.duration_ms))

@@ -409,14 +409,10 @@ pub enum RecorderPhase {
 #[serde(rename_all = "camelCase")]
 pub enum Job {
     /// Uploading and transcribing chunks. With `retry_at`, Workers AI refused for its quota or
-    /// rate limit and the job waits until then; `waiting_since` is when it first refused since
-    /// the last chunk went through.
+    /// rate limit and the job waits until then ([`on_refusal`]). Records stored before
+    /// 2026-10-11 also hold `waitingSince`, which is no longer read.
     #[serde(rename_all = "camelCase")]
-    Transcribing {
-        retry_at: Option<Millis>,
-        #[serde(default)]
-        waiting_since: Option<Millis>,
-    },
+    Transcribing { retry_at: Option<Millis> },
     /// Merging segments into paragraphs, a batch per run, after `after`.
     #[serde(rename_all = "camelCase")]
     Merging {
@@ -782,9 +778,29 @@ pub fn quota_retry(failure: AiFailure, now: Millis) -> Option<Millis> {
     }
 }
 
-/// How long the job waits on Workers AI's quota without any chunk going through before it gives
-/// up the waiting chunks like other failures.
-pub const MAX_QUOTA_WAIT_MS: u64 = 7 * DAY_MS;
+/// What the job does with a chunk Workers AI refused for `failure` at `now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// Count the attempt; after [`MAX_CHUNK_ATTEMPTS`] the chunk is not transcribed.
+    Attempt,
+    /// Wait for the quota or the rate limit, without counting an attempt.
+    WaitUntil(Millis),
+    /// Stop waiting: the wait would end after the audio is to be deleted. Every chunk still
+    /// waiting is given up as not transcribed, since the same quota holds them back.
+    GiveUp,
+}
+
+/// What to do after Workers AI refused a chunk for `failure` at `now`, with the audio kept until
+/// `audio_until` (the meeting's end plus [`AUDIO_RETENTION_MS`], D18). The job never waits past
+/// it: the audio is deleted then, and before 2026-10-11 the job waited up to seven days while
+/// the R2 lifecycle rule deleted the chunks under it after three.
+pub fn on_refusal(failure: AiFailure, now: Millis, audio_until: Millis) -> Refusal {
+    match quota_retry(failure, now) {
+        None => Refusal::Attempt,
+        Some(at) if at < audio_until => Refusal::WaitUntil(at),
+        Some(_) => Refusal::GiveUp,
+    }
+}
 
 /// Uploads of a chunk fail this often before it is given up as missing audio.
 pub const MAX_UPLOAD_ATTEMPTS: u32 = 5;
@@ -929,6 +945,37 @@ mod tests {
     }
 
     #[test]
+    fn the_job_waits_for_workers_ai_only_while_the_audio_is_kept() {
+        // 2026-10-09 22:00 UTC; the quota resets at 00:05 UTC.
+        let now = Millis(1_791_583_200_000);
+        let reset = quota_retry(AiFailure::Quota, now).unwrap();
+        let ended = now.after(HOUR_MS);
+        let audio_until = ended.after(AUDIO_RETENTION_MS);
+        assert_eq!(
+            on_refusal(AiFailure::Quota, now, audio_until),
+            Refusal::WaitUntil(reset)
+        );
+        assert_eq!(
+            on_refusal(AiFailure::RateLimited, now, audio_until),
+            Refusal::WaitUntil(now.after(HOUR_MS))
+        );
+        assert_eq!(
+            on_refusal(AiFailure::Other, now, audio_until),
+            Refusal::Attempt
+        );
+        // Shortly before the audio goes, waiting for the next reset would outlast it.
+        let late = audio_until.0 - HOUR_MS;
+        assert_eq!(
+            on_refusal(AiFailure::Quota, Millis(late), audio_until),
+            Refusal::GiveUp
+        );
+        assert_eq!(
+            on_refusal(AiFailure::RateLimited, Millis(late + 1), audio_until),
+            Refusal::GiveUp
+        );
+    }
+
+    #[test]
     fn uploads_back_off_from_2_s_to_a_minute() {
         let waits: Vec<u64> = (1..=MAX_UPLOAD_ATTEMPTS).map(upload_backoff).collect();
         assert_eq!(waits, [2_000, 10_000, 60_000, 60_000, 60_000]);
@@ -1068,10 +1115,7 @@ mod tests {
         // The recorder ended a meeting nobody ended; the room's `/end` still arrives.
         recorder.phase = RecorderPhase::Ended {
             at: Millis(5),
-            job: Job::Transcribing {
-                retry_at: None,
-                waiting_since: None,
-            },
+            job: Job::Transcribing { retry_at: None },
         };
         let end = FinishRecording {
             roster: vec![entry(0, "Anna"), entry(1, "Bo")],
@@ -1617,7 +1661,6 @@ mod tests {
                 "transcribing",
                 ended(Job::Transcribing {
                     retry_at: Some(at.after(HOUR_MS)),
-                    waiting_since: Some(at),
                 }),
             ),
             (

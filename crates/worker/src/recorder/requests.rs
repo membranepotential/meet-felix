@@ -185,10 +185,7 @@ impl Inner {
         }
         recorder.phase = RecorderPhase::Ended {
             at: now,
-            job: Job::Transcribing {
-                retry_at: None,
-                waiting_since: None,
-            },
+            job: Job::Transcribing { retry_at: None },
         };
         self.save(recorder).await?;
         self.end_all_streams();
