@@ -7,7 +7,7 @@ use worker::{Env, Fetch, Headers, Method, Request, RequestInit};
 const CALLS_APP_ID: &str = "CALLS_APP_ID";
 /// Secret: the SFU application's secret.
 const CALLS_APP_SECRET: &str = "CALLS_APP_SECRET";
-/// Optional var replacing the API's base URL, for a local mock SFU (see the spike script).
+/// Optional var replacing the API's base URL, for the e2e mock SFU (`web/e2e/mock-sfu.ts`).
 /// Unset in `wrangler.toml`, so deployed Workers talk to Cloudflare.
 const SFU_API_URL: &str = "SFU_API_URL";
 

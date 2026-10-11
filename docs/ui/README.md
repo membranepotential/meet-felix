@@ -94,6 +94,16 @@ So one device asks for the password once a month, not per meeting; the
 password is still never stored, only the session cookie is. A lost device
 is handled by changing the password, which invalidates every session.
 
+Changed on 2026-10-11 (security audit, finding P3-027): the cookie's HMAC key
+was a SHA-256 of the password, so anyone holding one cookie could test
+password guesses offline. The key is now an HMAC under the random Worker
+secret `SESSION_KEY` (at least 32 characters, for example
+`openssl rand -base64 32`) over the password. A cookie alone gives nothing to
+test guesses against. Changing the password still ends every session, and so
+does rotating `SESSION_KEY`, which ends them without a password change.
+Without a usable `SESSION_KEY` the owner is locked out, like without
+`CREATE_SECRET`.
+
 ## D25: The start page has one recording switch, shows the words on one line, and ends in Join now (2026-10-09)
 
 Before creating a meeting, the index page asks for the password once per

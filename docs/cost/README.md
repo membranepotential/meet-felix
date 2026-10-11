@@ -28,6 +28,15 @@ Research: [01 §2, §6 — Workers pricing, bandwidth per meeting-hour](../resea
 - SFU, TURN and adapter egress share one pool: 1,000 GB free per month, then
   $0.05/GB. TURN is in use since 2026-10-09 (`GET /api/ice`, for known meetings only); traffic between
   TURN and the SFU is free, so relayed calls add little.
+- Rate limits (2026-10-11): the Workers Rate Limiting binding has no price
+  and no plan restriction in Cloudflare's docs
+  ([Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
+  checked 2026-10-11). A refused request still runs the Worker, so the limits
+  bound KV reads, Durable Object requests and TURN credentials per client, not
+  the daily request allowance
+  ([D6](../links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)).
+  TURN credentials last 6 hours (24 before), so one leaked or minted set
+  relays for at most that long.
 - Workers Free (the plan in use since 2026-10-09) caps the recorder instead of
   billing it: Workers AI 10,000 neurons a day, about 214 Whisper minutes at
   46.63 neurons per audio minute (the job waits for the 00:00 UTC reset

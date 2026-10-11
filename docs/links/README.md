@@ -98,10 +98,43 @@ from the id alone:
   meeting is scheduled or runs. A scheduled link lives up to 60 days, so it
   can be guessed for longer than a running one; guests who find it wait
   outside until the host joins, and the host sees every join.
-- The Worker rate-limits join attempts per IP (planned, phase 5).
+- The Worker rate-limits each client: 60 meeting lookups, ICE requests and
+  joins a minute per IP address (changed on 2026-10-11, below).
 - A host can lock the room; late joiners then knock and wait until a host
   admits them.
 - Hosts see every join.
+
+Changed on 2026-10-11 (security audit, finding P2-017): the rate limit above
+was only planned, so this section rested on a control that did not exist. It
+exists now. The Worker counts `GET /api/meeting/:words`, `GET /api/ice` and
+`GET /ws/:words` together per client with the Workers Rate Limiting binding
+`PUBLIC_LIMIT` (`[[ratelimits]]` in `wrangler.toml`,
+`crates/worker/src/limits.rs`) and answers 429 with `Retry-After: 60` above
+60 requests a minute. A client is the address in `CF-Connecting-IP`, which
+Cloudflare's edge sets on every request; an IPv6 address counts by its /64
+network, because one subscriber usually holds a whole /64. The binding keeps
+its counters per Cloudflare location and is eventually consistent, so the
+limit bounds abuse rather than counting exactly
+([Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/),
+checked 2026-10-11). Cloudflare's docs advise against keying on IP addresses,
+because many users can share one; a private meeting app has few users, and a
+join costs about three requests, so an office behind one address still fits.
+
+What the limit buys: one address can guess at most about 86,000 words a day.
+With five meetings open at once, finding one takes about 1.3 × 10⁹ guesses
+on average, some 40 years from one address; an attacker with many addresses
+divides that. What it does not buy: a refused request still runs the Worker,
+so it does not protect the plan's daily request allowance, which only a WAF
+rule on a Cloudflare zone could; `workers.dev` has none. If the binding fails,
+the Worker lets requests through and logs the error, so a broken counter never
+stops a meeting.
+
+Unverified: whether `CF-Connecting-IP` survives the Pages front door's
+service binding (research 11, item 10; Cloudflare's header docs cover
+subrequests, not bindings). The front door forwards the request object
+unchanged, so it should. If it does not, every request through the custom
+domain shares one counter (`unknown`) and the Worker logs
+`no CF-Connecting-IP` for each: check Workers Logs after a deploy.
 
 Rejected: the research recommended a guest link with at least 128 random
 bits plus a separate host secret, and a knock queue by default
@@ -152,6 +185,33 @@ a domain is attached, `/new` moves behind Cloudflare Access (free for up to
 
 The creation secret and the owner's session cookie are secrets: they never
 go into git or logs.
+
+Changed on 2026-10-11 (security audit, findings P2-016 and P2-019), because
+the code is public and an attacker knows every guard:
+
+- `CREATE_SECRET` must be at least 20 characters and machine-generated, for
+  example `openssl rand -base64 32`. The Worker treats a shorter one like a
+  missing one: nobody can log in, create or list meetings, or join as host.
+- Every comparison with the password counts against a per-client limit
+  (`OWNER_AUTH_LIMIT`: 10 a minute per IP address, keyed like
+  [D6](#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)):
+  logins and bearer tokens. Above it the Worker answers 429, even to the
+  right password, so a guesser cannot learn which guess was right. Attempts
+  count, not failures, because the binding cannot read a counter without
+  raising it. The session cookie is not a password attempt and is not
+  counted.
+- The session cookie is `SameSite=Lax`, which stops other sites but not
+  sibling subdomains of the same registrable domain. So a browser request
+  that the cookie would authorize must come from the app's own origin:
+  `POST /api/new`, `POST /api/logout` and the host's WebSocket upgrade
+  answer 403 when `Sec-Fetch-Site` is present and not `same-origin`, or,
+  without it, when `Origin` differs from the request's own origin.
+  `POST /api/new` from the app must also be `application/json` (415
+  otherwise), which an HTML form cannot send, so a form injected into the
+  app's own pages cannot create meetings. A request with neither header is
+  not a browser's (current browsers send `Origin` on every POST and
+  WebSocket handshake) and cannot carry someone else's cookie, so scripts,
+  which use the bearer token, keep working.
 
 ## D8: A meeting ends when a host ends it or after two empty minutes (2026-10-09)
 

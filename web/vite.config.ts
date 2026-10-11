@@ -34,9 +34,20 @@ export default defineConfig({
 		})
 	],
 	server: {
+		// The Worker refuses the owner's cookie on browser requests from another origin. Behind
+		// this proxy the page's origin differs from the Worker's, so the proxy names the Worker's.
 		proxy: {
-			'/api': { target: WORKER_DEV_ORIGIN, changeOrigin: true },
-			'/ws': { target: WORKER_DEV_ORIGIN, changeOrigin: true, ws: true }
+			'/api': {
+				target: WORKER_DEV_ORIGIN,
+				changeOrigin: true,
+				headers: { origin: WORKER_DEV_ORIGIN }
+			},
+			'/ws': {
+				target: WORKER_DEV_ORIGIN,
+				changeOrigin: true,
+				ws: true,
+				headers: { origin: WORKER_DEV_ORIGIN }
+			}
 		}
 	},
 	test: {

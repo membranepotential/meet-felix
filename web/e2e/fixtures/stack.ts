@@ -6,6 +6,9 @@
  * Each stack gets its own directory under `.artifacts/stacks/`: a copy of `wrangler.toml`
  * without the `[build]` table (so `wrangler dev` neither rebuilds nor watches the crate while
  * tests run), its Durable Object and KV state, and the logs of both processes.
+ *
+ * Every test talks to the Worker from one address, so the copy raises the per-client rate
+ * limits out of reach (`RateLimits`), except for a stack that tests them.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
@@ -31,6 +34,27 @@ import { spawnLogged, waitForLog, waitUntil, type Child } from './processes.ts';
  * - `real`: the real Realtime SFU with the secrets from the repo's `.dev.vars`.
  */
 export type StackKind = 'mock' | 'recorder' | 'real';
+
+/**
+ * - `relaxed`: every `[[ratelimits]]` limit raised to `RELAXED_LIMIT`.
+ * - `deployed`: the limits as `wrangler.toml` sets them.
+ */
+export type RateLimits = 'relaxed' | 'deployed';
+
+/** A per-minute limit that no test run reaches. */
+const RELAXED_LIMIT = 1_000_000;
+
+/**
+ * The owner password (`CREATE_SECRET`) of the mock and recorder stacks; the Worker refuses one
+ * shorter than 20 characters.
+ */
+const E2E_OWNER_PASSWORD = 'e2e-owner-password-0123456789';
+
+/**
+ * The `SESSION_KEY` of every stack, unless `.dev.vars` sets one for a `real` stack; the Worker
+ * refuses one shorter than 32 characters. A test value, never a deployment's.
+ */
+const E2E_SESSION_KEY = 'e2e-session-key-0123456789abcdefghij';
 
 export interface Stack {
 	kind: StackKind;
@@ -71,11 +95,18 @@ export function hasRealSfuSecrets(): boolean {
 }
 
 /**
- * `wrangler.toml` for a prebuilt Worker: drops the `[build]` table and points `main` and the
- * assets directory at absolute paths, so the copy works from any directory. TOML keys belong to
- * the table header above them, so a line-wise walk over the headers is exact for this file.
+ * `wrangler.toml` for a prebuilt Worker: drops the `[build]` table, points `main` and the
+ * assets directory at absolute paths, so the copy works from any directory, and with
+ * `relaxed` raises each `[[ratelimits]]` limit (written as `simple = { limit = N, ... }`).
+ * TOML keys belong to the table header above them, so a line-wise walk over the headers is
+ * exact for this file.
  */
-export function prebuiltConfig(toml: string, main: string, assets: string): string {
+export function prebuiltConfig(
+	toml: string,
+	main: string,
+	assets: string,
+	rateLimits: RateLimits
+): string {
 	let table = '';
 	const replaced = new Set<string>();
 	const lines = toml.split('\n').flatMap((line) => {
@@ -90,10 +121,18 @@ export function prebuiltConfig(toml: string, main: string, assets: string): stri
 			replaced.add('assets');
 			return [`directory = ${JSON.stringify(assets)}`];
 		}
+		const limit = /^(\s*simple\s*=\s*\{\s*limit\s*=\s*)[\d_]+/;
+		if (table === 'ratelimits' && rateLimits === 'relaxed' && limit.test(line)) {
+			replaced.add('ratelimits');
+			return [line.replace(limit, `$1${RELAXED_LIMIT}`)];
+		}
 		return [line];
 	});
 	if (!replaced.has('main') || !replaced.has('assets')) {
 		throw new Error('wrangler.toml has no top-level `main` or no `[assets] directory`');
+	}
+	if (rateLimits === 'relaxed' && !replaced.has('ratelimits')) {
+		throw new Error('wrangler.toml has no `[[ratelimits]]` with `simple = { limit = N, ... }`');
 	}
 	return lines.join('\n');
 }
@@ -125,8 +164,15 @@ async function startMockSfu(dir: string, appId: string, appSecret: string) {
 	return { child, url };
 }
 
-/** Starts a stack named `name` (used for its directory); stop it with `stop()`. */
-export async function startStack(kind: StackKind, name: string): Promise<Stack> {
+/**
+ * Starts a stack named `name` (used for its directory); stop it with `stop()`. Its rate limits
+ * are `relaxed` unless a test of the limits asks for the `deployed` ones.
+ */
+export async function startStack(
+	kind: StackKind,
+	name: string,
+	rateLimits: RateLimits = 'relaxed'
+): Promise<Stack> {
 	for (const [what, path] of [
 		['the Worker bundle', join(WORKER_BUILD_DIR, 'index.js')],
 		['the web build', join(WEB_BUILD_DIR, 'index.html')]
@@ -152,7 +198,7 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 		if (kind === 'mock' || kind === 'recorder') {
 			// `--local` disables the remote bindings; Workers AI is the only one this Worker has.
 			if (kind === 'mock') flags.push('--local');
-			ownerPassword = 'e2e-owner-password';
+			ownerPassword = E2E_OWNER_PASSWORD;
 			const [appId, appSecret] = ['e2e', 'e2e-sfu-secret'];
 			const mock = await startMockSfu(dir, appId, appSecret);
 			children.push(mock.child);
@@ -162,6 +208,7 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 			flags.push(
 				...[
 					`CREATE_SECRET:${ownerPassword}`,
+					`SESSION_KEY:${E2E_SESSION_KEY}`,
 					`CALLS_APP_ID:${appId}`,
 					`CALLS_APP_SECRET:${appSecret}`,
 					`SFU_API_URL:${mock.url}/v1`,
@@ -172,9 +219,13 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 			// Leaves wrangler.toml's placeholder `RECORDER_ORIGIN` as it is: the @real specs never
 			// record (the real SFU cannot reach localhost; that would need `wrangler dev --tunnel`).
 			if (!hasRealSfuSecrets()) throw new Error(`${DEV_VARS} lacks ${REAL_SECRETS.join(', ')}`);
-			ownerPassword = parseDevVars(readFileSync(DEV_VARS, 'utf8')).get('CREATE_SECRET') ?? '';
+			const devVars = parseDevVars(readFileSync(DEV_VARS, 'utf8'));
+			ownerPassword = devVars.get('CREATE_SECRET') ?? '';
 			// Read in place: the secrets are never copied into the stack's directory.
 			flags.push('--env-file', DEV_VARS);
+			if ((devVars.get('SESSION_KEY') ?? '') === '') {
+				flags.push('--var', `SESSION_KEY:${E2E_SESSION_KEY}`);
+			}
 		}
 		const config = join(dir, 'wrangler.toml');
 		writeFileSync(
@@ -182,7 +233,8 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 			prebuiltConfig(
 				readFileSync(WRANGLER_CONFIG, 'utf8'),
 				join(WORKER_BUILD_DIR, 'index.js'),
-				WEB_BUILD_DIR
+				WEB_BUILD_DIR,
+				rateLimits
 			)
 		);
 		const log = join(dir, 'wrangler.log');

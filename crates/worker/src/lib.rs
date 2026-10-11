@@ -7,7 +7,7 @@
 //!   `GET /api/me`, or 401.
 //! - `POST /api/logout` clears it (204).
 //! - `GET /api/me` with a valid session cookie returns `{"name"}` (the owner's display name from
-//!   the var `OWNER_NAME`, or `null`) with `Cache-Control: no-store`; 401 without.
+//!   the var `OWNER_NAME`, or `null`); 401 without.
 //! - `POST /api/new` (owner only, optional body `{"recording": "fromStart" | "hostDecides"}`)
 //!   creates a scheduled meeting and returns `{"meeting"}` with status 201.
 //! - `GET /api/meetings` (owner only) returns the owner's last meetings, newest first:
@@ -15,7 +15,8 @@
 //! - `GET /api/meeting/:words` returns `{"recordingPolicy", "phase", "ended"}`, or 404.
 //! - `GET /api/ice?meeting=:words` returns `{"iceServers"}` for `RTCPeerConnection` in a known
 //!   meeting, or 404: STUN, plus TURN with fresh credentials if the secrets `TURN_KEY_ID` and
-//!   `TURN_KEY_API_TOKEN` are set. TURN traffic is billed, so strangers get no credentials.
+//!   `TURN_KEY_API_TOKEN` are set. TURN traffic is billed, and anyone who knows an open
+//!   meeting's words gets credentials, so the route is rate-limited and they expire after hours.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
 //!   A socket opened with the owner's session cookie joins as host (D32 in `docs/architecture`).
 //! - `GET /rec/:recorder/:secret/:who/:n` upgrades an SFU adapter's WebSocket into the meeting's
@@ -24,11 +25,24 @@
 //!   (`{"status", "meeting", "startedAt", "endedAt"?, "progress": {"done", "total"}` in
 //!   milliseconds of audio, `"retryAt"?, "audioUntil"?, "transcript"?}`), or 404;
 //!   `GET /api/transcript/:token/transcript.md` and `.../transcript.json` download the files.
-//!   These responses carry `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex` and
-//!   `Cache-Control: no-store`, and the token is never logged (research 11, item 7).
+//!   These responses carry `Referrer-Policy: no-referrer` and `X-Robots-Tag: noindex`, and the
+//!   token is never logged (research 11, item 7).
+//!
+//! Guards on every route:
+//! - Every `/api/*` response carries `Cache-Control: no-store`: many carry credentials, tokens
+//!   or the owner's data.
+//! - Per-client rate limits ([`limits`], D6 in `docs/links`) answer 429: `/api/meeting`,
+//!   `/api/ice` and `/ws` share one limit; every password comparison (login and bearer token)
+//!   counts against a stricter one.
+//! - A browser request that the session cookie would authorize must come from this origin:
+//!   `POST /api/new`, `POST /api/logout` and the host's WebSocket upgrade answer 403 otherwise,
+//!   and `POST /api/new` from a browser must be `application/json` (415 otherwise), which an
+//!   HTML form cannot send. Bearer-token callers and other non-browser clients are not checked:
+//!   they cannot act with someone else's cookie.
 
 mod ice;
 mod internal;
+mod limits;
 mod meetings;
 mod owner;
 mod random;
@@ -51,7 +65,8 @@ use crate::internal::{
     INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES, RECORDER_STATUS, RoomInfo,
     TRANSCRIPT_JSON, TRANSCRIPT_MD,
 };
-use crate::owner::{CreateSecret, OwnerSession};
+use crate::limits::Limit;
+use crate::owner::{Initiator, OwnerAuth, OwnerAuthError, OwnerSession};
 
 /// KV namespace mapping meeting words to the Room Durable Object id (hex); also holds the
 /// owner's meeting index under [`meetings::KEY`].
@@ -63,8 +78,11 @@ const RECORDERS: &str = "RECORDERS";
 /// Var naming the jurisdiction new rooms are pinned to; see [`Jurisdiction`].
 const ROOM_JURISDICTION: &str = "ROOM_JURISDICTION";
 /// The owner's password, which `POST /api/login` checks and owner-only routes also accept as a
-/// bearer token (D7 in `docs/links`).
+/// bearer token (D7 in `docs/links`). At least [`owner::MIN_SECRET_CHARS`] characters.
 const CREATE_SECRET: &str = "CREATE_SECRET";
+/// The random key that signs the owner's session cookies (D24 in `docs/ui`). At least
+/// [`owner::MIN_SESSION_KEY_CHARS`] characters.
+const SESSION_KEY: &str = "SESSION_KEY";
 /// Var with the owner's display name, which the app prefills when the owner joins (D32 in
 /// `docs/architecture`). An unrendered config leaves the placeholder `${OWNER_NAME}`, which is a
 /// valid name and shows as such.
@@ -154,16 +172,20 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return Response::error("server misconfigured", 500);
         }
     };
-    Router::with_data(Config { jurisdiction })
+    let api = req.path().starts_with("/api/");
+    let response = Router::with_data(Config { jurisdiction })
         .post_async("/api/login", login)
-        .post("/api/logout", |_, _| {
+        .post("/api/logout", |req, _| {
+            if initiator_of(&req)? == Initiator::Foreign {
+                return cross_origin();
+            }
             with_cookie(Response::empty()?.with_status(204), &OwnerSession::clear())
         })
         .get("/api/me", |req, ctx| {
-            let Some(secret) = create_secret(&ctx) else {
+            let Some(auth) = owner_auth(&ctx) else {
                 return not_configured();
             };
-            if is_owner_session(&req, &secret)? {
+            if is_owner_session(&req, &auth.session)? {
                 me(&ctx)
             } else {
                 Response::error("unauthorized", 401)
@@ -187,7 +209,16 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             }
         })
         .run(req, env)
-        .await
+        .await?;
+    if api { no_store(response) } else { Ok(response) }
+}
+
+/// Adds `Cache-Control: no-store`, so no browser or intermediary keeps an API answer.
+fn no_store(response: Response) -> Result<Response> {
+    // A copy: the headers of a response fetched from a Durable Object are immutable.
+    let headers = response.headers().clone();
+    headers.set("Cache-Control", "no-store")?;
+    Ok(response.with_headers(headers))
 }
 
 /// The KV key that maps a transcript token to its `RecorderObject`'s id. Meeting words never
@@ -220,14 +251,14 @@ async fn transcript(ctx: &RouteContext<Config>, path: &str) -> Result<Response> 
     private(response)
 }
 
-/// Adds the headers that keep a transcript out of referrers, search engines and caches.
+/// Adds the headers that keep a transcript out of referrers and search engines; [`no_store`]
+/// keeps it out of caches, as every `/api/*` response.
 fn private(response: Result<Response>) -> Result<Response> {
     let response = response?;
     // A copy: the headers of a response fetched from a Durable Object are immutable.
     let headers = response.headers().clone();
     headers.set("Referrer-Policy", "no-referrer")?;
     headers.set("X-Robots-Tag", "noindex")?;
-    headers.set("Cache-Control", "no-store")?;
     Ok(response.with_headers(headers))
 }
 
@@ -249,23 +280,42 @@ async fn recorder_stream(req: Request, ctx: RouteContext<Config>) -> Result<Resp
 
 /// `POST /api/login`: sets the owner's session cookie if the password is `CREATE_SECRET`, and
 /// answers like `GET /api/me`, so the app learns the owner's name without asking again.
+/// Every attempt counts against [`Limit::OwnerAuth`], and one over the limit gets 429 even with
+/// the right password.
 async fn login(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
-    let Some(secret) = create_secret(&ctx) else {
+    let Some(auth) = owner_auth(&ctx) else {
         return not_configured();
     };
+    if !limits::allows(&ctx.env, Limit::OwnerAuth, &req).await? {
+        return limits::too_many_requests();
+    }
     let request: LoginRequest = match serde_json::from_str(&req.text().await?) {
         Ok(request) => request,
         Err(e) => return Response::error(format!("bad request: {e}"), 400),
     };
-    if !secret.matches(&request.password) {
+    if !auth.secret.matches(&request.password) {
         return Response::error("wrong password", 401);
     }
-    with_cookie(me(&ctx)?, &OwnerSession::new(&secret).issue(now()))
+    with_cookie(me(&ctx)?, &auth.session.issue(now()))
 }
 
+/// `POST /api/new`. With the session cookie, a browser request must come from this origin and
+/// carry JSON, so neither another site nor a form injected into this one can create meetings.
 async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
-    if let Some(refusal) = refuse_non_owner(&req, &ctx)? {
-        return Ok(refusal);
+    let proof = match owner_proof(&req, &ctx).await? {
+        Ok(proof) => proof,
+        Err(refusal) => return Ok(refusal),
+    };
+    if proof == OwnerProof::Cookie {
+        match initiator_of(&req)? {
+            Initiator::Foreign => return cross_origin(),
+            Initiator::SameOrigin
+                if !owner::is_json(req.headers().get("Content-Type")?.as_deref()) =>
+            {
+                return Response::error("expected Content-Type: application/json", 415);
+            }
+            Initiator::SameOrigin | Initiator::Unknown => {}
+        }
     }
     let body = req.text().await?;
     let request: NewMeetingRequest = match serde_json::from_str(match body.trim() {
@@ -333,7 +383,7 @@ async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Resp
 /// others. The index is eventually consistent (see [`meetings`]), so a meeting created in the
 /// last minute may be missing.
 async fn past_meetings(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
-    if let Some(refusal) = refuse_non_owner(&req, &ctx)? {
+    if let Err(refusal) = owner_proof(&req, &ctx).await? {
         return Ok(refusal);
     }
     let kv = ctx.kv(MEETINGS)?;
@@ -391,39 +441,62 @@ async fn room_phase(rooms: &ObjectNamespace, room: &str) -> Result<Phase> {
     }
 }
 
-/// The error response for a request that is not the owner's, or `None` for the owner: a valid
-/// session cookie or the creation secret as bearer token (D7 in `docs/links`).
-fn refuse_non_owner(req: &Request, ctx: &RouteContext<Config>) -> Result<Option<Response>> {
-    let Some(secret) = create_secret(ctx) else {
-        return not_configured().map(Some);
+/// How a request proved that it is the owner's (D7 in `docs/links`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerProof {
+    /// The creation secret as bearer token.
+    Bearer,
+    /// A valid session cookie.
+    Cookie,
+}
+
+/// How `req` proves that it is the owner's, or the response that refuses it. A bearer token
+/// counts against [`Limit::OwnerAuth`] before it is compared, like a login.
+async fn owner_proof(
+    req: &Request,
+    ctx: &RouteContext<Config>,
+) -> Result<std::result::Result<OwnerProof, Response>> {
+    let Some(auth) = owner_auth(ctx) else {
+        return not_configured().map(Err);
     };
-    let bearer = is_bearer(req.headers().get("Authorization")?.as_deref(), &secret);
-    if bearer || is_owner_session(req, &secret)? {
-        Ok(None)
+    if let Some(token) = bearer_token(req.headers().get("Authorization")?.as_deref()) {
+        if !limits::allows(&ctx.env, Limit::OwnerAuth, req).await? {
+            return limits::too_many_requests().map(Err);
+        }
+        if auth.secret.matches(token) {
+            return Ok(Ok(OwnerProof::Bearer));
+        }
+    }
+    if is_owner_session(req, &auth.session)? {
+        Ok(Ok(OwnerProof::Cookie))
     } else {
-        Response::error("unauthorized", 401).map(Some)
+        Response::error("unauthorized", 401).map(Err)
     }
 }
 
-/// [`CREATE_SECRET`], or `None` (logged) if it is unset or empty.
-fn create_secret(ctx: &RouteContext<Config>) -> Option<CreateSecret> {
-    let secret = ctx
-        .secret(CREATE_SECRET)
+/// The owner's credentials from [`CREATE_SECRET`] and [`SESSION_KEY`], or `None` (logged) if
+/// either is unset or too short: then nobody is the owner.
+fn owner_auth(ctx: &RouteContext<Config>) -> Option<OwnerAuth> {
+    let secret = |name| ctx.secret(name).ok().map(|value| value.to_string());
+    OwnerAuth::new(secret(CREATE_SECRET), secret(SESSION_KEY))
+        .inspect_err(|e| {
+            let (name, min) = match e {
+                OwnerAuthError::Secret => (CREATE_SECRET, owner::MIN_SECRET_CHARS),
+                OwnerAuthError::SessionKey => (SESSION_KEY, owner::MIN_SESSION_KEY_CHARS),
+            };
+            console_error!(
+                "{name} is unset or shorter than {min} characters; nobody can log in, create or \
+                 list meetings, or join as host"
+            );
+        })
         .ok()
-        .and_then(|secret| CreateSecret::new(secret.to_string()));
-    if secret.is_none() {
-        console_error!("{CREATE_SECRET} is not set; nobody can log in, create or list meetings");
-    }
-    secret
 }
 
-/// The owner's [`Me`], never cached: the answer depends on the session cookie.
+/// The owner's [`Me`].
 fn me(ctx: &RouteContext<Config>) -> Result<Response> {
-    let response = Response::from_json(&Me {
+    Response::from_json(&Me {
         name: owner_name(ctx),
-    })?;
-    response.headers().set("Cache-Control", "no-store")?;
-    Ok(response)
+    })
 }
 
 /// [`OWNER_NAME`], or `None` (logged) if it is unset or not a valid display name.
@@ -443,13 +516,30 @@ fn owner_name(ctx: &RouteContext<Config>) -> Option<DisplayName> {
 }
 
 fn not_configured() -> Result<Response> {
-    Response::error("the owner's password is not configured", 500)
+    Response::error("the owner's secrets are not configured", 500)
+}
+
+/// The answer to a browser request from another origin that the session cookie would authorize.
+fn cross_origin() -> Result<Response> {
+    Response::error("cross-origin request refused", 403)
+}
+
+/// Where the browser says `req` comes from, relative to `req`'s own origin. Through the
+/// custom-domain front door the Worker sees the URL the browser asked for, because `edge/`
+/// forwards the request object unchanged.
+fn initiator_of(req: &Request) -> Result<Initiator> {
+    let headers = req.headers();
+    Ok(owner::initiator(
+        headers.get("Sec-Fetch-Site")?.as_deref(),
+        headers.get("Origin")?.as_deref(),
+        &req.url()?.origin().ascii_serialization(),
+    ))
 }
 
 /// Whether `req` carries the owner's valid session cookie.
-fn is_owner_session(req: &Request, secret: &CreateSecret) -> Result<bool> {
+fn is_owner_session(req: &Request, session: &OwnerSession) -> Result<bool> {
     let cookies = req.headers().get("Cookie")?;
-    Ok(OwnerSession::new(secret).verify(cookies.as_deref(), now()))
+    Ok(session.verify(cookies.as_deref(), now()))
 }
 
 fn with_cookie(response: Response, set_cookie: &str) -> Result<Response> {
@@ -457,7 +547,10 @@ fn with_cookie(response: Response, set_cookie: &str) -> Result<Response> {
     Ok(response)
 }
 
-async fn meeting_info(_req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+async fn meeting_info(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+    if !limits::allows(&ctx.env, Limit::Public, &req).await? {
+        return limits::too_many_requests();
+    }
     let Some(room) = room_stub(&ctx).await? else {
         return Response::error("unknown meeting", 404);
     };
@@ -465,18 +558,25 @@ async fn meeting_info(_req: Request, ctx: RouteContext<Config>) -> Result<Respon
 }
 
 /// Forwards the upgrade to the room, telling it in [`OWNER_HEADER`] whether the socket is the
-/// owner's. A missing `CREATE_SECRET` makes every socket a guest's.
+/// owner's. Missing owner secrets make every socket a guest's; a browser socket from another
+/// origin with the owner's cookie is refused (403), so no other site joins as host.
 async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     if !is_websocket_upgrade(&req)? {
         return Response::error("expected a WebSocket upgrade", 426);
     }
+    if !limits::allows(&ctx.env, Limit::Public, &req).await? {
+        return limits::too_many_requests();
+    }
     let Some(room) = room_stub(&ctx).await? else {
         return Response::error("unknown meeting", 404);
     };
-    let owner = match create_secret(&ctx) {
-        Some(secret) => is_owner_session(&req, &secret)?,
+    let owner = match owner_auth(&ctx) {
+        Some(auth) => is_owner_session(&req, &auth.session)?,
         None => false,
     };
+    if owner && initiator_of(&req)? == Initiator::Foreign {
+        return cross_origin();
+    }
     let forwarded = req.clone_mut()?;
     forwarded.headers().delete(OWNER_HEADER)?;
     if owner {
@@ -487,6 +587,9 @@ async fn join_meeting(req: Request, ctx: RouteContext<Config>) -> Result<Respons
 
 /// `GET /api/ice?meeting=:words`: the ICE servers, for a meeting that exists only.
 async fn ice_servers(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
+    if !limits::allows(&ctx.env, Limit::Public, &req).await? {
+        return limits::too_many_requests();
+    }
     let url = req.url()?;
     let meeting = url
         .query_pairs()
@@ -549,11 +652,9 @@ fn is_websocket_upgrade(req: &Request) -> Result<bool> {
         .is_some_and(|value| value.eq_ignore_ascii_case("websocket")))
 }
 
-/// Whether `header` is `Bearer <secret>`.
-fn is_bearer(header: Option<&str>, secret: &CreateSecret) -> bool {
-    header
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|token| secret.matches(token))
+/// The token of an `Authorization: Bearer <token>` header.
+fn bearer_token(header: Option<&str>) -> Option<&str> {
+    header?.strip_prefix("Bearer ")
 }
 
 #[cfg(test)]
@@ -573,17 +674,12 @@ mod tests {
     }
 
     #[test]
-    fn bearer_must_match_the_secret_exactly() {
-        let secret = CreateSecret::new("s3cret".into()).unwrap();
-        assert!(is_bearer(Some("Bearer s3cret"), &secret));
-        for header in [
-            None,
-            Some("s3cret"),
-            Some("Bearer "),
-            Some("Bearer s3cre"),
-            Some("Bearer s3cret "),
-        ] {
-            assert!(!is_bearer(header, &secret), "{header:?}");
+    fn the_bearer_token_follows_the_scheme_verbatim() {
+        assert_eq!(bearer_token(Some("Bearer s3cret")), Some("s3cret"));
+        assert_eq!(bearer_token(Some("Bearer s3cret ")), Some("s3cret "));
+        assert_eq!(bearer_token(Some("Bearer ")), Some(""));
+        for header in [None, Some("s3cret"), Some("bearer s3cret"), Some("Basic s3cret")] {
+            assert_eq!(bearer_token(header), None, "{header:?}");
         }
     }
 

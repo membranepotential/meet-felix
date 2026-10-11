@@ -1,6 +1,11 @@
 //! `GET /api/ice`: the ICE servers for `RTCPeerConnection`. With a Realtime TURN key configured,
 //! they include short-lived TURN credentials, which phones on mobile data may need; without one,
 //! or if Cloudflare does not hand out credentials in time, STUN only.
+//!
+//! Anyone who knows an open meeting's words may fetch credentials, including a guest who waits
+//! for the host of a scheduled meeting, because the app fetches them once when someone joins.
+//! What bounds misuse of the billed relay is the per-client rate limit on the route
+//! (`limits::Limit::Public`) and the credentials' lifetime ([`TURN_TTL_SECS`]).
 
 use std::fmt;
 use std::pin::pin;
@@ -18,8 +23,11 @@ use worker::{
 const TURN_KEY_ID: &str = "TURN_KEY_ID";
 /// Secret: the TURN key's API token.
 const TURN_KEY_API_TOKEN: &str = "TURN_KEY_API_TOKEN";
-/// How long TURN credentials stay valid: 24 hours, longer than any meeting.
-const TURN_TTL_SECS: u32 = 86_400;
+/// How long TURN credentials stay valid: 6 hours, for a long meeting plus the wait for its host.
+/// Cloudflare ends a relayed connection shortly after its credentials expire, and the app
+/// fetches them once per stay, so this must outlast the longest stay that relies on TURN
+/// (<https://developers.cloudflare.com/realtime/turn/faq/>, checked 2026-10-11).
+const TURN_TTL_SECS: u32 = 6 * 60 * 60;
 /// How long Cloudflare may take to generate credentials before the route serves STUN only. The
 /// browser gives up on the route after 4 seconds, so this answers first.
 const TURN_TIMEOUT: Duration = Duration::from_secs(3);

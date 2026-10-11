@@ -42,14 +42,36 @@ ROOM_JURISDICTION = "eu"
 RECORDER_ORIGIN = "${RECORDER_ORIGIN}"
 # The owner's display name, prefilled when the owner joins a meeting (D32).
 OWNER_NAME = "${OWNER_NAME}"
-# Optional SFU_API_URL replaces https://rtc.live.cloudflare.com/v1, for the spike's mock SFU only.
+# Optional SFU_API_URL replaces https://rtc.live.cloudflare.com/v1, for the e2e mock SFU
+# (web/e2e/mock-sfu.ts) only.
 
 # Secrets (`pnpm exec wrangler secret put NAME`; locally in the git-ignored `.dev.vars`):
-# - CREATE_SECRET: the owner password. `POST /api/login` checks it and issues the session cookie; owner routes also accept it as a bearer token.
+# - CREATE_SECRET: the owner password. `POST /api/login` checks it and issues the session cookie;
+#   owner routes also accept it as a bearer token. At least 20 characters, machine-generated
+#   (`openssl rand -base64 32`); a shorter one locks the owner out.
+# - SESSION_KEY: signs the owner's session cookies; rotating it ends every session. At least 32
+#   characters, random (`openssl rand -base64 32`); without it the owner is locked out.
 # - CALLS_APP_ID, CALLS_APP_SECRET: the Realtime SFU app. Without them every join fails with
 #   `SfuUnavailable`.
 # - TURN_KEY_ID, TURN_KEY_API_TOKEN: a Realtime TURN key. With them, `GET /api/ice` adds TURN
-#   servers with 24-hour credentials; without them it serves STUN only.
+#   servers with 6-hour credentials; without them it serves STUN only.
+
+# Per-client rate limits (D6 in docs/links; crates/worker/src/limits.rs), counted per Cloudflare
+# location over 60-second windows. `namespace_id` is any positive integer unique in the account.
+# `wrangler dev` simulates them locally. The e2e stacks raise the limits, except the spec that
+# tests them.
+# - PUBLIC_LIMIT: /api/meeting/:words, /api/ice and /ws/:words together, per client IP. A join
+#   costs about three; an office behind one address still fits.
+# - OWNER_AUTH_LIMIT: password comparisons (login and bearer token) per client IP.
+[[ratelimits]]
+name = "PUBLIC_LIMIT"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "OWNER_AUTH_LIMIT"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }
 
 # `wrangler dev` uses a local store, so the placeholder id works there.
 [[kv_namespaces]]
