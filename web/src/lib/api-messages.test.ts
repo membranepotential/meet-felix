@@ -13,14 +13,17 @@ describe('describeApiError', () => {
 		expect(describeApiError({ kind: 'rate-limited' }, WORDING)).toBe(
 			'Too many new meetings in a short time. Wait a minute, then try again.'
 		);
-		expect(describeApiError({ kind: 'server', status: 500 }, WORDING)).toBe(
+		expect(describeApiError({ kind: 'server', status: 500, code: 'internal' }, WORDING)).toBe(
 			'The server could not create a meeting (error 500). Try again.'
 		);
 	});
 
 	it('says an old Worker needs an update when the route is missing', () => {
-		expect(describeApiError({ kind: 'server', status: 404 }, WORDING)).toBe(
+		expect(describeApiError({ kind: 'server', status: 404, code: null }, WORDING)).toBe(
 			'This server cannot create a meeting yet. Update the Worker, then try again.'
+		);
+		expect(describeApiError({ kind: 'server', status: 404, code: 'notFound' }, WORDING)).toBe(
+			'The server could not create a meeting (error 404). Try again.'
 		);
 	});
 

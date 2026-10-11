@@ -20,8 +20,9 @@ export function describeApiError(error: ApiError, wording: ApiErrorWording): str
 		case 'network':
 			return 'The server could not be reached. Check your connection, then try again.';
 		case 'server':
-			// A Worker without the route answers 404: the static app is newer than the Worker.
-			return error.status === 404
+			// A 404 without the Worker's error body comes from a Worker without the route: the
+			// static app is newer than the Worker.
+			return error.status === 404 && error.code === null
 				? `This server cannot ${wording.action} yet. Update the Worker, then try again.`
 				: `The server could not ${wording.action} (error ${error.status}). Try again.`;
 		case 'malformed':

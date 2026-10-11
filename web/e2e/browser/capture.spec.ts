@@ -106,7 +106,7 @@ test('a camera started during the lookup is stopped when the link turns out dead
 	const lookupHeld = new Promise<void>((resolve) => (answerLookup = resolve));
 	await guest.page.route('**/api/meeting/*', async (route) => {
 		await lookupHeld;
-		await route.fulfill({ status: 404 });
+		await route.fulfill({ status: 404, json: { error: 'notFound' } });
 	});
 	await guest.page.goto(`/${UNKNOWN_MEETING}`);
 	// The pre-join shows while the lookup runs; the user presses the camera button already.

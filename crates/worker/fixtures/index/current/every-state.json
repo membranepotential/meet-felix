@@ -1,0 +1,41 @@
+{
+  "record": [
+    {
+      "createdAt": 1760000000000,
+      "ended": {
+        "at": 1760000000001,
+        "recorded": "yes"
+      },
+      "meeting": "amber-otter-ocean",
+      "room": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "transcript": "11111111111111111111111111111111"
+    },
+    {
+      "createdAt": 1760000000002,
+      "ended": {
+        "at": 1760000000003,
+        "recorded": "no"
+      },
+      "meeting": "abide-acid-acorn",
+      "room": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "transcript": "22222222222222222222222222222222"
+    },
+    {
+      "createdAt": 1760000000004,
+      "ended": {
+        "at": 1760000000005,
+        "recorded": "unknown"
+      },
+      "meeting": "amber-otter-ocean",
+      "room": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "transcript": "33333333333333333333333333333333"
+    },
+    {
+      "createdAt": 1760000000006,
+      "meeting": "abide-acid-acorn",
+      "room": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "transcript": "44444444444444444444444444444444"
+    }
+  ],
+  "version": 2
+}

@@ -109,6 +109,7 @@ test(
 			expect.soft(response.headers.get('cache-control')).toBe('no-store');
 			const first = await transcriptStatusOf(response);
 			expect.soft(first.meeting).toBe(meeting);
+			if (first.status === 'recording') throw new Error('the meeting ended, yet it records');
 			expect.soft(first.endedAt).toBeGreaterThanOrEqual(first.startedAt);
 			// Every chunk the recorder stored in R2 counts here, in milliseconds of audio.
 			expect.soft(first.progress.total).toBeGreaterThanOrEqual(streamedMs - 3_000);
@@ -125,7 +126,7 @@ test(
 			const finished = (s: TranscriptStatusWire) =>
 				s.status === 'ready' ||
 				s.status === 'failed' ||
-				(s.status === 'processing' && s.retryAt !== null);
+				(s.status === 'processing' && s.retryAt !== undefined);
 			await expect
 				.poll(
 					async () => {

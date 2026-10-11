@@ -6,13 +6,13 @@ import {
 	NO_AUTH,
 	type Api,
 	type Auth,
-	type ListedMeetingWire
+	type PastMeeting
 } from '../fixtures/api.ts';
 import { joinAs } from '../fixtures/meeting.ts';
 import { expect, test } from '../fixtures/test.ts';
 
 const list = async (api: Api, auth: Auth) =>
-	(await body<{ meetings: ListedMeetingWire[] }>(await api.meetings(auth))).meetings;
+	(await body<{ meetings: PastMeeting[] }>(await api.meetings(auth))).meetings;
 
 test('answers 401 without a secret and with a wrong one, 200 with the cookie', async ({
 	api,
@@ -38,13 +38,21 @@ test('lists meetings newest first, an ended one with its transcript and a new on
 	const meetings = await list(api, bearer(stack.ownerPassword));
 	const createdAt = meetings.map((m) => m.createdAt);
 	expect(createdAt).toEqual(createdAt.toSorted((a, b) => b - a));
-	expect(meetings.find((m) => m.meeting === scheduled)).toMatchObject({
-		phase: 'scheduled',
-		ended: false
-	});
+	expect(meetings.find((m) => m.meeting === scheduled)).toMatchObject({ phase: 'scheduled' });
 	expect(meetings.find((m) => m.meeting === scheduled)?.transcript).toBeUndefined();
 	// The index settles an ended meeting a moment after the room ended.
 	await expect
 		.poll(async () => (await list(api, owner.headers)).find((m) => m.meeting === ended))
-		.toMatchObject({ phase: 'ended', ended: true, transcript, createdAt: expect.any(Number) });
+		.toMatchObject({ phase: 'ended', transcript, createdAt: expect.any(Number) });
+});
+
+test('an ended meeting that never recorded lists no transcript', async ({ api, owner, rooms }) => {
+	const meeting = await createMeeting(api, owner.headers, 'hostDecides');
+	const host = await joinAs(rooms, meeting, 'Host', owner.headers);
+	host.client.send({ type: 'end' });
+	expect((await host.client.take('ended')).transcript).toBeUndefined();
+
+	const listed = async () => (await list(api, owner.headers)).find((m) => m.meeting === meeting);
+	await expect.poll(async () => (await listed())?.phase).toBe('ended');
+	expect(await listed()).not.toHaveProperty('transcript');
 });

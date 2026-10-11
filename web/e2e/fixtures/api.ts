@@ -1,22 +1,27 @@
 /**
  * The Worker's HTTP API as the tests use it: thin wrappers that return the raw `Response`, so
  * tests can check statuses and headers, plus `loginAsOwner` and `createMeeting` for setup.
- * The wire types below are what the Worker sends; tests assert them field by field.
+ * The bodies are the types generated from `crates/meeting-core/src/http.rs`; tests assert them
+ * field by field.
  */
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { request } from 'node:http';
-import type {
-	MeetingId,
-	Millis,
-	Phase,
-	RecordingPolicy,
-	TranscriptRef
-} from '../../src/lib/protocol.ts';
-import {
-	parseTranscriptStatus,
-	type Progress,
-	type TranscriptStatus
-} from '../../src/lib/transcript.ts';
+import type { TranscriptStatus } from '../../src/lib/api.ts';
+import type { MeetingId, RecordingPolicy, TranscriptRef } from '../../src/lib/protocol.ts';
+import { initSync, parseTranscriptStatus, type Progress } from '../../src/lib/wasm/meeting_core.js';
+
+export type {
+	ErrorBody,
+	Listing,
+	MeetingLookup,
+	PastMeeting
+} from '../../src/lib/wasm/meeting_core.js';
+
+// The core's parsers check the bodies as the web app does.
+initSync({
+	module: readFileSync(new URL('../../src/lib/wasm/meeting_core_bg.wasm', import.meta.url))
+});
 
 /** Request headers that authenticate the owner: the session cookie or the bearer secret. */
 export type Auth = Readonly<Record<string, string>>;
@@ -30,31 +35,12 @@ export interface OwnerSession {
 	value: string;
 }
 
-/** `GET /api/meeting/{words}`. */
-export interface MeetingInfoWire {
-	recordingPolicy: RecordingPolicy;
-	phase: Phase;
-	ended: boolean;
-	transcript?: TranscriptRef;
-}
-
-/** One entry of `GET /api/meetings`. */
-export interface ListedMeetingWire {
-	meeting: MeetingId;
-	createdAt: Millis;
-	phase: Phase;
-	ended: boolean;
-	transcript?: TranscriptRef;
-}
-
 /**
  * `GET /api/transcript/{token}` for a known token: the transcript page's `TranscriptStatus`, and
- * the progress the Worker sends with every status (the page reads it only while the job runs).
+ * the progress the recorder sends with every status (the page reads it only while the job runs).
  * Read it with `transcriptStatusOf`.
  */
-export type TranscriptStatusWire = Exclude<TranscriptStatus, { status: 'not-found' }> & {
-	progress: Progress;
-};
+export type TranscriptStatusWire = TranscriptStatus & { progress: Progress };
 
 /** The downloads of a ready transcript. */
 export type TranscriptFile = 'transcript.md' | 'transcript.json';
@@ -66,14 +52,11 @@ export interface IceWire {
 /** The body of a JSON response, typed as the endpoint promises; the caller asserts it. */
 export const body = async <T>(response: Response): Promise<T> => (await response.json()) as T;
 
-/** A transcript status, checked by the transcript page's own parser; throws if the page could not read it. */
+/** A transcript status, checked by the web app's parser; throws if the app could not read it. */
 export async function transcriptStatusOf(response: Response): Promise<TranscriptStatusWire> {
-	const raw: unknown = await response.json();
-	const status = parseTranscriptStatus(raw);
-	if (status === null || status.status === 'not-found') {
-		throw new Error(`the transcript page cannot read this status: ${JSON.stringify(raw)}`);
-	}
-	return { ...status, progress: (raw as { progress: Progress }).progress };
+	const raw = await response.text();
+	const progress = (JSON.parse(raw) as { progress: Progress }).progress;
+	return { ...parseTranscriptStatus(raw), progress };
 }
 
 /** The `Cookie` request header for a response's first `Set-Cookie`, or "" if there is none. */

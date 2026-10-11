@@ -1,0 +1,23 @@
+[
+  {
+    "meeting": "amber-otter-ocean",
+    "room": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "createdAt": 1760000000000,
+    "transcript": "11111111111111111111111111111111",
+    "liveAt": 1760000100000,
+    "endedAt": 1760000200000
+  },
+  {
+    "meeting": "abide-acid-acorn",
+    "room": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "createdAt": 1760100000000,
+    "transcript": "22222222222222222222222222222222",
+    "endedAt": 1760100500000
+  },
+  {
+    "meeting": "amber-otter-ocean",
+    "room": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "createdAt": 1760200000000,
+    "transcript": "33333333333333333333333333333333"
+  }
+]

@@ -1,5 +1,5 @@
 /** Creating and looking up meetings over HTTP: `/api/new`, `/api/meeting/{words}`, `/api/ice`. */
-import { bearer, body, NO_AUTH, type IceWire, type MeetingInfoWire } from '../fixtures/api.ts';
+import { bearer, body, NO_AUTH, type IceWire, type MeetingLookup } from '../fixtures/api.ts';
 import { expect, test } from '../fixtures/test.ts';
 
 test.describe('POST /api/new', () => {
@@ -31,10 +31,9 @@ test.describe('GET /api/meeting/{words}', () => {
 		);
 		const response = await api.meeting(meeting);
 		expect(response.status).toBe(200);
-		expect(await body<MeetingInfoWire>(response)).toMatchObject({
+		expect(await body<MeetingLookup>(response)).toEqual({
 			recordingPolicy: 'fromStart',
-			phase: 'scheduled',
-			ended: false
+			phase: 'scheduled'
 		});
 		expect((await api.meeting(meeting.toUpperCase())).status, 'case-insensitive').toBe(200);
 	});

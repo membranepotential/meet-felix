@@ -156,6 +156,17 @@ earlier version had the room write live and ended marks into the index, and
 a mark got lost in the first real test, because KV updates are
 read-modify-write without atomicity.
 
+Changed on 2026-10-11: the page links a transcript only for a meeting that
+recorded; before, every ended meeting got a link, and for a meeting that never
+recorded it led to "There is no transcript behind this link". The room links
+the transcript token in KV when recording starts, so when a listing finds a
+meeting ended, it looks that link up and keeps the answer in the index. A link
+still missing five minutes after the end counts as never made, because KV may
+show a write in other locations only after 60 seconds or more
+([research 11](../research/11-gotchas-on-cloudflare.md)). The index is stored
+with a version since then, and the Worker still reads the unversioned list
+that earlier versions wrote.
+
 An empty name field on the pre-join screen is filled with the owner's name
 once the owner's session is present: there is exactly one owner
 ([D32](../architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)),

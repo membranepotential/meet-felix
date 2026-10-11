@@ -13,7 +13,10 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use meeting_core::http::ApiErrorCode;
 use worker::{Env, Request, Response, Result, console_error};
+
+use crate::reply;
 
 /// A rate limit and the binding that counts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +89,7 @@ pub async fn allows(env: &Env, limit: Limit, req: &Request) -> Result<bool> {
 
 /// The answer to a client over its limit: 429 with `Retry-After`.
 pub fn too_many_requests() -> Result<Response> {
-    let response = Response::error("too many requests", 429)?;
+    let response = reply::error(ApiErrorCode::RateLimited)?;
     response
         .headers()
         .set("Retry-After", &PERIOD_SECS.to_string())?;

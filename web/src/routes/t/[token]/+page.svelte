@@ -2,15 +2,14 @@
 	import { page } from '$app/state';
 	import CopyButton from '#lib/components/CopyButton.svelte';
 	import Icon from '#lib/components/Icon.svelte';
-	import type { ApiResult } from '#lib/api.ts';
 	import {
-		duration,
 		getTranscript,
-		minutes,
-		timeline,
 		transcriptFile,
+		type ApiResult,
+		type TranscriptLookup,
 		type TranscriptStatus
-	} from '#lib/transcript.ts';
+	} from '#lib/api.ts';
+	import { duration, minutes, timeline } from '#lib/transcript.ts';
 
 	/**
 	 * The transcript behind a link (D31). The heading is the meeting's words; one sentence
@@ -22,7 +21,7 @@
 
 	let token = $derived(page.params.token ?? '');
 	let url = $derived(page.url.href);
-	let result = $state<ApiResult<TranscriptStatus> | null>(null);
+	let result = $state<ApiResult<TranscriptLookup> | null>(null);
 
 	$effect(() => {
 		const current = token;
@@ -54,9 +53,12 @@
 	});
 
 	/** "9 October 2026, 14:03, 1 h 5 min." or, while it runs, "Started 9 October 2026, 14:03." */
-	function when(startedAt: number, endedAt: number | null): string {
+	function when(status: TranscriptStatus): string {
+		const { startedAt } = status;
 		const start = `${day.format(startedAt)}, ${clock.format(startedAt)}`;
-		return endedAt === null ? `Started ${start}.` : `${start}, ${duration(endedAt - startedAt)}.`;
+		return status.status === 'recording'
+			? `Started ${start}.`
+			: `${start}, ${duration(status.endedAt - startedAt)}.`;
 	}
 </script>
 
@@ -88,7 +90,7 @@
 		{@const status = result.value}
 		<header>
 			<h1>{status.meeting}</h1>
-			<p>{when(status.startedAt, status.endedAt)}</p>
+			<p>{when(status)}</p>
 		</header>
 
 		{#if status.status === 'recording'}
@@ -101,7 +103,7 @@
 				<Icon name="info" size={20} />
 				<span>
 					Transcribing, {minutes(status.progress.done)} of {minutes(status.progress.total)} minutes done.
-					{#if status.retryAt !== null}
+					{#if status.retryAt !== undefined}
 						The speech service has used up today’s allowance; this continues after midnight UTC, at
 						{dayAndTime.format(status.retryAt)}.
 					{/if}
@@ -117,7 +119,7 @@
 				{transcript.speakers.length > 0
 					? `Speakers: ${transcript.speakers.map((s) => s.label).join(', ')}.`
 					: 'Nobody spoke.'}
-				{#if audioUntil !== null && audioUntil > Date.now()}
+				{#if audioUntil > Date.now()}
 					The recorded audio is kept until {dayAndTime.format(audioUntil)}, 48 hours after the
 					meeting; the transcript stays until the host deletes it.
 				{:else}

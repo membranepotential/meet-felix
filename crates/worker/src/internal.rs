@@ -1,5 +1,5 @@
 //! The requests the router sends to a `RoomObject` and the room sends to its `RecorderObject`,
-//! besides forwarded WebSocket upgrades.
+//! besides forwarded WebSocket upgrades, and the ids the router addresses the objects by.
 
 use meeting_core::recording::{ConsentRecord, RosterEntry};
 use meeting_core::{
@@ -7,6 +7,7 @@ use meeting_core::{
     TrackName, TranscriptRef,
 };
 use serde::{Deserialize, Serialize};
+use worker::{Method, ObjectNamespace, Request, RequestInit, Response, Result, Stub};
 
 /// Origin of internal requests to a Durable Object; the object reads only the path.
 pub const ORIGIN: &str = "https://object";
@@ -21,7 +22,7 @@ pub const OWNER_HEADER: &str = "x-meet-owner";
 pub const OWNER_YES: &str = "1";
 
 /// Body of [`INIT`]. The transcript token also reaches the owner's meeting index
-/// (`crate::meetings`).
+/// ([`crate::meetings`]).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitRoom {
@@ -30,14 +31,13 @@ pub struct InitRoom {
     pub recording_policy: RecordingPolicy,
 }
 
-/// Body of [`INFO`]'s response, which the router passes on as `GET /api/meeting/:words`.
+/// Body of [`INFO`]'s response. The router answers `GET /api/meeting/:words` with it as a
+/// `meeting_core::http::MeetingLookup`, and the owner's list reads the phase.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomInfo {
     pub recording_policy: RecordingPolicy,
     pub phase: Phase,
-    /// Whether `phase` is [`Phase::Ended`]; kept for clients that read only this.
-    pub ended: bool,
 }
 
 impl RoomInfo {
@@ -45,7 +45,6 @@ impl RoomInfo {
         Self {
             recording_policy,
             phase,
-            ended: phase == Phase::Ended,
         }
     }
 }
@@ -107,4 +106,62 @@ pub struct UntrackRecording {
 pub struct FinishRecording {
     pub roster: Vec<RosterEntry>,
     pub consents: Vec<ConsentRecord>,
+}
+
+/// A `RoomObject`'s id as text (hex), as KV maps meeting words to it and the meeting index keeps
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RoomId(String);
+
+/// A `RecorderObject`'s id as text (hex), as KV maps a transcript token to it and an SFU
+/// adapter's URL names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecorderId(String);
+
+macro_rules! object_id {
+    ($id:ident) => {
+        impl $id {
+            /// Wraps an id the router stored or made; [`Self::stub`] checks it.
+            pub fn new(id: impl Into<String>) -> Self {
+                Self(id.into())
+            }
+
+            /// The object behind the id in `namespace`; an error if it is no id there.
+            pub fn stub(&self, namespace: &ObjectNamespace) -> Result<Stub> {
+                namespace.id_from_string(&self.0)?.get_stub()
+            }
+        }
+    };
+}
+
+object_id!(RoomId);
+object_id!(RecorderId);
+
+impl RoomId {
+    /// The id as KV stores it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// `GET path` to the object behind `stub`; the caller reads the status.
+pub async fn get(stub: &Stub, path: &str) -> Result<Response> {
+    stub.fetch_with_str(&format!("{ORIGIN}{path}")).await
+}
+
+/// `POST path` with `body` as JSON to the object behind `stub`; an error unless it answers 2xx.
+pub async fn post(stub: &Stub, path: &str, body: &impl Serialize) -> Result<Response> {
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_body(Some(serde_json::to_string(body)?.into()));
+    let response = stub
+        .fetch_with_request(Request::new_with_init(&format!("{ORIGIN}{path}"), &init)?)
+        .await?;
+    match response.status_code() {
+        200..300 => Ok(response),
+        status => Err(worker::Error::RustError(format!(
+            "{path} answered {status}"
+        ))),
+    }
 }

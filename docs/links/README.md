@@ -18,8 +18,12 @@ Code: [`crates/meeting-core/src/words.rs`](../../crates/meeting-core/src/words.r
 (the word list), [`crates/meeting-core/src/ids.rs`](../../crates/meeting-core/src/ids.rs)
 (`MeetingId`), [`crates/meeting-core/src/state.rs`](../../crates/meeting-core/src/state.rs)
 (`EMPTY_ROOM_TIMEOUT_MS`, `SCHEDULED_TTL_MS`), [`crates/meeting-core/src/protocol.rs`](../../crates/meeting-core/src/protocol.rs)
-(`Phase`), [`crates/worker/src/lib.rs`](../../crates/worker/src/lib.rs)
-(router, KV lookup, `POST /api/new`, `POST /api/login`, `/api/logout`, `/api/me`),
+(`Phase`), [`crates/meeting-core/src/http.rs`](../../crates/meeting-core/src/http.rs)
+(the HTTP API's bodies and error codes, from which the web app's TypeScript is generated),
+[`crates/worker/src/lib.rs`](../../crates/worker/src/lib.rs)
+(the routes), [`crates/worker/src/routes/`](../../crates/worker/src/routes/)
+(their handlers: `create.rs` for `POST /api/new`, `owner.rs` for `POST /api/login`,
+`/api/logout` and `/api/me`, `join.rs` for the KV lookup of meeting words),
 [`crates/worker/src/owner.rs`](../../crates/worker/src/owner.rs)
 (the owner's password and session cookie), [`crates/worker/src/room.rs`](../../crates/worker/src/room.rs)
 (`RoomObject`), [`crates/worker/src/random.rs`](../../crates/worker/src/random.rs)

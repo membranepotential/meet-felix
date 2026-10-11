@@ -5,7 +5,7 @@
  */
 import type { ParticipantView, RoomView } from '../../src/lib/protocol.ts';
 import type { RoomClient, ServerMsgOf } from '../fixtures/room-client.ts';
-import { body, createMeeting, type MeetingInfoWire } from '../fixtures/api.ts';
+import { body, createMeeting, type MeetingLookup } from '../fixtures/api.ts';
 import { joinAs, liveMeeting } from '../fixtures/meeting.ts';
 import { publishOffer } from '../fixtures/negotiation.ts';
 import { PING } from '../fixtures/room-client.ts';
@@ -44,9 +44,8 @@ test('a guest waits in a scheduled room until the owner joins as host; the room 
 	expect(guestWelcome.state.participants.find((p) => p.id === guestWelcome.you)?.role).toBe(
 		'guest'
 	);
-	expect(await body<MeetingInfoWire>(await api.meeting(meeting))).toMatchObject({
-		phase: 'live',
-		ended: false
+	expect(await body<MeetingLookup>(await api.meeting(meeting))).toMatchObject({
+		phase: 'live'
 	});
 });
 
