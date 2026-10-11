@@ -16,6 +16,9 @@
 //!   everyone in the room without consent is asked for it and muted, and is not recorded.
 //! - A [`RecordingPolicy::FromStart`] meeting starts recording when the first host joins.
 //! - Only hosts lock, admit, kick, mute, record and end.
+//! - A room holds at most [`MAX_PRESENT`] participants at once and [`MAX_ROSTER`] in all, those
+//!   who left included; beyond either, a new participant gets [`ErrorCode::RoomFull`]. A join
+//!   from the owner's socket and a resume are never refused.
 //! - Every change to the public [`RoomView`] reaches every joined client, so all of them see a
 //!   recording start; only consenting participants' audio is recorded.
 //! - Each participant has a publish session (the client offers) and a subscribe session (the SFU
@@ -81,8 +84,9 @@ pub use protocol::{
 };
 pub use shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 pub use state::{
-    EMPTY_ROOM_TIMEOUT_MS, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS, LEAVE_GRACE_MS,
-    NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS,
+    EMPTY_ROOM_TIMEOUT_MS, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS, LEAVE_GRACE_MS, MAX_PRESENT,
+    MAX_ROSTER, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState, SCHEDULED_TTL_MS,
+    SUBSCRIBE_RETRY_MS,
 };
 pub use step::step;
 #[cfg(feature = "wasm")]

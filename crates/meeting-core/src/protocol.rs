@@ -448,4 +448,7 @@ pub enum ErrorCode {
     PublishFailed,
     /// The SFU could not add remote tracks to your subscribe session.
     SubscribeFailed,
+    /// The room takes nobody new: it has as many participants as it allows at once, or in all
+    /// ([`crate::MAX_PRESENT`], [`crate::MAX_ROSTER`]). Your `Join` changed nothing.
+    RoomFull,
 }

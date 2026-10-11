@@ -168,6 +168,9 @@ impl RoomState {
                         self.resume(now, from, old, owner, fx);
                         return Ok(());
                     }
+                    if !owner && self.is_full() {
+                        return Err(ErrorCode::RoomFull);
+                    }
                     let role = if owner { Role::Host } else { Role::Guest };
                     self.participants.insert(
                         from,

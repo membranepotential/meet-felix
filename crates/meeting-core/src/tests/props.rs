@@ -1796,3 +1796,134 @@ fn random_sessions_reach_joined_publishing_recording_and_scheduled_rooms() {
          track not found {not_found}"
     );
 }
+
+/// What link holders do to a room's size: guests join from new sockets, participants leave or
+/// lose their socket, the owner joins, a host locks or unlocks.
+#[derive(Debug, Clone)]
+enum Crowd {
+    Guest { consent: bool },
+    Owner,
+    Leave(usize),
+    Drop(usize),
+    Lock(bool),
+}
+
+fn crowd() -> impl Strategy<Value = Crowd> {
+    prop_oneof![
+        6 => any::<bool>().prop_map(|consent| Crowd::Guest { consent }),
+        1 => Just(Crowd::Owner),
+        3 => any::<usize>().prop_map(Crowd::Leave),
+        1 => any::<usize>().prop_map(Crowd::Drop),
+        1 => any::<bool>().prop_map(Crowd::Lock),
+    ]
+}
+
+/// The `pick`-th of `who`, if any.
+fn nth(who: Vec<ParticipantId>, pick: usize) -> Option<ParticipantId> {
+    (!who.is_empty()).then(|| who[pick % who.len()])
+}
+
+/// Runs `actions` and checks the caps after every step; returns whether a join was refused
+/// because of [`crate::MAX_PRESENT`] and because of [`crate::MAX_ROSTER`].
+fn run_crowd(from_start: bool, actions: Vec<Crowd>) -> Result<(bool, bool), TestCaseError> {
+    let (mut room, _) = Room::with_policy(policy(from_start));
+    let (mut next, mut owner_joins) = (0, 0);
+    let (mut refused_present, mut refused_roster) = (false, false);
+    for action in actions {
+        let before = room.state.clone();
+        match action {
+            Crowd::Guest { consent } => {
+                next += 1;
+                let who = ParticipantId(next);
+                let effects = room.join(who, false, consent);
+                if before.is_full() {
+                    prop_assert_eq!(
+                        effects,
+                        vec![Effect::Send {
+                            to: who,
+                            msg: ServerMsg::Error {
+                                code: ErrorCode::RoomFull
+                            }
+                        }]
+                    );
+                    prop_assert_eq!(&room.state, &before, "a refused join changes nothing");
+                    refused_present |= before.present().count() >= crate::MAX_PRESENT;
+                    refused_roster |= before.participants.len() >= crate::MAX_ROSTER;
+                } else {
+                    prop_assert!(room.state.participants[&who].connection.presence().is_some());
+                }
+            }
+            Crowd::Owner => {
+                next += 1;
+                owner_joins += 1;
+                let who = ParticipantId(next);
+                room.join(who, true, true);
+                room.connect(who);
+                prop_assert!(
+                    room.state.participants[&who].connection.is_admitted(),
+                    "the owner always gets in"
+                );
+            }
+            Crowd::Leave(pick) => {
+                if let Some(who) = nth(room.state.present().collect(), pick) {
+                    room.client(who, ClientMsg::Leave);
+                }
+            }
+            Crowd::Drop(pick) => {
+                if let Some(who) = nth(room.state.present().collect(), pick) {
+                    room.apply(Event::SocketClosed { who });
+                }
+            }
+            Crowd::Lock(on) => {
+                let hosts = room
+                    .state
+                    .joined()
+                    .map(|(id, ..)| id)
+                    .filter(|id| room.state.participants[id].role == Role::Host)
+                    .collect();
+                if let Some(host) = nth(hosts, 0) {
+                    room.client(host, ClientMsg::Lock { on });
+                }
+            }
+        }
+        // Only the owner's joins may go beyond the caps.
+        prop_assert!(room.state.present().count() <= crate::MAX_PRESENT + owner_joins);
+        prop_assert!(room.state.participants.len() <= crate::MAX_ROSTER + owner_joins);
+    }
+    Ok((refused_present, refused_roster))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    #[test]
+    fn a_room_never_grows_beyond_its_caps(
+        from_start in any::<bool>(),
+        actions in proptest::collection::vec(crowd(), 1..1500),
+    ) {
+        run_crowd(from_start, actions)?;
+    }
+}
+
+/// The crowds above fill rooms to both caps; otherwise the property proves little.
+#[test]
+fn random_crowds_reach_both_caps() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let (mut present, mut roster) = (0, 0);
+    for case in 0..40 {
+        let actions = proptest::collection::vec(crowd(), 1000..1500)
+            .new_tree(&mut runner)
+            .expect("tree")
+            .current();
+        let (p, r) = run_crowd(case % 2 == 0, actions).expect("the caps hold");
+        present += usize::from(p);
+        roster += usize::from(r);
+    }
+    assert!(
+        present >= 20 && roster >= 20,
+        "refused at the present cap {present}, at the roster cap {roster}"
+    );
+}

@@ -47,6 +47,18 @@ pub const FIRST_PULL_RETRIES: u8 = 5;
 /// in doubt gets one minute under either rule.
 pub const LEAVE_GRACE_MS: u64 = 60 * 1000;
 
+/// How many participants may be in the room at once, those waiting outside included. A new
+/// participant beyond it gets [`crate::ErrorCode::RoomFull`], unless they join from the owner's
+/// socket: a host is never locked out of their own room.
+pub const MAX_PRESENT: usize = 20;
+
+/// How many participants the room keeps in all, those who left included, as the roster keeps
+/// their names for the transcript. A new participant beyond it gets
+/// [`crate::ErrorCode::RoomFull`], unless they join from the owner's socket. It bounds the
+/// stored record, which every step reads and writes whole, so that a script that joins and
+/// leaves in a loop cannot grow it towards the storage limit or the CPU limit per event.
+pub const MAX_ROSTER: usize = 200;
+
 /// The version of the recording notice the pre-join screen shows; a consent records it. Raise it
 /// whenever the notice's text changes in substance.
 pub const NOTICE_VERSION: u32 = 1;
@@ -432,6 +444,12 @@ impl RoomState {
             .iter()
             .filter(|(_, p)| p.connection.presence().is_some())
             .map(|(&id, _)| id)
+    }
+
+    /// Whether the room takes no new participant from a socket other than the owner's: it has
+    /// [`MAX_PRESENT`] participants, or [`MAX_ROSTER`] in all.
+    pub(crate) fn is_full(&self) -> bool {
+        self.participants.len() >= MAX_ROSTER || self.present().count() >= MAX_PRESENT
     }
 
     /// Every track a joined participant publishes.

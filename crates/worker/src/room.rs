@@ -17,8 +17,8 @@ use std::collections::VecDeque;
 
 use meeting_core::recording::{ConsentRecord, RosterEntry};
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
-    RecordingPolicy, RoomState, ServerMsg, SfuReply, TranscriptRef,
+    ClientMsg, Effect, ErrorCode, Event, FailureCause, MAX_PRESENT, MeetingId, Millis,
+    ParticipantId, RecordingPolicy, RoomState, ServerMsg, SfuReply, TranscriptRef,
 };
 use serde::Serialize;
 use sfu_api::{Failure, failure_reply};
@@ -53,6 +53,11 @@ const PONG: &str = r#"{"type":"pong"}"#;
 /// Upper bound on SFU effects one handler carries out, including those that follow from SFU
 /// replies. The core never chains more than a few; this only stops a runaway loop.
 const MAX_SFU_CALLS: usize = 64;
+
+/// How many sockets a room keeps open besides the owner's: two per participant the core takes
+/// at once ([`MAX_PRESENT`]), for a client that resumes on a new socket before the room noticed
+/// that its old one is gone.
+const MAX_OPEN_SOCKETS: usize = 2 * MAX_PRESENT;
 
 /// Close code for sockets the room closes: normal closure.
 const CLOSE_NORMAL: u16 = 1000;
@@ -238,13 +243,18 @@ impl RoomObject {
     }
 
     /// Accepts a socket for a scheduled or running meeting and gives it the next participant
-    /// id; `owner` says whether the router verified the owner's session on it.
+    /// id; `owner` says whether the router verified the owner's session on it. Refuses a socket
+    /// that is not the owner's while [`MAX_OPEN_SOCKETS`] are open, so nobody can hold more
+    /// sockets than the core takes participants.
     async fn accept(&self, owner: bool) -> Result<Response> {
         let open = match self.load().await? {
             None => return Response::error("unknown meeting", 404),
             Some(Record::Ended(_)) => return Response::error("meeting ended", 410),
             Some(Record::Open(open)) => open,
         };
+        if !owner && self.open_sockets().count() >= MAX_OPEN_SOCKETS {
+            return Response::error("the meeting is full", 429);
+        }
         let alarm = open.alarm;
         let (record, participant) = open.connect();
         self.store(&record).await?;

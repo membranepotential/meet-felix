@@ -658,6 +658,84 @@ fn ending_tells_everyone_and_releases_the_link() {
 }
 
 #[test]
+fn a_full_room_refuses_new_guests_but_never_the_owner_or_a_resume() {
+    let mut room = meeting_room();
+    let guest_token = room
+        .client(GUEST, ClientMsg::Join {
+            name: name("P2"),
+            consent: true,
+            resume: None,
+        })
+        .into_iter()
+        .find_map(|e| match e {
+            Effect::Send {
+                msg: ServerMsg::Welcome { resume, .. },
+                ..
+            } => Some(resume),
+            _ => None,
+        })
+        .expect("a repeated join is welcomed again");
+    let mut next = 10;
+    let mut join = |room: &mut Room, owner: bool| {
+        next += 1;
+        (ParticipantId(next), room.join(ParticipantId(next), owner, true))
+    };
+    // Fill the room up to the cap with guests; the room holds the host and the guest already.
+    for _ in 2..crate::MAX_PRESENT {
+        let (who, _) = join(&mut room, false);
+        assert_eq!(presence(&room, who), Some(Presence::Connecting));
+    }
+    assert_eq!(room.state.present().count(), crate::MAX_PRESENT);
+    let before = room.state.clone();
+    let (refused, effects) = join(&mut room, false);
+    assert_eq!(effects, error(refused, ErrorCode::RoomFull));
+    assert_eq!(room.state, before, "a refused join changes nothing");
+    // A resume takes a place the room holds already.
+    let resumed = room.client(
+        ParticipantId(99),
+        ClientMsg::Join {
+            name: name("P2"),
+            consent: true,
+            resume: Some(guest_token),
+        },
+    );
+    assert!(resumed.contains(&Effect::Rebind {
+        socket: ParticipantId(99),
+        participant: GUEST
+    }));
+    // The owner's socket always gets in.
+    let (owner, _) = join(&mut room, true);
+    assert_eq!(presence(&room, owner), Some(Presence::Connecting));
+    // Someone leaving frees a place.
+    room.client(GUEST, ClientMsg::Leave);
+    room.client(owner, ClientMsg::Leave);
+    let (guest, effects) = join(&mut room, false);
+    assert_ne!(effects, error(guest, ErrorCode::RoomFull));
+    assert_eq!(presence(&room, guest), Some(Presence::Connecting));
+}
+
+#[test]
+fn a_room_refuses_new_guests_once_its_roster_is_full() {
+    let mut room = meeting_room();
+    let mut next = 10;
+    while room.state.participants.len() < crate::MAX_ROSTER {
+        next += 1;
+        let who = ParticipantId(next);
+        room.join(who, false, true);
+        room.client(who, ClientMsg::Leave);
+    }
+    assert_eq!(room.state.present().count(), 2);
+    let (refused, owner) = (ParticipantId(next + 1), ParticipantId(next + 2));
+    assert_eq!(
+        room.join(refused, false, true),
+        error(refused, ErrorCode::RoomFull)
+    );
+    room.join(owner, true, true);
+    assert_eq!(presence(&room, owner), Some(Presence::Connecting));
+    assert_eq!(room.state.participants.len(), crate::MAX_ROSTER + 1);
+}
+
+#[test]
 fn only_those_let_in_get_the_transcript_link_at_the_end() {
     const KNOCKING: ParticipantId = ParticipantId(4);
     const DECLINED: ParticipantId = ParticipantId(5);

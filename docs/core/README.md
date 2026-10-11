@@ -179,6 +179,18 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
 - A meeting with `RecordingPolicy::FromStart` starts recording when the first
   host joins; with `HostDecides`, only `SetRecording` starts it.
 - Only hosts lock, admit, kick, mute, record and end.
+- A room holds at most `MAX_PRESENT` (20) participants at once, those
+  waiting outside included, and `MAX_ROSTER` (200) in all, those who left
+  included (2026-10-11). Beyond either, a new participant's `Join` gets
+  `Error { RoomFull }` and changes nothing. A join from the owner's socket and
+  a resume are never refused, so a host is never locked out. Why: the room
+  record keeps everyone who ever joined for the transcript's roster, and every
+  step reads and writes it whole, so without a cap one link holder could join
+  and leave in a loop until the record outgrows the storage limit or the CPU
+  limit per event, and stuff a room with knocking strangers. The numbers are
+  a judgement for a personal meeting app, not measured limits. The
+  `RoomObject` also refuses a WebSocket upgrade that is not the owner's while
+  `2 × MAX_PRESENT` sockets are open (HTTP 429).
 - Every participant's microphone switch is part of the room state
   (`ParticipantView::muted`), so every client shows who is muted
   (2026-10-10). A client reports its own switch with `SetMuted`. A host's
@@ -403,6 +415,11 @@ after every step that:
   every joined client first;
 - the transcript link in `Ended` reaches only participants who were let in
   (2026-10-11);
+- a room never holds more than `MAX_PRESENT` participants at once or
+  `MAX_ROSTER` in all, except for joins from the owner's socket; a refused
+  join changes nothing and gets `RoomFull`, and the owner always gets in (a
+  separate property test with crowds of up to 1,500 joins, leaves and drops
+  that reach both caps, 2026-10-11);
 - no guest is admitted without consent while the room records; whoever is in
   the room without consent while it records got `ConsentRequired` and
   `Muted`; and exactly the consenting joined speakers' current audio is
