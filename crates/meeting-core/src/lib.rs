@@ -59,6 +59,7 @@
 //! and `validateMeetingId`, `generateMeetingId`, `parseServerMsg` and `encodeClientMsg` are
 //! exported through `wasm-bindgen`.
 
+pub mod http;
 mod ids;
 mod protocol;
 pub mod recording;
