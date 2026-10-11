@@ -227,9 +227,7 @@ impl Inner {
             },
         };
         self.save(recorder).await?;
-        self.ended.set(true);
-        self.end_streams(&closed);
-        self.finish_all_captures();
+        self.end_all_streams();
         self.close_sfu_adapters(&closed).await;
         console_log!(
             "recorder {}: meeting ended, transcript job starts",

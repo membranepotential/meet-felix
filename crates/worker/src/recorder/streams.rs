@@ -13,7 +13,7 @@ use worker::{
 use super::capture::{Capture, Note};
 use super::opus::{ogg_opus, spooled_packets};
 use super::packet::Packet;
-use super::state::{chunk_key, secret_matches};
+use super::state::{Adapter, chunk_key, secret_matches};
 use super::store::{ChunkId, ChunkState};
 use super::{CLOSE_NORMAL, Inner, not_found};
 use crate::now;
@@ -24,11 +24,36 @@ const MAX_UPLOADS: usize = 2;
 /// An adapter stream: speaker and adapter generation.
 pub(super) type StreamKey = (ParticipantId, u32);
 
-/// The attachment of an adapter's socket.
+/// The attachment of an adapter's socket: the stream it carries. A socket the recorder let go
+/// ([`release`]) has none, so a message that still arrives on it is ignored, and its close
+/// event does not end the stream's capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct StreamTag {
     who: ParticipantId,
     generation: u32,
+}
+
+/// The stream `ws` carries, unless the recorder let it go.
+fn stream_of(ws: &WebSocket) -> Option<StreamKey> {
+    match ws.deserialize_attachment::<StreamTag>() {
+        Ok(tag) => tag.map(|StreamTag { who, generation }| (who, generation)),
+        Err(e) => {
+            console_warn!("recorder: unreadable socket attachment: {e}");
+            None
+        }
+    }
+}
+
+/// Lets a socket go: removes its stream, so nothing it still sends is recorded, then closes it.
+/// Removing the stream first matters, because messages can arrive until the adapter answers
+/// the close, and the attachment survives hibernation and eviction.
+fn release(ws: &WebSocket, reason: &str) {
+    if let Err(e) = ws.serialize_attachment(Option::<StreamTag>::None) {
+        console_warn!("recorder: detaching a socket failed: {e}");
+    }
+    if let Err(e) = ws.close(Some(CLOSE_NORMAL), Some(reason)) {
+        console_warn!("recorder: close failed: {e}");
+    }
 }
 
 /// What the recorder holds in memory; an eviction loses it, and the spool and the chunk states
@@ -64,9 +89,11 @@ fn stream_path(path: &str) -> Option<(&str, StreamKey)> {
 
 impl Inner {
     /// Accepts an adapter's WebSocket for `/rec/{recorder}/{secret}/{who}/{generation}` if the
-    /// secret matches and the adapter is open.
+    /// secret matches and the adapter is open. The stream's earlier socket, if any, is let go:
+    /// the adapter reconnects after a dropped connection, so the newer socket is the live one,
+    /// and with one socket per stream the packets of two connections never interleave.
     pub(super) async fn accept(&self, path: &str) -> Result<Response> {
-        let Some((secret, (who, generation))) = stream_path(path) else {
+        let Some((secret, key @ (who, generation))) = stream_path(path) else {
             return not_found();
         };
         let Some(recorder) = self.load().await? else {
@@ -82,6 +109,9 @@ impl Inner {
         {
             return Response::error("adapter closed", 410);
         }
+        for ws in self.sockets_of(&[key]) {
+            release(&ws, "replaced by a newer connection");
+        }
         let WebSocketPair { client, server } = WebSocketPair::new()?;
         self.state.accept_web_socket(&server);
         server.serialize_attachment(StreamTag { who, generation })?;
@@ -91,21 +121,13 @@ impl Inner {
     /// One adapter message: runs it through the stream's capture and stores what comes out.
     /// Synchronous on purpose: no other event runs in between, and no I/O is awaited.
     pub(super) fn on_message(self: &Rc<Self>, ws: &WebSocket, bytes: &[u8]) {
-        let Ok(Some(StreamTag { who, generation })) = ws.deserialize_attachment::<StreamTag>()
-        else {
+        let Some(key @ (who, generation)) = stream_of(ws) else {
             return;
         };
-        if self.ended.get() {
-            if let Err(e) = ws.close(Some(CLOSE_NORMAL), Some("the meeting ended")) {
-                console_warn!("recorder: close failed: {e}");
-            }
-            return;
-        }
         let Ok(packet) = Packet::decode(bytes) else {
             console_warn!("recorder: malformed packet from {who:?}");
             return;
         };
-        let key = (who, generation);
         let now = now();
         if !self.live.borrow().streams.contains_key(&key) {
             // First message since the stream began or since an eviction: chunks the previous
@@ -140,29 +162,46 @@ impl Inner {
     }
 
     pub(super) fn socket_gone(self: &Rc<Self>, ws: &WebSocket) {
-        if let Ok(Some(StreamTag { who, generation })) = ws.deserialize_attachment::<StreamTag>() {
-            self.finish_capture((who, generation));
+        if let Some(key) = stream_of(ws) {
+            self.finish_capture(key);
         }
     }
 
-    /// Closes the chunks and sockets of the adapters' streams.
-    pub(super) fn end_streams(self: &Rc<Self>, adapters: &[super::state::Adapter]) {
-        for adapter in adapters {
-            let key = (adapter.who, adapter.generation);
+    /// The sockets that carry one of `streams`.
+    fn sockets_of(&self, streams: &[StreamKey]) -> Vec<WebSocket> {
+        self.state
+            .get_websockets()
+            .into_iter()
+            .filter(|ws| stream_of(ws).is_some_and(|key| streams.contains(&key)))
+            .collect()
+    }
+
+    /// Closes the chunks and lets go of the sockets of the adapters' streams. Every path that
+    /// closes an adapter (an untrack, a stop, a newer track, the end) comes here, so a stream
+    /// whose adapter is closed records nothing more.
+    pub(super) fn end_streams(self: &Rc<Self>, adapters: &[Adapter]) {
+        let keys: Vec<StreamKey> = adapters.iter().map(|a| (a.who, a.generation)).collect();
+        for &key in &keys {
             self.finish_capture(key);
-            for ws in self.state.get_websockets() {
-                if let Ok(Some(tag)) = ws.deserialize_attachment::<StreamTag>()
-                    && (tag.who, tag.generation) == key
-                    && let Err(e) = ws.close(Some(CLOSE_NORMAL), Some("recording stopped"))
-                {
-                    console_warn!("recorder: close failed: {e}");
-                }
+        }
+        for ws in self.sockets_of(&keys) {
+            release(&ws, "recording stopped");
+        }
+    }
+
+    /// Closes every chunk and lets go of every socket: the meeting ended, and no audio after
+    /// the end is recorded.
+    pub(super) fn end_all_streams(self: &Rc<Self>) {
+        self.finish_all_captures();
+        for ws in self.state.get_websockets() {
+            if stream_of(&ws).is_some() {
+                release(&ws, "the meeting ended");
             }
         }
     }
 
     /// Ends every capture still in memory, closing their open chunks.
-    pub(super) fn finish_all_captures(self: &Rc<Self>) {
+    fn finish_all_captures(self: &Rc<Self>) {
         let open: Vec<StreamKey> = self.live.borrow().streams.keys().copied().collect();
         for key in open {
             self.finish_capture(key);

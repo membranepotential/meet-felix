@@ -52,6 +52,9 @@ impl Inner {
         };
         let response = Response::ok(text)?;
         response.headers().set("Content-Type", content_type)?;
+        response
+            .headers()
+            .set("X-Content-Type-Options", "nosniff")?;
         response.headers().set(
             "Content-Disposition",
             &format!(

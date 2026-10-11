@@ -262,8 +262,17 @@ As built (2026-10-09):
   are deleted after the `put` succeeds. A failed upload is retried after 2 s,
   10 s, then 60 s; after five failures the chunk is lost and shows as missing
   audio. A chunk with nothing in its spool (evicted within 1.5 s of its start)
-  is skipped, never uploaded or transcribed. Once the meeting ended, the
-  recorder refuses further adapter messages and closes their sockets.
+  is skipped, never uploaded or transcribed.
+- A stream has one socket at a time (2026-10-11, audit wave 2). A second
+  upgrade for the same `{who}/{generation}` replaces the first: the adapter
+  reconnects after a dropped connection, so the newer socket is the live one,
+  and the packets of two connections never interleave in one chunk. When the
+  recorder closes an adapter (an untrack, a stop, a newer track, the end), it
+  removes the stream from the socket's attachment before closing it, so a
+  message that still arrives is ignored; the attachment survives hibernation
+  and eviction, unlike the in-memory flag that did this for the end until
+  then. At the end it lets go of every socket, so no audio after the end is
+  recorded.
 - R2 layout: audio under `audio/{recorder}/{who}/{generation}-{index}.ogg`
   with custom metadata `startMs`, `durationMs`, `silent`, `who`, `n`;
   transcripts under `transcripts/{recorder}/transcript.json|md`. The two

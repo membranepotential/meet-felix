@@ -67,9 +67,9 @@ impl Inner {
         waiting_since: Option<Millis>,
         now: Millis,
     ) -> Result<Option<Millis>> {
-        // Streams still in memory (a socket the SFU has not closed yet) end here, not when the
-        // socket goes.
-        self.finish_all_captures();
+        // `finish` let go of every stream already; this repeats it in case the object went
+        // between storing the end and doing so.
+        self.end_all_streams();
         self.recover(now);
         let closed = self.store.chunks_in(ChunkState::Closed, u32::MAX)?;
         if !closed.is_empty() {

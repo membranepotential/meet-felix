@@ -40,7 +40,7 @@ mod store;
 mod streams;
 mod whisper;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use meeting_core::Millis;
@@ -77,9 +77,6 @@ struct Inner {
     store: Store,
     /// Lost on eviction; the spool and the chunk states in `store` make up for it.
     live: RefCell<Live>,
-    /// Whether the meeting ended, so late adapter messages are refused. Set by `/end` and by the
-    /// alarm, which also runs first after an eviction.
-    ended: Cell<bool>,
 }
 
 impl DurableObject for RecorderObject {
@@ -91,7 +88,6 @@ impl DurableObject for RecorderObject {
                 env,
                 store,
                 live: RefCell::default(),
-                ended: Cell::new(false),
             }),
         }
     }
@@ -207,10 +203,7 @@ impl Inner {
         };
         match recorder.phase.clone() {
             RecorderPhase::Recording => self.look_after(&mut recorder, now).await,
-            RecorderPhase::Ended { at, job } => {
-                self.ended.set(true);
-                self.run_job(&mut recorder, at, job, now).await
-            }
+            RecorderPhase::Ended { at, job } => self.run_job(&mut recorder, at, job, now).await,
         }
     }
 }
