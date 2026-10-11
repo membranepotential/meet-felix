@@ -658,11 +658,11 @@ already treated as final: such a client stops on `Outdated` and shows its
 reason, "This page is out of date. Reload it to join the meeting." A current
 client reloads the page itself, at most once in five minutes per tab, so a
 cached old app cannot make it loop; otherwise the end screen asks the user.
-The web client starts its reconnect backoff over only once the room placed
-the participant (`Welcome` or `Waiting`), so a join the room keeps refusing
-is retried less and less often, up to every 10 seconds; `ConsentRequired`
-does not count, because a host gets it before the room asks the SFU for
-sessions (2026-10-11).
+The web client starts its reconnect backoff over once the room placed the
+participant (`Welcome` or `Waiting`), or once the socket has stayed open for
+5 seconds without an error from the room; `ConsentRequired` alone does not
+count, so a join the SFU refuses is retried less and less often, up to every
+10 seconds (2026-10-11).
 
 Why: the client keyed "do not come back" on 4000–4099, but the room closed
 every socket with 1000 or 1001, so the rule never applied, and a join the SFU
