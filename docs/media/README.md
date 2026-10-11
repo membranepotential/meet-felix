@@ -52,8 +52,9 @@ Facts checked on 2026-10-09 ([01 §1](../research/01-hosting-and-media-platforms
   Cloudflare for credentials valid for 6 hours (24 hours until 2026-10-11;
   `TURN_TTL_SECS` in `crates/worker/src/ice.rs`; `POST
   /v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers` with the
-  secret `TURN_KEY_API_TOKEN`) and hands the servers to the browser, minus
-  the URLs on port 53, which browsers block
+  secret `TURN_KEY_API_TOKEN`) and hands the servers to the browser, with
+  `ttl`, the seconds the credentials stay valid, minus the URLs on port 53,
+  which browsers block
   ([Generate credentials](https://developers.cloudflare.com/realtime/turn/generate-credentials/),
   checked 2026-10-09). TURN traffic is billed, so the route answers only for
   a meeting that exists (404 otherwise). Without the two secrets, if the
@@ -61,10 +62,11 @@ Facts checked on 2026-10-09 ([01 §1](../research/01-hosting-and-media-platforms
   only; the browser gives up after 4 seconds and uses STUN. A phone on
   mobile data may need TURN to reach the SFU.
 - The web client keeps the servers fresh for the whole stay (2026-10-11,
-  `IceServers` in `web/src/lib/media/ice.ts`). It fetches them again 5 hours
-  after a set with TURN, 5 minutes after a set without TURN, 60 seconds
-  after the rate limit refused it (the limit's window, which the Worker
-  also sends as `Retry-After`), 30 seconds after any other failure, and at
+  `IceServers` in `web/src/lib/media/ice.ts`). It fetches them again an hour
+  before a set with TURN expires by its `ttl` (after half the `ttl` if that
+  is sooner, and after 5 hours from a Worker that sends no `ttl`), 5 minutes
+  after a set without TURN, after the `Retry-After` of a rate-limit refusal
+  (60 seconds without one), 30 seconds after any other failure, and at
   once when the signaling socket is welcomed back after a failure. Every
   peer connection opened later uses the latest set, and the open ones get it
   with `setConfiguration`, which a browser applies from the connection's next

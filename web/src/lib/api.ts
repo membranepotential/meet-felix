@@ -42,7 +42,8 @@ export type TranscriptLookup = TranscriptStatus | { status: 'not-found' };
 export type ApiError =
 	| { kind: 'network' }
 	| { kind: 'unauthorized' }
-	| { kind: 'rate-limited' }
+	/** `retryAfterMs`: when to try again, from the Worker's `Retry-After`; `null` without one. */
+	| { kind: 'rate-limited'; retryAfterMs: number | null }
 	/**
 	 * Any other refusal or failure. `code` is the Worker's error code; `null` if the answer is
 	 * not the Worker's error body: another server answered, or a Worker without the route.
@@ -73,6 +74,12 @@ const json =
  * static app's fallback page served for an `/api` route the Worker does not have yet.
  */
 const noContent: Reader<void> = async (response) => (response.status === 204 ? undefined : null);
+
+/** `Retry-After` in milliseconds, if it is a number of seconds, as the Worker sends it. */
+function retryAfter(response: Response): number | null {
+	const value = response.headers.get('Retry-After')?.trim() ?? '';
+	return /^\d+$/.test(value) ? Number(value) * 1000 : null;
+}
 
 /** The code in the Worker's error body, or `null` if the body is not one. */
 async function errorCode(response: Response): Promise<ApiErrorCode | null> {
@@ -110,7 +117,7 @@ async function request<T>(
 			case 'crossOrigin':
 				return fail({ kind: 'unauthorized' });
 			case 'rateLimited':
-				return fail({ kind: 'rate-limited' });
+				return fail({ kind: 'rate-limited', retryAfterMs: retryAfter(response) });
 			default:
 				return fail({ kind: 'server', status: response.status, code });
 		}
@@ -219,19 +226,33 @@ const isIceServer = (value: unknown): value is RTCIceServer => {
  */
 export const ICE_TIMEOUT_MS = 4_000;
 
+/** The ICE servers the Worker hands out. */
+export interface IceConfig {
+	servers: RTCIceServer[];
+	/**
+	 * How long the TURN credentials among `servers` stay valid from now, in milliseconds;
+	 * `null` with STUN only, or from a Worker that does not say.
+	 */
+	ttlMs: number | null;
+}
+
 /**
  * STUN and TURN servers with short-lived TURN credentials, for a participant of `meeting`
  * (the Worker hands TURN credentials only to known meetings). Fails after `ICE_TIMEOUT_MS`.
  */
-export function getIceServers(meeting: MeetingId): Promise<ApiResult<RTCIceServer[]>> {
+export function getIceServers(meeting: MeetingId): Promise<ApiResult<IceConfig>> {
 	return request(
 		`/api/ice?meeting=${encodeURIComponent(meeting)}`,
 		{ signal: AbortSignal.timeout(ICE_TIMEOUT_MS) },
 		async (response) => {
 			const body: unknown = await response.json().catch(() => null);
-			return isObject(body) && Array.isArray(body.iceServers) && body.iceServers.every(isIceServer)
-				? body.iceServers
-				: null;
+			if (!isObject(body)) return null;
+			const { iceServers, ttl } = body;
+			const servers =
+				Array.isArray(iceServers) && iceServers.every(isIceServer) ? iceServers : null;
+			if (servers === null) return null;
+			if (ttl === undefined) return { servers, ttlMs: null };
+			return typeof ttl === 'number' && ttl > 0 ? { servers, ttlMs: ttl * 1000 } : null;
 		}
 	);
 }

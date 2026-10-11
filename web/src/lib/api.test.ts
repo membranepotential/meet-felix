@@ -22,10 +22,10 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-/** Answers every `fetch` with `body` and `status`, and records the requests. */
-function serve(status: number, body?: unknown) {
+/** Answers every `fetch` with `body`, `status` and `headers`, and records the requests. */
+function serve(status: number, body?: unknown, headers: HeadersInit = {}) {
 	const fetch = vi.fn(
-		async () => new Response(body === undefined ? null : JSON.stringify(body), { status })
+		async () => new Response(body === undefined ? null : JSON.stringify(body), { status, headers })
 	);
 	vi.stubGlobal('fetch', fetch);
 	return fetch;
@@ -37,7 +37,15 @@ const refusal = (code: ApiErrorCode) => ({ error: code });
 describe('errors', () => {
 	it('reads the code from the Worker, and takes any other answer as a bare status', async () => {
 		serve(429, refusal('rateLimited'));
-		expect(await listMeetings()).toEqual({ ok: false, error: { kind: 'rate-limited' } });
+		expect(await listMeetings()).toEqual({
+			ok: false,
+			error: { kind: 'rate-limited', retryAfterMs: null }
+		});
+		serve(429, refusal('rateLimited'), { 'Retry-After': '42' });
+		expect(await listMeetings()).toEqual({
+			ok: false,
+			error: { kind: 'rate-limited', retryAfterMs: 42_000 }
+		});
 		serve(403, refusal('crossOrigin'));
 		expect(await listMeetings()).toEqual({ ok: false, error: { kind: 'unauthorized' } });
 		serve(503, refusal('noFreeWords'));
@@ -228,14 +236,31 @@ describe('getTranscript', () => {
 });
 
 describe('getIceServers', () => {
-	it("asks for the meeting's servers and gives up after the timeout", async () => {
+	it("asks for the meeting's servers, with the TURN credentials' lifetime", async () => {
 		const servers = [{ urls: ['stun:stun.cloudflare.com:3478'] }];
 		const fetch = serve(200, { iceServers: servers });
-		expect(await getIceServers('abide-acid-acorn')).toEqual({ ok: true, value: servers });
+		expect(await getIceServers('abide-acid-acorn')).toEqual({
+			ok: true,
+			value: { servers, ttlMs: null }
+		});
 		const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
 		expect(url).toBe('/api/ice?meeting=abide-acid-acorn');
 		expect(init.signal).toBeInstanceOf(AbortSignal);
 
+		const turn = [{ urls: ['turns:turn.cloudflare.com:443'], username: 'u', credential: 'c' }];
+		serve(200, { iceServers: turn, ttl: 21_600 });
+		expect(await getIceServers('abide-acid-acorn')).toEqual({
+			ok: true,
+			value: { servers: turn, ttlMs: 21_600_000 }
+		});
+		serve(200, { iceServers: turn, ttl: 'soon' });
+		expect(await getIceServers('abide-acid-acorn')).toEqual({
+			ok: false,
+			error: { kind: 'malformed' }
+		});
+	});
+
+	it('gives up after the timeout', async () => {
 		vi.useFakeTimers();
 		vi.stubGlobal(
 			'fetch',

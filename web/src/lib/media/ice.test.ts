@@ -1,29 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ApiResult } from '../api.ts';
+import type { ApiResult, IceConfig } from '../api.ts';
 import {
 	FAILED_RETRY_MS,
 	FALLBACK_ICE,
 	IceServers,
 	RATE_LIMITED_RETRY_MS,
-	REFRESH_MS,
 	refreshDelay,
-	STUN_ONLY_RETRY_MS
+	STUN_ONLY_RETRY_MS,
+	UNKNOWN_TTL_REFRESH_MS
 } from './ice.ts';
 
+const HOUR_MS = 60 * 60 * 1000;
 const turn = (credential: string): RTCIceServer[] => [
 	{ urls: ['stun:stun.cloudflare.com:3478'] },
 	{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential }
 ];
-const ok = (value: RTCIceServer[]): ApiResult<RTCIceServer[]> => ({ ok: true, value });
+const ok = (servers: RTCIceServer[], ttlMs: number | null = 6 * HOUR_MS): ApiResult<IceConfig> => ({
+	ok: true,
+	value: { servers, ttlMs }
+});
+const rateLimited = (retryAfterMs: number | null): ApiResult<IceConfig> => ({
+	ok: false,
+	error: { kind: 'rate-limited', retryAfterMs }
+});
 
 describe('refreshDelay', () => {
-	it('fetches TURN credentials again before they expire, and sooner after a failure', () => {
-		expect(refreshDelay(ok(turn('a')))).toBe(REFRESH_MS);
-		expect(REFRESH_MS).toBeLessThan(6 * 60 * 60 * 1000);
-		expect(refreshDelay(ok(FALLBACK_ICE))).toBe(STUN_ONLY_RETRY_MS);
-		expect(refreshDelay({ ok: false, error: { kind: 'rate-limited' } })).toBe(
-			RATE_LIMITED_RETRY_MS
-		);
+	it('fetches TURN credentials an hour before they expire, and sooner after a failure', () => {
+		expect(refreshDelay(ok(turn('a')))).toBe(5 * HOUR_MS);
+		// Credentials too short-lived for the margin are fetched again after half their life.
+		expect(refreshDelay(ok(turn('a'), HOUR_MS))).toBe(HOUR_MS / 2);
+		expect(refreshDelay(ok(turn('a'), null))).toBe(UNKNOWN_TTL_REFRESH_MS);
+		expect(refreshDelay(ok(FALLBACK_ICE, null))).toBe(STUN_ONLY_RETRY_MS);
+		expect(refreshDelay(rateLimited(15_000))).toBe(15_000);
+		expect(refreshDelay(rateLimited(null))).toBe(RATE_LIMITED_RETRY_MS);
 		expect(refreshDelay({ ok: false, error: { kind: 'network' } })).toBe(FAILED_RETRY_MS);
 	});
 });
@@ -39,8 +48,8 @@ describe('IceServers', () => {
 	});
 
 	it('falls back to STUN, then hands fresh servers to the open connections', async () => {
-		const answers: ApiResult<RTCIceServer[]>[] = [
-			{ ok: false, error: { kind: 'rate-limited' } },
+		const answers: ApiResult<IceConfig>[] = [
+			rateLimited(20_000),
 			ok(turn('first')),
 			ok(turn('second'))
 		];
@@ -50,21 +59,21 @@ describe('IceServers', () => {
 
 		expect(await ice.latest).toEqual(FALLBACK_ICE);
 		// The rate limit's window passes; the retry brings TURN.
-		await vi.advanceTimersByTimeAsync(RATE_LIMITED_RETRY_MS);
+		await vi.advanceTimersByTimeAsync(20_000);
 		expect(changes).toEqual([turn('first')]);
 		expect(await ice.latest).toEqual(turn('first'));
 		// Before the credentials expire, new ones replace them.
-		await vi.advanceTimersByTimeAsync(REFRESH_MS);
+		await vi.advanceTimersByTimeAsync(5 * HOUR_MS);
 		expect(await ice.latest).toEqual(turn('second'));
 		expect(fetch).toHaveBeenCalledTimes(3);
 
 		ice.dispose();
-		await vi.advanceTimersByTimeAsync(REFRESH_MS);
+		await vi.advanceTimersByTimeAsync(5 * HOUR_MS);
 		expect(fetch).toHaveBeenCalledTimes(3);
 	});
 
 	it('fetches at once on recovery only after a failure', async () => {
-		const answers: ApiResult<RTCIceServer[]>[] = [
+		const answers: ApiResult<IceConfig>[] = [
 			{ ok: false, error: { kind: 'network' } },
 			ok(turn('back'))
 		];

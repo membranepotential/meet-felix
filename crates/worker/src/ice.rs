@@ -3,9 +3,10 @@
 //! or if Cloudflare does not hand out credentials in time, STUN only.
 //!
 //! Anyone who knows an open meeting's words may fetch credentials, including a guest who waits
-//! for the host of a scheduled meeting, because the app fetches them once when someone joins.
+//! for the host of a scheduled meeting, because the app fetches them when someone joins.
 //! What bounds misuse of the billed relay is the per-client rate limit on the route
-//! (`limits::Limit::Public`) and the credentials' lifetime ([`TURN_TTL_SECS`]).
+//! (`limits::Limit::Public`) and the credentials' lifetime ([`TURN_TTL_SECS`]), which the answer
+//! states so the app fetches new credentials before they expire.
 
 use std::fmt;
 use std::pin::pin;
@@ -23,10 +24,10 @@ use worker::{
 const TURN_KEY_ID: &str = "TURN_KEY_ID";
 /// Secret: the TURN key's API token.
 const TURN_KEY_API_TOKEN: &str = "TURN_KEY_API_TOKEN";
-/// How long TURN credentials stay valid: 6 hours, for a long meeting plus the wait for its host.
-/// Cloudflare ends a relayed connection shortly after its credentials expire, and the app
-/// fetches them once per stay, so this must outlast the longest stay that relies on TURN
-/// (<https://developers.cloudflare.com/realtime/turn/faq/>, checked 2026-10-11).
+/// How long TURN credentials stay valid: 6 hours. Cloudflare ends a relayed connection shortly
+/// after its credentials expire (<https://developers.cloudflare.com/realtime/turn/faq/>, checked
+/// 2026-10-11); the app fetches new ones before, from the `ttl` in [`IceServersBody`], and hands
+/// them to its open connections.
 const TURN_TTL_SECS: u32 = 6 * 60 * 60;
 /// How long Cloudflare may take to generate credentials before the route serves STUN only. The
 /// browser gives up on the route after 4 seconds, so this answers first.
@@ -34,12 +35,41 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Cloudflare's free STUN server.
 const STUN_URL: &str = "stun:stun.cloudflare.com:3478";
 
-/// The body of `GET /api/ice`, and of Cloudflare's `generate-ice-servers` response
-/// (<https://developers.cloudflare.com/realtime/turn/generate-credentials/>, checked 2026-10-09).
+/// The servers of Cloudflare's `generate-ice-servers` response
+/// (<https://developers.cloudflare.com/realtime/turn/generate-credentials/>, checked 2026-10-09),
+/// and of the `GET /api/ice` answer ([`IceServersBody`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IceServers {
     ice_servers: Vec<IceServer>,
+}
+
+/// The body of `GET /api/ice`: `{"iceServers", "ttl"?}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IceServersBody {
+    #[serde(flatten)]
+    servers: IceServers,
+    /// For how many seconds from now the TURN credentials among the servers stay valid; absent
+    /// with STUN only. Added in 2026-10, so web apps from before ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<u32>,
+}
+
+impl IceServersBody {
+    fn stun_only() -> Self {
+        Self {
+            servers: IceServers::stun_only(),
+            ttl: None,
+        }
+    }
+
+    /// Servers with TURN credentials generated just now for [`TURN_TTL_SECS`].
+    fn with_turn(servers: IceServers) -> Self {
+        Self {
+            servers,
+            ttl: Some(TURN_TTL_SECS),
+        }
+    }
 }
 
 /// An `RTCIceServer`.
@@ -119,28 +149,31 @@ fn uses_port_53(url: &str) -> bool {
 
 /// The ICE servers to hand out: STUN plus TURN with fresh credentials, or STUN only (logged) if
 /// no TURN key is configured or Cloudflare does not generate credentials.
-pub async fn ice_servers(env: &Env) -> IceServers {
+pub async fn ice_servers(env: &Env) -> IceServersBody {
     let Some(key) = turn_key(env) else {
         console_warn!("{TURN_KEY_ID} or {TURN_KEY_API_TOKEN} is not set; serving STUN only");
-        return IceServers::stun_only();
+        return IceServersBody::stun_only();
     };
     let controller = AbortController::default();
     let signal = controller.signal();
     let generating = pin!(generate(&key, &signal));
     let timeout = pin!(Delay::from(TURN_TIMEOUT));
     match select(generating, timeout).await {
-        Either::Left((Ok(servers), _)) => servers.usable_in_browsers().unwrap_or_else(|| {
-            console_error!("TURN credentials came without a usable URL; serving STUN only");
-            IceServers::stun_only()
-        }),
+        Either::Left((Ok(servers), _)) => match servers.usable_in_browsers() {
+            Some(servers) => IceServersBody::with_turn(servers),
+            None => {
+                console_error!("TURN credentials came without a usable URL; serving STUN only");
+                IceServersBody::stun_only()
+            }
+        },
         Either::Left((Err(e), _)) => {
             console_error!("generating TURN credentials failed: {e}; serving STUN only");
-            IceServers::stun_only()
+            IceServersBody::stun_only()
         }
         Either::Right(((), _)) => {
             controller.abort();
             console_error!("no TURN credentials within {TURN_TIMEOUT:?}; serving STUN only");
-            IceServers::stun_only()
+            IceServersBody::stun_only()
         }
     }
 }
@@ -257,8 +290,16 @@ mod tests {
     #[test]
     fn the_stun_only_list_is_what_the_route_served_before() {
         assert_eq!(
-            serde_json::to_value(IceServers::stun_only()).expect("serializable"),
+            serde_json::to_value(IceServersBody::stun_only()).expect("serializable"),
             json!({ "iceServers": [{ "urls": ["stun:stun.cloudflare.com:3478"] }] })
         );
+    }
+
+    #[test]
+    fn turn_credentials_come_with_their_lifetime_beside_the_servers() {
+        let servers: IceServers = serde_json::from_value(generated()).expect("docs shape");
+        let body = serde_json::to_value(IceServersBody::with_turn(servers)).expect("serializable");
+        assert_eq!(body["ttl"], json!(6 * 60 * 60));
+        assert_eq!(body["iceServers"], generated()["iceServers"]);
     }
 }

@@ -10,7 +10,7 @@ const WORDING: ApiErrorWording = {
 describe('describeApiError', () => {
 	it('takes the parts that differ from the wording', () => {
 		expect(describeApiError({ kind: 'unauthorized' }, WORDING)).toBe(WORDING.unauthorized);
-		expect(describeApiError({ kind: 'rate-limited' }, WORDING)).toBe(
+		expect(describeApiError({ kind: 'rate-limited', retryAfterMs: 60_000 }, WORDING)).toBe(
 			'Too many new meetings in a short time. Wait a minute, then try again.'
 		);
 		expect(describeApiError({ kind: 'server', status: 500, code: 'internal' }, WORDING)).toBe(

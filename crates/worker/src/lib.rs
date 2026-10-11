@@ -14,9 +14,9 @@
 //! - `GET /api/meetings` (owner only) returns the owner's last meetings, newest first, as a
 //!   `Listing`.
 //! - `GET /api/meeting/:words` returns a `MeetingLookup`, or 404.
-//! - `GET /api/ice?meeting=:words` returns `{"iceServers"}` for `RTCPeerConnection` in a known
-//!   meeting, or 404: STUN, plus TURN with fresh credentials if the secrets `TURN_KEY_ID` and
-//!   `TURN_KEY_API_TOKEN` are set. TURN traffic is billed, and anyone who knows an open
+//! - `GET /api/ice?meeting=:words` returns `{"iceServers", "ttl"?}` for `RTCPeerConnection` in a
+//!   known meeting, or 404: STUN, plus TURN with fresh credentials if the secrets `TURN_KEY_ID`
+//!   and `TURN_KEY_API_TOKEN` are set, with `ttl`, the seconds they stay valid. TURN traffic is billed, and anyone who knows an open
 //!   meeting's words gets credentials, so the route is rate-limited and they expire after hours.
 //! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410, `meetingEnded`, once the
 //!   meeting ended).
