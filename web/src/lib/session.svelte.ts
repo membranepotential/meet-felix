@@ -13,13 +13,13 @@ import {
 	INITIAL,
 	over,
 	reduce,
-	syncMute,
 	type ClientState,
 	type Command,
 	type SessionEnd
 } from './client-state.ts';
 import type { LocalMedia } from './local-media.svelte.ts';
 import { MediaLink } from './media-link.svelte.ts';
+import { MuteReport } from './mute.ts';
 import { RemoteAudio } from './media/remote-audio.svelte.ts';
 import { holdWakeLock } from './media/wakelock.ts';
 import {
@@ -96,8 +96,7 @@ export class Session {
 	readonly #media: LocalMedia;
 	readonly #signaling: SignalingClient;
 	#join: JoinRequest;
-	/** The mute flag this client last got through to the room for its participant (`syncMute`). */
-	#reportedMuted: boolean | null = null;
+	readonly #mute: MuteReport;
 	#releaseWakeLock: () => void = () => {};
 	/** Stops what `start` runs while the session lives: publishing, the mic and mute effects, the `pagehide` leave. */
 	#stopEffects: () => void = () => {};
@@ -115,6 +114,10 @@ export class Session {
 			onMessage: (msg) => this.receive(msg),
 			onStatus: (status) => this.#onStatus(status)
 		});
+		this.#mute = new MuteReport(
+			(muted) => this.#signaling.send({ type: 'setMuted', muted }),
+			() => media.mute()
+		);
 		this.link = new MediaLink(
 			meeting,
 			(msg) => this.#signaling.send(msg),
@@ -144,11 +147,11 @@ export class Session {
 				})
 			);
 			// Everyone sees our mic switch. A report that could not go out (the socket was down)
-			// is made on the next welcome (`#syncMute`).
+			// is made on the next welcome.
 			$effect(() => {
-				const muted = !this.#media.micOn;
+				const { micOn } = this.#media;
 				untrack(() => {
-					if (this.stage.kind === 'in') this.#reportMuted(muted);
+					if (this.stage.kind === 'in') this.#mute.switched(micOn);
 				});
 			});
 		});
@@ -226,31 +229,11 @@ export class Session {
 				return;
 			case 'welcomed':
 				this.link.run(command);
-				this.#syncMute(command.fresh);
+				this.#mute.welcomed(command.fresh, this.me?.muted ?? false, this.#media.micOn);
 				return;
 			default:
 				this.link.run(command);
 		}
-	}
-
-	/** After a welcome, makes the mic switch and the room's mute flag agree (`syncMute`). */
-	#syncMute(fresh: boolean): void {
-		if (fresh) this.#reportedMuted = null;
-		const { micOn } = this.#media;
-		switch (syncMute(this.me?.muted ?? false, micOn, this.#reportedMuted)) {
-			case 'mute-mic':
-				this.#media.mute();
-				return;
-			case 'report':
-				this.#reportMuted(!micOn);
-				return;
-			case 'none':
-				return;
-		}
-	}
-
-	#reportMuted(muted: boolean): void {
-		if (this.#signaling.send({ type: 'setMuted', muted })) this.#reportedMuted = muted;
 	}
 
 	#sendJoin(): void {

@@ -7,10 +7,14 @@ vi.mock('./api.ts', () => ({
 	getIceServers: () => Promise.resolve({ ok: false, error: { kind: 'network' } })
 }));
 
-/** The parts of `RTCPeerConnection` a link uses while nothing is published or received. */
+/**
+ * The parts of `RTCPeerConnection` a link uses while nothing is published; a subscribe offer
+ * brings one transceiver, mid `0`.
+ */
 class FakePeerConnection extends EventTarget {
 	static all: FakePeerConnection[] = [];
 	connectionState: RTCPeerConnectionState = 'new';
+	localDescription: { sdp: string } | null = null;
 	closed = false;
 
 	constructor() {
@@ -25,6 +29,20 @@ class FakePeerConnection extends EventTarget {
 	fail(): void {
 		this.connectionState = 'failed';
 		this.dispatchEvent(new Event('connectionstatechange'));
+	}
+
+	async setRemoteDescription(): Promise<void> {}
+
+	getTransceivers() {
+		return [{ mid: '0', receiver: { track: { id: 'track-0' } } }];
+	}
+
+	async createAnswer() {
+		return { type: 'answer', sdp: 'answer' };
+	}
+
+	async setLocalDescription(): Promise<void> {
+		this.localDescription = { sdp: 'answer' };
 	}
 }
 
@@ -90,5 +108,20 @@ describe('MediaLink', () => {
 		FakePeerConnection.all[2]?.fail();
 		FakePeerConnection.all[2]?.fail();
 		expect(sent.slice(1)).toEqual([{ type: 'resetSession', kind: 'subscribe', epoch: 2 }]);
+	});
+
+	it('receives the tracks of the current subscribe connection and none after a reset', async () => {
+		link.run({ kind: 'welcomed', fresh: true, epochs: { publish: 1, subscribe: 1 } });
+		link.run({
+			kind: 'subscribe-offer',
+			sdp: 'offer',
+			tracks: [{ mid: '0', track: { owner: 2, kind: 'audio' } }]
+		});
+		await settle();
+		expect([...link.remote.keys()]).toEqual(['2:audio']);
+		expect(sent).toContainEqual({ type: 'subscribeAnswer', sdp: 'answer' });
+
+		link.run({ kind: 'subscribe-reset', epoch: 2 });
+		expect(link.remote.size).toBe(0);
 	});
 });

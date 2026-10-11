@@ -131,16 +131,17 @@ export type MuteSync = 'none' | 'mute-mic' | 'report';
 
 /**
  * After a welcome, how to make the local mic switch and the room's mute flag (`roomMuted`)
- * agree. `reported` is the flag this client last got through to the room for this participant,
- * `null` before the first. A switch the user made while the socket was down is reported. Any
- * other difference was made by the room, and muting wins: a host muted us, perhaps while the
- * socket was down, or the room records without our consent, so the mic goes off; a mic switched
- * off before joining is reported. Later switches are reported as they happen.
+ * agree. `known` is the flag the room held for us before, as far as this client knows (the last
+ * report that got through, or the last welcome's), `null` for a new participant. A switch the
+ * user made since, while the socket was down, is reported. Any other difference was made by the
+ * room, and muting wins: a host muted us, perhaps while the socket was down, or the room records
+ * without our consent, so the mic goes off; a mic switched off before joining is reported.
+ * Later switches are reported as they happen (`MuteReport` in `mute.ts`).
  */
-export function syncMute(roomMuted: boolean, micOn: boolean, reported: boolean | null): MuteSync {
+export function syncMute(roomMuted: boolean, micOn: boolean, known: boolean | null): MuteSync {
 	const muted = !micOn;
 	if (roomMuted === muted) return 'none';
-	if (reported !== null && reported !== muted) return 'report';
+	if (known !== null && known !== muted) return 'report';
 	return roomMuted ? 'mute-mic' : 'report';
 }
 
