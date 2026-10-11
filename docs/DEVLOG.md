@@ -3,6 +3,59 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-11 — Audit fixes, wave 1: P1s and security
+
+The codebase audit of 2026-10-11 found 4 P1 and 29 P2 findings; the owner
+asked to fix them, P1s and security first. Wave 1 ran as three branches
+with disjoint files, each reviewed independently before the merge.
+
+- **Room and recorder.**
+  - The transcript link goes only to participants who were let in, not to
+    guests still knocking, waiting or declining consent (D19).
+  - Recorder requests carry a number from the room, so a late `/track` can no
+    longer outlive a `/stop` or an `/untrack`. A `/stop` closes every adapter
+    whatever its number, a lost counter restarts from the clock, and requests
+    that overtake `/start` are kept (D15). Do not roll back across this
+    deploy (docs/recording).
+  - The recorder record and its SQL schema are versioned. Frozen JSON
+    fixtures pin every stored shape, including the ones production held.
+  - Rooms cap participants: 20 at once and 200 in all, with `RoomFull`; the
+    owner and resumes are exempt. Upgrades are never refused; a socket that
+    does not join closes after 10 s or when crowded out.
+  - An unchanged step writes nothing. Sockets have a message budget and
+    participants a write budget.
+  - transcript.md escapes HTML.
+- **Router.**
+  - Per-client rate limits with the Workers Rate Limiting binding: 60
+    requests a minute for meeting lookups, `/api/ice`, `/ws` and transcript
+    links; 10 owner-password attempts a minute, refusing even the right
+    password over the limit. `CREATE_SECRET` must have 20 characters.
+  - The session cookie is signed with a new secret, `SESSION_KEY`.
+  - Cookie-authenticated requests must be same-origin (403, or a guest join
+    for a WebSocket); `/api/new` needs JSON; `/api/*` is `no-store`.
+  - TURN credentials last 6 h instead of 24 h.
+  - A hash-mode CSP, `nosniff` and `frame-ancestors 'none'`. Minimum
+    browsers: Safari / iOS 16, Chrome 97, Firefox 102 (D14).
+  - D6, D7, D9 and D24 are updated.
+- **Web.** Camera and mic start only for a meeting the lookup reports as
+  open, and a capture that finishes after leaving is stopped. A full room is
+  final, with Try again. The error text, the host login card, screen tiles
+  and colour tokens are shared. `dropLegacySecrets` stays: old builds kept
+  the owner's password in `localStorage`.
+- **Not reproducible or kept:** the `PasswordField` `aria-hidden` finding (the
+  input is not focusable); P3-042 (the `expandedRef` reset guards a re-share
+  on a reused transceiver).
+- Deployed version f8cb9611 after setting `SESSION_KEY`. Production check:
+  CSP and `nosniff` sent, login and `/api/me` work, a cross-site
+  `POST /api/new` gets 403, and the custom domain answers 429 after 60
+  lookups, so `CF-Connecting-IP` survives the Pages front door.
+- Checks: worker 83, core 77, sfu-api 16, web 152, e2e 88 passed 3 skipped.
+- Next: wave 2 (reconnect loops and close codes, protocol version, ghost
+  participants, recorder retries and retention, HTTP types and errors), with
+  two items from the reviews: the web client fetches ICE servers once and
+  falls back to STUN for the whole stay on any failure, and each new socket
+  can push the room's alarm later.
+
 ## 2026-10-11 — Cleanup before publishing
 
 The repo is being prepared to go public while the owner's deployment keeps

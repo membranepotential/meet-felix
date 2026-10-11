@@ -81,6 +81,22 @@ publish answer that rejects some tracks, and get a late publish reply and a
 late subscribe reply while a newer negotiation runs, since otherwise the properties would prove little. There is
 no CI yet; phase 1 adds it, running these tests on every push.
 
+Worker unit tests (`cargo test -p meet-worker`) also pin the stored records:
+frozen JSON in [`crates/worker/fixtures/`](../crates/worker/fixtures/), where
+records in `current/` must store again byte for byte and records in `older/`
+(the shapes production held on 2026-10-11) must keep loading; the recorder
+record v1 → v2 and the SQL migration list; the room's write decision (skip an
+unchanged step, charge the writer, refuse over budget); the socket and
+participant budgets and the unbound-socket timeout and crowd-out; and recorder
+request ordering: all 5,040 arrival orders of a 7-request history never record
+more than in-order delivery, a `/stop` closes everything whatever its number,
+and requests that overtake `/start` are kept and applied. The core's property
+tests add the participant caps (64 cases of up to 1,500 actions, plus a check
+that both caps are reached). Web unit tests cover late `start()` and
+`startScreenShare()` after `dispose()` (`local-media.test.ts`), the shared
+error text (`api-messages.test.ts`) and `RoomFull` as final
+(`client-state.test.ts`).
+
 ## End-to-end tests (Playwright)
 
 The end-to-end tests live in [`web/e2e/`](../web/e2e/) and run with
@@ -256,6 +272,8 @@ Protocol layer (`web/e2e/protocol/`, Node only, about 25 s):
 | `failures.spec.ts` | A pull answered with 410 makes the room create a new session, send `SubscribeReset` with epoch 1, deliver the track on the new session and make no further call on the lost one; `ResetSession` answered with `PublishReset` or `SubscribeReset`, a stale epoch ignored; with the SFU down, joining fails with `SfuUnavailable` and the socket closes |
 | `meetings-list.spec.ts` | `GET /api/meetings`: 401 without or with a wrong secret, 200 with the cookie; newest first; an ended meeting with its transcript token, a never-joined one as `scheduled` |
 | `keepalive.spec.ts` | With `E2E_SLOW=1`: a socket that never pings is closed with 1001, a pinging one stays |
+| `request-guards.spec.ts` | `no-store` on `/api/*`; the origin rule for cookie-authenticated requests (403 cross-origin, 415 without JSON, bearer callers unaffected); a WebSocket with the owner cookie joins as host only same-origin (`Sec-Fetch-Site: same-origin` or a matching `Origin`) and as a guest otherwise; the static headers (`nosniff`, `frame-ancestors`, the meta CSP) |
+| `rate-limits.spec.ts` | Starts its own stack with the deployed limits and plays separate clients by sending `CF-Connecting-IP`, which local `wrangler dev` keeps: the public limit across meeting lookups, `/api/ice`, `/ws` and the transcript routes (429 with `Retry-After`, transcript privacy headers kept), the owner-password limit. All other stacks raise the limits to 1,000,000 a minute |
 
 Recorder project (`web/e2e/protocol/recorder.spec.ts`, tag `@recorder`, Node
 only, about 50 s; the `protocol` project skips it):
@@ -273,6 +291,8 @@ Browser layer (`web/e2e/browser/`, Chromium and Firefox, about 1 min each):
 | `consent.spec.ts` | `hostDecides`: the host starts recording, the guest in the call gets the consent dialog, the host sees "Guest has not accepted the recording yet" and "Not recorded" on the guest's tile, guests see neither; a late guest without consent waits outside and joins the notice ("Guest and Late have not…"); each accept shortens it, and it disappears when both accepted |
 | `recovery.spec.ts` | The SFU loses the guest's subscribe session: `SubscribeReset`, a new session, negotiation on it; a failed peer connection (simulated in the page): "Reconnecting to the others…", `ResetSession`, a new session; a dropped socket (through `page.routeWebSocket`, closed with code 4000 because the browser rejects 1001 there): the "Reconnecting…" pill for the guest and a dimmed "Reconnecting…" tile on the host's side, then a `Join` with the resume token, the same participant, and both marks gone |
 | `real-sfu.spec.ts` (`@real`) | Three people through the real SFU: each receives the others' video (bytes and decoded frames per tile) and audio; a small window gets a smaller simulcast layer, and the decoded width stays at most half the full layer's at every 1 s sample for 25 s, with no new `SetLayer` (the run prints the samples); a screen share reaches the others; 60 s without a new socket or session reset while media keeps flowing. Five people (host and four guests): every tile's video grows in bytes and decoded frames in each of three 10 s rounds. Both print one `first pull` line per publisher and subscriber who was in before it published: when the `PublishAnswer` arrived, when the publisher's connection came up (`Participant.connected()`) and when the subscribe offer carrying its video arrived, in ms after the publish offer, with the refusals before it; no assertion, as the times depend on the network |
+| `capture.spec.ts` | Wraps `getUserMedia` in the page to count calls, hold back the answer and keep the streams: unknown and ended meeting links capture nothing, a camera started during the lookup is stopped when the link is dead, an open link captures once the lookup answers, a capture finishing after leaving is stopped |
+| `full-room.spec.ts` | The owner plus 19 protocol guests fill a room; a browser guest's Join shows "This meeting is full" and the page opens exactly one WebSocket (no reconnects) |
 
 ### Adding a test
 
