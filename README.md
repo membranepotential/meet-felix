@@ -5,7 +5,8 @@ host; everyone else joins as a guest through a link. It is made for small
 meetings (2–10 people) and runs entirely on Cloudflare: the Realtime
 SFU carries the media, Rust Durable Objects hold the meetings, and a Svelte
 app in the browser calls a pure Rust core compiled to WASM. Nothing runs, and
-nothing is billed, while no meeting is on.
+nothing is billed, while no meeting is on. It needs Safari / iOS 16, Chrome 97
+or Firefox 102 or newer.
 
 **Status:** in daily use by its owner since October 2026. Phases 1–3 of the
 [plan](docs/architecture/README.md#phases) are done; mobile polish and
@@ -64,9 +65,11 @@ target, `wasm-pack`, `worker-build` (`cargo install worker-build`), and pnpm.
 6. In `.env`, set `RECORDER_ORIGIN` to your Worker's `workers.dev` URL and
    `OWNER_NAME` to the name you join meetings with.
 7. Set the secrets with `pnpm exec wrangler secret put NAME`: `CREATE_SECRET`
-   (the owner password; use a long random one), `CALLS_APP_ID` and
-   `CALLS_APP_SECRET`, and optionally `TURN_KEY_ID` and `TURN_KEY_API_TOKEN`.
-   For local runs, put the same names into the git-ignored `.dev.vars`.
+   (the owner password, at least 20 characters; generate it), `SESSION_KEY`
+   (at least 32 random characters, e.g. `openssl rand -base64 32`; it signs
+   the owner's session cookie), `CALLS_APP_ID` and `CALLS_APP_SECRET`, and
+   optionally `TURN_KEY_ID` and `TURN_KEY_API_TOKEN`. For local runs, put the
+   same names into the git-ignored `.dev.vars`.
 8. Build and deploy with `pnpm run release`. It writes `wrangler.local.toml`
    (git-ignored) from `wrangler.toml` and `.env`, and deploys with it. The
    app is then served at the Worker's URL.

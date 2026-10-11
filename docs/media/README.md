@@ -241,6 +241,11 @@ cited in [05](../research/05-frontend-and-browser.md) and
 Invite links open and work in a normal Safari tab. The installable web app
 (PWA) is optional; its main use is push notifications.
 
+Minimum browsers: Safari / iOS 16, Chrome 97, Firefox 102. The app's
+Content-Security-Policy allows WebAssembly only through `'wasm-unsafe-eval'`,
+which older Safari lacks; supporting it would need `'unsafe-eval'` for all
+scripts (MDN browser-compat-data, checked 2026-10-11).
+
 The shell handles iOS defensively:
 
 - On `visibilitychange` and on a track's `mute` or `ended` event, reacquire
