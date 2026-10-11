@@ -13,6 +13,7 @@ Decisions on this page:
 
 - [D20: Core first (2026-10-09)](#d20-core-first-2026-10-09)
 - [D35: A dropped socket gets a minute before it counts as leaving (2026-10-10)](#d35-a-dropped-socket-gets-a-minute-before-it-counts-as-leaving-2026-10-10)
+- [D36: The socket protocol has a version, and every close code says what comes next (2026-10-11)](#d36-the-socket-protocol-has-a-version-and-every-close-code-says-what-comes-next-2026-10-11)
 
 Code: [`crates/meeting-core/src/lib.rs`](../../crates/meeting-core/src/lib.rs)
 (the rules, in its module comment), [`step.rs`](../../crates/meeting-core/src/step.rs),
@@ -38,7 +39,8 @@ time is an extra argument because the core reads no clock.
   the meeting id, the recording policy, the participants
   (name, role, recording consent, microphone switch, resume token, and
   connection state:
-  waiting for the host, knocking, awaiting consent, connecting, joined with
+  waiting for the host, knocking, awaiting consent, connecting since when,
+  joined with
   their SFU sessions and tracks and, while their socket is gone, since when
   (see [Reconnecting](#reconnecting)), or left), the lock, the recording status,
   the transcript token, and the phase with its timer (see
@@ -57,17 +59,25 @@ time is an extra argument because the core reads no clock.
   or the alarm the core asked for
   (`Event::AlarmFired`).
 - **`Effect`**: something the shell must do, in list order. Send to one
-  socket or several (`Send`, `Broadcast`), close a socket (`CloseSocket`),
+  socket or several (`Send`, `Broadcast`), close a socket with a
+  `CloseCode` (`CloseSocket`, see
+  [D36](#d36-the-socket-protocol-has-a-version-and-every-close-code-says-what-comes-next-2026-10-11)),
   move a resumed client's new socket to its participant (`Rebind`), call the
   SFU (`SfuNewSession`, `SfuPublish`, `SfuSubscribe`, `SfuRenegotiate`,
   `SfuCloseTracks`, `SfuUpdateLayer`), set the alarm (`SetAlarm`), drive the
-  recorder (`StartRecording`, `RecordTrack`, `StopRecordingTrack`,
-  `StopRecording`, and `FinishRecording` with the roster and the consent
+  recorder (`StartRecording` with the meeting's words and transcript token,
+  `RecordTrack` with the speaker's name, role and consent,
+  `StopRecordingTrack` with their consent as it stands, `StopRecording`, and
+  `FinishRecording` with the roster and the consent
   record when a recorded meeting ends), free the meeting words (`ReleaseMeetingId`), and end the
   meeting (`EndMeeting`, always the last effect a room produces).
+  `Effect::target()` says who carries an effect out: the room itself, the
+  SFU or the recorder (2026-10-11). The recorder's effects carry everything
+  the recorder needs, so the shell looks nothing up in the room state.
 - **Protocol**: `ClientMsg` and `ServerMsg`, serialized with serde and
   exported to TypeScript with `tsify`. Client messages: `Join` (name,
-  consent and an optional resume token; no host token since 2026-10-09, see
+  consent, an optional resume token and the client's protocol version; no
+  host token since 2026-10-09, see
   [Phases](#phases)),
   `SetConsent`, `SetMuted` (the sender's microphone switch), `PublishOffer`,
   `Unpublish` (a track kind), `SubscribeAnswer`,
@@ -99,17 +109,28 @@ the new state, and carries out the effects in order:
   `SfuRenegotiate`, the effect's `NegotiationId`; `sfu-api` builds the
   replies, so the shell only passes them on. `SfuReply::Published` lists the
   offered kinds the SFU rejected with a per-track error (2026-10-10).
-- `CloseSocket` closes the socket and forgets it: the shell reports no
-  `SocketClosed` for a socket the core closed.
+- `CloseSocket` closes the socket with the code and reason of its
+  `CloseCode` and forgets it: the shell reports no `SocketClosed` for a
+  socket the core closed. The shell's own closes (a socket that stopped
+  pinging, overspent its budget, did not join in time, or was crowded out)
+  use the core's `CloseCode` too.
 - `Rebind { socket, participant }` re-attaches the new socket to the
   participant, so its messages and its close arrive as `participant`'s from
   then on. It always follows the `CloseSocket` for the participant's old
   socket.
-- `SetAlarm` sets the DO's single alarm; a later one replaces an earlier one,
-  and a late or spurious alarm is harmless (see [The alarm](#the-alarm)).
+- `SetAlarm` sets the DO's single alarm; a late or spurious alarm is
+  harmless (see [The alarm](#the-alarm)). The DO's alarm also serves its
+  sockets, so the shell sets it to the earliest of the core's time, the time
+  the first open socket goes stale, and the time the first socket bound to
+  nobody must have joined (`OpenRoom::alarm_time` in `record.rs`). That time
+  covers every reason, so setting it never pushes a needed check later.
+  Before 2026-10-11 each upgrade and each `SetAlarm` replaced the alarm with
+  its own time, so upgrades every 9 seconds postponed the join and
+  keepalive checks for good.
 - `StartRecording`, `RecordTrack`, `StopRecordingTrack`, `StopRecording` and
-  `FinishRecording` go to the meeting's `RecorderObject`;
-  `FinishRecording` starts the transcript job.
+  `FinishRecording` go to the meeting's `RecorderObject`, which the shell
+  creates at the first `StartRecording`; it adds only the recorder's id and
+  each request's number. `FinishRecording` starts the transcript job.
 - `ReleaseMeetingId` deletes the words from KV; `EndMeeting` stops accepting
   sockets.
 
@@ -199,9 +220,14 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
 - Only hosts lock, admit, kick, mute, record and end.
 - A room holds at most `MAX_PRESENT` (20) participants at once, those
   waiting outside included, and `MAX_ROSTER` (200) in all, those who left
-  included (2026-10-11). Beyond either, a new participant's `Join` gets
-  `Error { RoomFull }` and changes nothing. A join from the owner's socket and
-  a resume are never refused, so a host is never locked out. Why: the room
+  after joining included (2026-10-11). Beyond either, a new participant's
+  `Join` gets `Error { RoomFull }`, changes nothing, and the socket closes
+  (code 4003). A join from the owner's socket and
+  a resume are never refused, so a host is never locked out. A participant
+  who leaves before they joined (while waiting, knocking, awaiting consent or
+  connecting) is forgotten: they spoke in no recording, and before
+  2026-10-11 a client whose join the SFU refused added one entry per attempt.
+  Why: the room
   record keeps everyone who ever joined for the transcript's roster, and every
   step reads and writes it whole, so without a cap one link holder could join
   and leave in a loop until the record outgrows the storage limit or the CPU
@@ -231,8 +257,9 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
 - Each participant has a publish session (the client offers) and a subscribe
   session (the SFU offers, one negotiation at a time). New tracks reach every
   other joined participant. When a track stops being published (`Unpublish`,
-  a replacement of the same kind, the SFU closing it, or its owner leaving or
-  being kicked), it is closed on every subscriber that received it and, if it
+  a replacement of the same kind, the loss of its publish session, or its
+  owner leaving or being kicked), it is closed on every subscriber that
+  received it and, if it
   was recorded, `StopRecordingTrack` stops recording it; `Unpublish` also
   closes it on the publisher's publish session. A track stays in the
   subscriber's wanted set until a negotiation delivers it. A subscribe
@@ -254,6 +281,15 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   up 200–400 ms after its `PublishAnswer`, and a refused first pull reached
   the subscriber 3.8–4.2 s after the publish offer before this rule and
   1.0–1.9 s after it (DEVLOG 2026-10-10).
+- An admitted participant waits at most `NEGOTIATION_TIMEOUT_MS` for both
+  SFU sessions (2026-10-11). If the SFU refuses one, or does not answer in
+  time (a reply can get lost when the object restarts in the middle of a
+  call), they get `Error { SfuUnavailable }`, are forgotten, and their socket
+  closes with code 1013, so the client tries again with backoff. Before, a
+  lost reply left them connecting forever, and the room never emptied.
+  The SFU's API pushes no notice of a closed track (its HTTPS API has only
+  request and answer, checked 2026-10-11), so the core no longer has the
+  `SfuReply::TrackClosed` it never received.
 - A session the SFU declares gone (`SfuReply::Failed` with
   `FailureCause::SessionGone`), or whose peer connection the client reports
   failed (`ClientMsg::ResetSession`), is replaced, not retried
@@ -303,6 +339,10 @@ for each candidate time:
   (`SCHEDULED_TTL_MS`). Only a scheduled room has this reason.
 - `EmptyRoom`: the live room has been empty for two minutes. Only a live
   room has this reason.
+- `Connect(participant)`: that participant has been connecting for
+  `NEGOTIATION_TIMEOUT_MS` without both SFU sessions; they are let go
+  (2026-10-11). Records stored before the time existed load as connecting
+  since time 0, so such a participant is let go at the first alarm.
 - `Publish(participant)`: that participant's publish offer times out.
 - `Subscribe(participant)`: that participant's subscribe negotiation times
   out, or, while no negotiation runs, their earliest wanted track is due for
@@ -363,9 +403,21 @@ room view shows them with `reconnecting: true`, and the others' tiles say
 
 A second report for the same socket (the runtime may report an error and a
 close) changes nothing. A participant who is not joined yet (waiting for the
-host, knocking, awaiting consent, or connecting) leaves at once: they
-publish nothing, and their client holds no resume token, which only the
-`Welcome` carries.
+host, knocking, awaiting consent, or connecting) leaves at once and is
+forgotten: they publish nothing, and their client holds no resume token,
+which only the `Welcome` carries.
+
+**Sockets the runtime lost without a close** (2026-10-11). A deploy restarts
+every Durable Object and disconnects its WebSockets ("Code updates disconnect
+all WebSockets", [Cloudflare: WebSockets best
+practices](https://developers.cloudflare.com/durable-objects/best-practices/websockets/),
+checked 2026-10-11); the docs do not say that the restarted object gets a
+`webSocketClose` for them. The Worker's alarm therefore also reports, as
+`SocketClosed`, every participant in the room whom no open socket belongs to
+and who is not already reconnecting (`OpenRoom::orphans` in `record.rs`):
+a joined one gets the grace, anyone else leaves. Without it, a participant
+whose client never came back kept the room from emptying and ending, and a
+recorded meeting never sent `/end`.
 
 During the grace, what the room sends to the participant goes nowhere: the
 `State` broadcast skips them, and the shell delivers a `Send` to a
@@ -413,7 +465,7 @@ after every step that:
 
 - no SFU track is orphaned: every requested and received track belongs to a
   participant still in the room, and whenever a track stops being published
-  under its name (unpublished, replaced, closed by the SFU, or its owner left
+  under its name (unpublished, replaced, lost with its session, or its owner left
   or was kicked), every subscriber that received it gets `SfuCloseTracks`;
 - each SFU session has exactly one offerer: every `SfuPublish` names the
   participant's publish session, and every `SfuSubscribe`, `SfuRenegotiate`,
@@ -442,7 +494,8 @@ after every step that:
   (2026-10-11);
 - a room never holds more than `MAX_PRESENT` participants at once or
   `MAX_ROSTER` in all, except for joins from the owner's socket; a refused
-  join changes nothing and gets `RoomFull`, and the owner always gets in (a
+  join changes nothing, gets `RoomFull` and closes the socket, and the owner
+  always gets in (a
   separate property test with crowds of up to 1,500 joins, leaves and drops
   that reach both caps, 2026-10-11);
 - no guest is admitted without consent while the room records; whoever is in
@@ -460,8 +513,9 @@ after every step that:
   host, and nothing turns a host into a guest;
 - no room is live without a host having joined; a scheduled room has nobody
   joined, never comes back after going live, and ends only at its expiry;
-- a scheduled room has no empty-room alarm: its only alarm is the expiry;
-  only a scheduled room has guests waiting for the host;
+- a scheduled room has no empty-room alarm: its only alarm for the room is
+  the expiry, besides a connecting host's deadline; only a scheduled room has
+  guests waiting for the host;
 - guests waiting for the host are let in exactly in the step the first host
   joins, except that a guest without consent while the room records is asked
   for it and awaits it; before that they keep waiting until they leave, the
@@ -548,3 +602,45 @@ comes back as a new guest (the host can kick again or lock the room); a
 to turn the device off and on after its 20-second timeout; subscribers see
 a frozen last frame until the participant is back or gone, which the tile
 explains.
+
+## D36: The socket protocol has a version, and every close code says what comes next (2026-10-11)
+
+`ClientMsg::Join` carries `protocol`, the `PROTOCOL_VERSION` of the core the
+client was built with; a `Join` without it is version 1, the clients built
+before the field. The room serves every version from `MIN_PROTOCOL_VERSION`
+on and answers an older one with `Error { OutdatedClient }`, then closes the
+socket with code 4004. Raise `PROTOCOL_VERSION` with a change that would make
+an older client misbehave, and `MIN_PROTOCOL_VERSION` only if the room must
+refuse such clients. A change older clients survive needs neither: a client
+ignores a server message it cannot parse, and the room answers a client
+message it cannot parse with `MalformedMessage` and logs why.
+
+Every socket the room closes gets a `CloseCode` from the core, and
+`after_close(code)` (exported to the browser as `afterClose`) tells the
+client what to do:
+
+| Reason | Code | Client |
+|---|---|---|
+| `Left`, `Replaced` (the client left, or resumed on another socket) | 1000 | reconnect (it is gone already) |
+| `Stale` (no ping for a minute) | 1001 | reconnect and resume |
+| `OverBudget`, `NoJoin`, `Crowded` | 1008 | reconnect and resume |
+| `TryLater` (the SFU refused a join) | 1013 | reconnect with backoff |
+| `Kicked`, `Ended`, `RoomFull` | 4001–4003 | stop |
+| `Outdated` | 4004 | reload the page |
+| anything else, such as 1006 for a lost connection | | reconnect |
+
+The final codes and `Outdated` lie in 4000–4099, which version-1 clients
+already treated as final: such a client stops on `Outdated` and shows its
+reason, "This page is out of date. Reload it to join the meeting." A current
+client reloads the page itself, at most once in five minutes per tab, so a
+cached old app cannot make it loop; otherwise the end screen asks the user.
+The web client starts its reconnect backoff over only when the room answered
+a `Join` with something other than an error, so a join the room keeps
+refusing is retried less and less often, up to every 10 seconds.
+
+Why: the client keyed "do not come back" on 4000–4099, but the room closed
+every socket with 1000 or 1001, so the rule never applied, and a join the SFU
+refused was retried twice a second for as long as the SFU was down. And
+without a version, a web app cached from before a deploy that changes the
+protocol cannot be told apart from a current one. Version 1 stays served:
+every meeting that runs during a deploy reconnects with the old app.

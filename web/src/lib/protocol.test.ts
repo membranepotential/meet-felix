@@ -66,7 +66,7 @@ const SERVER_SAMPLES: Samples<ServerMsg> = {
 };
 
 const CLIENT_SAMPLES: Samples<ClientMsg> = {
-	join: { type: 'join', name: 'Ada', consent: true, resume: 'r1' },
+	join: { type: 'join', name: 'Ada', consent: true, resume: 'r1', protocol: 2 },
 	setConsent: { type: 'setConsent', consent: false },
 	setMuted: { type: 'setMuted', muted: true },
 	publishOffer: {

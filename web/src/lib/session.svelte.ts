@@ -18,19 +18,21 @@ import {
 import { GraceNotice } from './grace.ts';
 import { LayerControl } from './layers.ts';
 import type { LocalMedia } from './local-media.svelte.ts';
+import { IceServers } from './media/ice.ts';
 import { RemoteAudio } from './media/remote-audio.svelte.ts';
 import { holdWakeLock } from './media/wakelock.ts';
-import type {
-	ClientMsg,
-	DisplayName,
-	MeetingId,
-	ParticipantId,
-	ParticipantView,
-	ServerMsg,
-	SessionEpoch,
-	SessionEpochs,
-	SessionKind,
-	TrackKind
+import {
+	protocolVersion,
+	type ClientMsg,
+	type DisplayName,
+	type MeetingId,
+	type ParticipantId,
+	type ParticipantView,
+	type ServerMsg,
+	type SessionEpoch,
+	type SessionEpochs,
+	type SessionKind,
+	type TrackKind
 } from './protocol.ts';
 import { SessionResets } from './resets.ts';
 import {
@@ -49,9 +51,6 @@ export interface JoinRequest {
 	/** Whether the user accepted recording on the pre-join screen. */
 	consent: boolean;
 }
-
-/** Used when `/api/ice` fails: direct and STUN-only paths still work on most networks. */
-const FALLBACK_ICE: RTCIceServer[] = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
 /** How long a failed subscribe may take to recover before the user hears about it. */
 const SUBSCRIBE_GRACE_MS = 10_000;
@@ -73,6 +72,27 @@ const MIC_STALLED = 'Microphone was interrupted. Tap the microphone button to tu
 
 /** Participants who get a tile: admitted, not waiting outside. */
 const isInRoom = (p: ParticipantView) => p.presence === 'joined' || p.presence === 'connecting';
+
+/** When this tab last reloaded because the room called the page out of date. */
+const OUTDATED_RELOAD_KEY = 'meet-felix:outdated-reload';
+/** A page still out of date this soon after such a reload came from a cache: do not loop. */
+const OUTDATED_RELOAD_PAUSE_MS = 5 * 60 * 1000;
+
+/**
+ * Loads the page again for the current app, unless this tab did so moments ago, which means
+ * the reload brought the same old app; then the end screen asks the user to reload.
+ */
+function reloadOutdated(): void {
+	try {
+		const last = Number(sessionStorage.getItem(OUTDATED_RELOAD_KEY));
+		if (Date.now() - last < OUTDATED_RELOAD_PAUSE_MS) return;
+		sessionStorage.setItem(OUTDATED_RELOAD_KEY, String(Date.now()));
+	} catch {
+		// Without storage a loop cannot be ruled out; the end screen asks instead.
+		return;
+	}
+	window.location.reload();
+}
 
 export class Session {
 	readonly toasts = new Toasts();
@@ -104,7 +124,7 @@ export class Session {
 	readonly #meeting: MeetingId;
 	readonly #media: LocalMedia;
 	readonly #signaling: SignalingClient;
-	readonly #ice: Promise<RTCIceServer[]>;
+	readonly #ice: IceServers;
 	#join: JoinRequest;
 	/** The two SFU peer connections; `null` until the first welcome. */
 	#publisher: Promise<Publisher> | null = null;
@@ -140,12 +160,15 @@ export class Session {
 		this.layers = new LayerControl((track, rid) =>
 			this.#signaling.send({ type: 'setLayer', track, rid })
 		);
-		// Fetched once, while the socket connects; TURN credentials last hours.
-		this.#ice = getIceServers(meeting).then((result) => {
-			if (result.ok) return result.value;
-			console.warn('ICE servers unavailable, using STUN only', result.error);
-			return FALLBACK_ICE;
-		});
+		// Fetched while the socket connects, and again before the TURN credentials expire; the
+		// open peer connections get each new set.
+		this.#ice = new IceServers(
+			() => getIceServers(meeting),
+			(servers) => {
+				void this.#publisher?.then((publisher) => publisher.setIceServers(servers));
+				void this.#subscriber?.then((subscriber) => subscriber.setIceServers(servers));
+			}
+		);
 	}
 
 	start(): void {
@@ -225,6 +248,7 @@ export class Session {
 		this.#disposed = true;
 		this.#stopEffects();
 		this.#signaling.close();
+		this.#ice.dispose();
 		this.#closeLink();
 		this.#resets.cancel();
 		this.#subscribeNotice.cancel();
@@ -275,6 +299,9 @@ export class Session {
 			case 'teardown':
 				this.#over();
 				return;
+			case 'reload':
+				reloadOutdated();
+				return;
 		}
 	}
 
@@ -285,6 +312,7 @@ export class Session {
 	 * flag are made to agree.
 	 */
 	#welcomed(fresh: boolean, epochs: SessionEpochs): void {
+		this.#ice.recover();
 		const current = (kind: SessionKind) => !fresh && this.#epochs[kind] === epochs[kind];
 		if (this.#publisher === null || !current('publish')) this.#openPublisher(epochs.publish);
 		else void this.#publisher.then((publisher) => publisher.retryFailed());
@@ -302,7 +330,7 @@ export class Session {
 	#openPublisher(epoch: SessionEpoch): void {
 		this.#closePublisher();
 		this.#epochs = { ...this.#epochs, publish: epoch };
-		const publisher: Promise<Publisher> = this.#ice.then((iceServers) => {
+		const publisher: Promise<Publisher> = this.#ice.latest.then((iceServers) => {
 			const created = new Publisher(
 				peerConnection(iceServers),
 				(msg) => this.#signaling.send(msg),
@@ -321,7 +349,7 @@ export class Session {
 	#openSubscriber(epoch: SessionEpoch): void {
 		this.#closeSubscriber();
 		this.#epochs = { ...this.#epochs, subscribe: epoch };
-		const subscriber: Promise<Subscriber> = this.#ice.then(
+		const subscriber: Promise<Subscriber> = this.#ice.latest.then(
 			(iceServers) =>
 				new Subscriber(
 					peerConnection(iceServers),
@@ -379,17 +407,25 @@ export class Session {
 	#sendJoin(): void {
 		const { name, consent } = this.#join;
 		const { resume } = this.state;
-		this.#signaling.send({ type: 'join', name, consent, ...(resume !== null ? { resume } : {}) });
+		this.#signaling.send({
+			type: 'join',
+			name,
+			consent,
+			protocol: protocolVersion(),
+			...(resume !== null ? { resume } : {})
+		});
 	}
 
 	#onStatus(status: ConnectionStatus): void {
 		this.connection = status;
 		if (status.kind === 'waiting') void this.#checkMeeting();
-		if (status.kind === 'closed' && status.code !== 1000) {
+		// The room's message about why (kicked, ended, full) usually ended the stay already.
+		if (status.kind === 'dismissed') {
 			this.#finish({
 				kind: 'refused',
 				reason: status.reason || 'The meeting closed the connection.'
 			});
+			if (status.after === 'reload') reloadOutdated();
 		}
 	}
 

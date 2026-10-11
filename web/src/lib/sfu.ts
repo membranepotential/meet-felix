@@ -29,6 +29,16 @@ import {
 export const peerConnection = (iceServers: RTCIceServer[]): RTCPeerConnection =>
 	new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' });
 
+/**
+ * Gives `pc` new ICE servers, such as fresh TURN credentials. A browser uses them from the
+ * connection's next ICE gathering on, not for the candidates it already has. A closed
+ * connection keeps what it had.
+ */
+function setIceServers(pc: RTCPeerConnection, iceServers: RTCIceServer[]): void {
+	if (pc.signalingState === 'closed') return;
+	pc.setConfiguration({ ...pc.getConfiguration(), iceServers });
+}
+
 /** Calls `onFailed` once, when `pc.connectionState` first becomes `failed`. */
 function watchFailure(pc: RTCPeerConnection, onFailed: () => void): void {
 	const check = () => {
@@ -199,6 +209,10 @@ export class Publisher {
 	rejected(): void {
 		this.#pendingAnswer?.reject(new PublishError('rejected'));
 		this.#pendingAnswer = null;
+	}
+
+	setIceServers(iceServers: RTCIceServer[]): void {
+		setIceServers(this.#pc, iceServers);
 	}
 
 	close(): void {
@@ -385,6 +399,10 @@ export class Subscriber {
 		if (kept.size === this.#tracks.size) return;
 		this.#tracks = kept;
 		this.#onTracks(kept, []);
+	}
+
+	setIceServers(iceServers: RTCIceServer[]): void {
+		setIceServers(this.#pc, iceServers);
 	}
 
 	close(): void {

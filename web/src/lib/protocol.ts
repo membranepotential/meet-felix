@@ -13,7 +13,15 @@ import type { MeetingId, TrackRef } from './wasm/meeting_core.js';
  */
 export { encodeClientMsg, parseServerMsg } from './wasm/meeting_core.js';
 
+/**
+ * `protocolVersion()` is the protocol this build speaks, sent in every `join`;
+ * `afterClose(code)` says what to do after the room closed the socket with `code`: reconnect,
+ * stop, or reload the page (`CloseCode` in the core).
+ */
+export { afterClose, protocolVersion } from './wasm/meeting_core.js';
+
 export type {
+	AfterClose,
 	ClientMsg,
 	DisplayName,
 	ErrorCode,

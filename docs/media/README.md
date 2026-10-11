@@ -49,7 +49,8 @@ Facts checked on 2026-10-09 ([01 §1](../research/01-hosting-and-media-platforms
   charge for traffic between TURN and the SFU, IPv4 relay addresses only, no
   TCP relaying. STUN at `stun.cloudflare.com` is free.
 - TURN is used since 2026-10-09: `GET /api/ice?meeting=<words>` asks
-  Cloudflare for credentials valid for 24 hours (`POST
+  Cloudflare for credentials valid for 6 hours (24 hours until 2026-10-11;
+  `TURN_TTL_SECS` in `crates/worker/src/ice.rs`; `POST
   /v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers` with the
   secret `TURN_KEY_API_TOKEN`) and hands the servers to the browser, minus
   the URLs on port 53, which browsers block
@@ -59,6 +60,19 @@ Facts checked on 2026-10-09 ([01 §1](../research/01-hosting-and-media-platforms
   call fails, or if Cloudflare takes longer than 3 seconds, it serves STUN
   only; the browser gives up after 4 seconds and uses STUN. A phone on
   mobile data may need TURN to reach the SFU.
+- The web client keeps the servers fresh for the whole stay (2026-10-11,
+  `IceServers` in `web/src/lib/media/ice.ts`). It fetches them again 5 hours
+  after a set with TURN, 5 minutes after a set without TURN, 60 seconds
+  after the rate limit refused it (the limit's window, which the Worker
+  also sends as `Retry-After`), 30 seconds after any other failure, and at
+  once when the signaling socket is welcomed back after a failure. Every
+  peer connection opened later uses the latest set, and the open ones get it
+  with `setConfiguration`, which a browser applies from the connection's next
+  ICE gathering on, not to the candidates it has
+  ([MDN: setConfiguration](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/setConfiguration),
+  checked 2026-10-11). Before, the client fetched once per stay and used
+  STUN only for the rest of it after any failure, 429 included, and a peer
+  connection replaced after 6 hours got expired credentials.
 - No SFU region can be chosen
   ([D5](../architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)).
 

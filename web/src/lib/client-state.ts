@@ -82,7 +82,9 @@ export type Command =
 	/** Tell the room our microphone is off (`SetMuted`). */
 	| { kind: 'report-muted' }
 	/** The stay is over: release media and close the socket. */
-	| { kind: 'teardown' };
+	| { kind: 'teardown' }
+	/** This page speaks a protocol the room no longer serves: load it again. */
+	| { kind: 'reload' };
 
 /** Errors that answer a `PublishOffer`: the publish in flight failed. */
 const PUBLISH_ERRORS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
@@ -112,6 +114,8 @@ export function describeError(code: ErrorCode): string | null {
 			return 'Some video or audio did not arrive. The meeting retries on its own.';
 		case 'roomFull':
 			return 'This meeting is full. Try again later.';
+		case 'outdatedClient':
+			return 'This page is out of date. Reload it to join the meeting.';
 		case 'notPublished':
 		case 'unexpectedAnswer':
 		case 'notSubscribed':
@@ -206,10 +210,13 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			return over(state, { kind: 'ended', transcript: msg.transcript ?? null });
 		case 'error': {
 			const text = describeError(msg.code);
-			// The room took no place for us and will not take one on a retry of the same socket:
-			// the stay is over before it began, and the session stops reconnecting.
-			if (msg.code === 'roomFull') {
-				return over(state, { kind: 'refused', reason: text ?? 'This meeting is full.' });
+			// The room took no place for us and closes the socket for good: the stay is over
+			// before it began, and the session stops reconnecting. An outdated page reloads.
+			if (msg.code === 'roomFull' || msg.code === 'outdatedClient') {
+				const [next, commands] = over(state, { kind: 'refused', reason: text ?? '' });
+				return msg.code === 'outdatedClient'
+					? [next, [...commands, { kind: 'reload' }]]
+					: [next, commands];
 			}
 			const commands: Command[] = [];
 			if (PUBLISH_ERRORS.has(msg.code)) commands.push({ kind: 'publish-rejected' });

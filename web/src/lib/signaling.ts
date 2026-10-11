@@ -4,7 +4,10 @@
  * Reconnects with exponential backoff and jitter after unexpected closes, and retries at
  * once when the page becomes visible or the network returns (iOS drops sockets of
  * backgrounded tabs). After every (re)connect `onOpen` runs, where the caller sends `Join`;
- * the server answers with `Welcome` and a full state, so no message replay is needed.
+ * the server answers with `Welcome` and a full state, so no message replay is needed. The
+ * backoff starts over only once the room answered a `Join` with something other than an
+ * error, so a room that refuses the join and closes the socket (the SFU is down) is asked
+ * less and less often. The room's close code says whether to come back at all (`afterClose`).
  *
  * While open, the client sends `{"type":"ping"}` every 30 s: the room closes a socket with code
  * 1001 after about 60 s without one, and answers `{"type":"pong"}` without waking its Durable
@@ -14,8 +17,10 @@
  * the room and the client agree on one definition of each message.
  */
 import {
+	afterClose,
 	encodeClientMsg,
 	parseServerMsg,
+	type AfterClose,
 	type ClientMsg,
 	type MeetingId,
 	type ServerMsg
@@ -26,21 +31,19 @@ export type ConnectionStatus =
 	| { kind: 'open' }
 	/** Waiting `retryInMs` before the next attempt. */
 	| { kind: 'waiting'; attempt: number; retryInMs: number }
-	/** Closed for good: by us, or by the server with a terminal close code. */
-	| { kind: 'closed'; code: number; reason: string };
+	/** Closed by us (`close()`). */
+	| { kind: 'closed' }
+	/**
+	 * The room closed the socket for good: the stay is over (`stop`), or this page is out of
+	 * date (`reload`). `reason` is the close frame's, meant for the user.
+	 */
+	| { kind: 'dismissed'; after: Exclude<AfterClose, 'reconnect'>; reason: string };
 
 export interface SignalingHandlers {
 	onOpen: () => void;
 	onMessage: (msg: ServerMsg) => void;
 	onStatus: (status: ConnectionStatus) => void;
 }
-
-/**
- * Close codes 4000–4099 mean the server decided (meeting ended, kicked, refused);
- * reconnecting would not help. Other codes retry: 1006 (connection lost) and 1001 (the room
- * closed an idle socket); the next `Join` carries the resume token.
- */
-const isTerminalClose = (code: number): boolean => code >= 4000 && code < 4100;
 
 const KEEPALIVE_MS = 30_000;
 /** The exact frame the room's auto-response matches; not part of `ClientMsg`. */
@@ -156,7 +159,7 @@ export class SignalingClient {
 		this.#socket?.close(1000, 'client closed');
 		this.#socket = null;
 		this.#closeReplaced();
-		this.#handlers.onStatus({ kind: 'closed', code: 1000, reason: 'client closed' });
+		this.#handlers.onStatus({ kind: 'closed' });
 	}
 
 	#open(): void {
@@ -168,7 +171,6 @@ export class SignalingClient {
 
 		socket.addEventListener('open', () => {
 			if (socket !== this.#socket) return;
-			this.#attempt = 0;
 			clearInterval(this.#keepalive);
 			this.#keepalive = setInterval(() => {
 				if (socket.readyState === WebSocket.OPEN) socket.send(PING);
@@ -180,19 +182,23 @@ export class SignalingClient {
 			if (socket !== this.#socket || typeof event.data !== 'string') return;
 			this.#closeReplaced();
 			const msg = decodeFrame(event.data);
-			if (msg) this.#handlers.onMessage(msg);
+			if (msg === null) return;
+			// The room took our `Join`: the next lost connection starts the backoff over.
+			if (msg.type !== 'error') this.#attempt = 0;
+			this.#handlers.onMessage(msg);
 		});
 		socket.addEventListener('close', (event) => {
 			if (socket !== this.#socket || this.#stopped) return;
 			this.#socket = null;
 			clearInterval(this.#keepalive);
-			if (isTerminalClose(event.code)) {
-				this.#stopped = true;
-				this.#closeReplaced();
-				this.#handlers.onStatus({ kind: 'closed', code: event.code, reason: event.reason });
+			const after = afterClose(event.code);
+			if (after === 'reconnect') {
+				this.#scheduleRetry();
 				return;
 			}
-			this.#scheduleRetry();
+			this.#stopped = true;
+			this.#closeReplaced();
+			this.#handlers.onStatus({ kind: 'dismissed', after, reason: event.reason });
 		});
 		// `error` is always followed by `close`, which handles the retry.
 	}

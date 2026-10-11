@@ -133,6 +133,18 @@ describe('reduce', () => {
 		expect(reduce(state, { type: 'error', code: 'roomFull' })).toEqual([state, []]);
 	});
 
+	it('ends the stay of a page the room calls out of date, and reloads it', () => {
+		const [state, commands] = reduce(INITIAL, { type: 'error', code: 'outdatedClient' });
+		expect(state.stage).toEqual({
+			kind: 'over',
+			end: {
+				kind: 'refused',
+				reason: 'This page is out of date. Reload it to join the meeting.'
+			}
+		});
+		expect(commands).toEqual([{ kind: 'teardown' }, { kind: 'reload' }]);
+	});
+
 	it('passes SDP through to the media layer', () => {
 		const tracks = [{ mid: '0', track: { owner: 2, kind: 'video' as const } }];
 		expect(reduce(welcomed(), { type: 'subscribeOffer', sdp: 'o', tracks })[1]).toEqual([
