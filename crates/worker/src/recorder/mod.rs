@@ -53,10 +53,7 @@ pub(crate) use self::state::{Ordered, RequestSeq, Stop};
 use self::state::{Recorder, RecorderPhase};
 use self::store::Store;
 use self::streams::Live;
-use crate::internal::{
-    RECORDER_END, RECORDER_START, RECORDER_STATUS, RECORDER_STOP, RECORDER_TRACK, RECORDER_UNTRACK,
-    TRANSCRIPT_JSON, TRANSCRIPT_MD,
-};
+use crate::internal::{RECORDER_STATUS, RecorderRequest, TRANSCRIPT_JSON, TRANSCRIPT_MD};
 use crate::{is_websocket_upgrade, now};
 
 /// R2 bucket of audio chunks and transcripts (EU jurisdiction).
@@ -96,17 +93,14 @@ impl DurableObject for RecorderObject {
         let inner = &self.inner;
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Post, RECORDER_START) => inner.start(req.json().await?).await,
-            (Method::Post, RECORDER_TRACK) => inner.track(req.json().await?).await,
-            (Method::Post, RECORDER_UNTRACK) => inner.untrack(req.json().await?).await,
-            // A room that ran older code posts `null`.
-            (Method::Post, RECORDER_STOP) => {
-                let stop: Option<Ordered<Stop>> = req.json().await?;
-                inner
-                    .stop(stop.map_or(RequestSeq::UNORDERED, |stop| stop.seq))
-                    .await
-            }
-            (Method::Post, RECORDER_END) => inner.end(req.json().await?).await,
+            (Method::Post, _) => match RecorderRequest::parse(&path, &req.text().await?)? {
+                Some(RecorderRequest::Start(start)) => inner.start(start).await,
+                Some(RecorderRequest::Track(track)) => inner.track(track).await,
+                Some(RecorderRequest::Untrack(untrack)) => inner.untrack(untrack).await,
+                Some(RecorderRequest::Stop(stop)) => inner.stop(stop.seq).await,
+                Some(RecorderRequest::End(finish)) => inner.end(finish).await,
+                None => not_found(),
+            },
             (Method::Get, RECORDER_STATUS) => inner.status().await,
             (Method::Get, file) => match file.strip_prefix('/') {
                 Some(file @ (TRANSCRIPT_MD | TRANSCRIPT_JSON)) => inner.file(file).await,

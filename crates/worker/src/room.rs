@@ -20,30 +20,28 @@ use meeting_core::{
     ClientMsg, CloseCode, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
     RecordingPolicy, RoomState, ServerMsg, SfuReply, Target, TranscriptRef,
 };
-use serde::Serialize;
 use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
 use worker::wasm_bindgen::JsCast;
 use worker::{
-    DurableObject, Env, Method, Request, RequestInit, Response, Result, State, WebSocket,
+    DurableObject, Env, Method, Request, Response, Result, State, WebSocket,
     WebSocketIncomingMessage, WebSocketPair, WebSocketRequestResponsePair, console_error,
     console_log, console_warn, durable_object,
 };
 
 use crate::internal::{
-    FinishRecording, INFO, INIT, InitRoom, ORIGIN, OWNER_HEADER, OWNER_YES, RECORDER_END,
-    RECORDER_START, RECORDER_STOP, RECORDER_TRACK, RECORDER_UNTRACK, RoomInfo, StartRecording,
-    TrackRecording, UntrackRecording,
+    self, FinishRecording, INFO, INIT, InitRoom, OWNER_HEADER, OWNER_YES, RecorderId,
+    RecorderRequest, RoomInfo, StartRecording, TrackRecording, UntrackRecording,
 };
+use crate::jurisdiction::{self, Jurisdiction};
 use crate::record::{
     Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS, MessageBudget,
     OpenRoom, OpenSocket, PendingFinish, Record, RecorderLink, Stepped, Write, crowded_out,
     is_stale, is_unbound, join_overdue, write_for,
 };
-use crate::recorder::{Ordered, Stop};
+use crate::recorder::{Ordered, RequestSeq, Stop};
 use crate::{
-    Jurisdiction, MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu,
-    transcript_key,
+    MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu, transcript_key,
 };
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
@@ -238,10 +236,8 @@ impl RoomObject {
             EndedAlarm::FinishAgain { record, pending } => {
                 self.store(&Record::Ended(record)).await?;
                 self.delete_later().await?;
-                if let Err(e) = self
-                    .post_recorder(&pending.recorder, RECORDER_END, &pending.finish)
-                    .await
-                {
+                let end = RecorderRequest::End(pending.finish);
+                if let Err(e) = self.post_recorder(&pending.recorder, &end).await {
                     console_error!("the recorder's end failed again: {e}");
                 }
                 Ok(())
@@ -398,16 +394,9 @@ impl RoomObject {
     fn new_recorder(&self) -> Option<String> {
         let id = || -> Result<String> {
             let jurisdiction =
-                Jurisdiction::from_var(&self.env.var(ROOM_JURISDICTION)?.to_string())
-                    .map_err(worker::Error::RustError)?;
+                Jurisdiction::parse_var(&self.env.var(ROOM_JURISDICTION)?.to_string())?;
             let recorders = self.env.durable_object(RECORDERS)?;
-            let id = match jurisdiction {
-                None => recorders.unique_id()?,
-                Some(jurisdiction) => {
-                    recorders.unique_id_with_jurisdiction(jurisdiction.as_str())?
-                }
-            };
-            Ok(id.to_string())
+            Ok(jurisdiction::unique_id(&recorders, jurisdiction)?.to_string())
         };
         id().inspect_err(|e| console_error!("creating the recorder failed: {e}"))
             .ok()
@@ -514,70 +503,28 @@ impl RoomObject {
         let seq = requests.next;
         requests.next = seq.after(1);
         let recorder = requests.recorder.as_str();
-        let told = match effect {
-            Effect::StartRecording {
-                since,
-                meeting,
-                transcript,
-            } => {
-                // The link works from now on, showing "recording" until the meeting ends.
-                self.link_transcript(recorder, &meeting, &transcript).await;
-                let start = StartRecording { meeting, since };
-                self.post_recorder(recorder, RECORDER_START, &start).await
-            }
-            Effect::RecordTrack {
-                speaker,
-                consent,
-                track,
-            } => {
-                let request = TrackRecording {
-                    who: speaker.id,
-                    name: speaker.name,
-                    role: speaker.role,
-                    consent,
-                    session: track.session,
-                    track_name: track.name,
-                };
-                let body = Ordered { seq, request };
-                self.post_recorder(recorder, RECORDER_TRACK, &body).await
-            }
-            Effect::StopRecordingTrack {
-                who,
-                track,
-                consent,
-            } => {
-                let request = UntrackRecording {
-                    who,
-                    session: track.session,
-                    track_name: track.name,
-                    consent,
-                };
-                let body = Ordered { seq, request };
-                self.post_recorder(recorder, RECORDER_UNTRACK, &body).await
-            }
-            Effect::StopRecording => {
-                let body = Ordered {
-                    seq,
-                    request: Stop {},
-                };
-                self.post_recorder(recorder, RECORDER_STOP, &body).await
-            }
-            Effect::FinishRecording { roster, consents } => {
-                let finish = FinishRecording { roster, consents };
-                let finished = self.post_recorder(recorder, RECORDER_END, &finish).await;
-                if finished.is_err() {
-                    let pending = PendingFinish {
-                        recorder: recorder.to_owned(),
-                        finish,
-                    };
-                    if let Err(e) = self.finish_later(pending).await {
-                        console_error!("keeping the recorder's end for later failed: {e}");
-                    }
-                }
-                finished
-            }
-            _ => return,
+        if let Effect::StartRecording {
+            meeting,
+            transcript,
+            ..
+        } = &effect
+        {
+            // The link works from now on, showing "recording" until the meeting ends.
+            self.link_transcript(recorder, meeting, transcript).await;
+        }
+        let Some(request) = recorder_request(effect, seq) else {
+            return;
         };
+        let told = self.post_recorder(recorder, &request).await;
+        if let (Err(_), RecorderRequest::End(finish)) = (&told, request) {
+            let pending = PendingFinish {
+                recorder: recorder.to_owned(),
+                finish,
+            };
+            if let Err(e) = self.finish_later(pending).await {
+                console_error!("keeping the recorder's end for later failed: {e}");
+            }
+        }
         if let Err(e) = told {
             console_error!("the recorder failed: {e}");
         }
@@ -596,23 +543,11 @@ impl RoomObject {
             .await
     }
 
-    async fn post_recorder(&self, recorder: &str, path: &str, body: &impl Serialize) -> Result<()> {
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post)
-            .with_body(Some(serde_json::to_string(body)?.into()));
-        let response = self
-            .env
-            .durable_object(RECORDERS)?
-            .id_from_string(recorder)?
-            .get_stub()?
-            .fetch_with_request(Request::new_with_init(&format!("{ORIGIN}{path}"), &init)?)
-            .await?;
-        match response.status_code() {
-            200..300 => Ok(()),
-            status => Err(worker::Error::RustError(format!(
-                "{path} answered {status}"
-            ))),
-        }
+    async fn post_recorder(&self, recorder: &str, request: &RecorderRequest) -> Result<()> {
+        let stub = RecorderId::new(recorder).stub(&self.env.durable_object(RECORDERS)?)?;
+        internal::post(&stub, request.path(), request)
+            .await
+            .map(drop)
     }
 
     /// Maps the transcript token to the recorder in KV, for `GET /api/transcript/:token`. The
@@ -780,7 +715,53 @@ impl From<Event> for Input {
 struct Requests {
     /// The `RecorderObject`'s id (hex).
     recorder: String,
-    next: crate::recorder::RequestSeq,
+    next: RequestSeq,
+}
+
+/// The request a recording effect makes of the recorder, numbered `seq` where the recorder
+/// orders requests; `None` for any other effect.
+fn recorder_request(effect: Effect, seq: RequestSeq) -> Option<RecorderRequest> {
+    Some(match effect {
+        Effect::StartRecording { since, meeting, .. } => {
+            RecorderRequest::Start(StartRecording { meeting, since })
+        }
+        Effect::RecordTrack {
+            speaker,
+            consent,
+            track,
+        } => RecorderRequest::Track(Ordered {
+            seq,
+            request: TrackRecording {
+                who: speaker.id,
+                name: speaker.name,
+                role: speaker.role,
+                consent,
+                session: track.session,
+                track_name: track.name,
+            },
+        }),
+        Effect::StopRecordingTrack {
+            who,
+            track,
+            consent,
+        } => RecorderRequest::Untrack(Ordered {
+            seq,
+            request: UntrackRecording {
+                who,
+                session: track.session,
+                track_name: track.name,
+                consent,
+            },
+        }),
+        Effect::StopRecording => RecorderRequest::Stop(Ordered {
+            seq,
+            request: Stop {},
+        }),
+        Effect::FinishRecording { roster, consents } => {
+            RecorderRequest::End(FinishRecording { roster, consents })
+        }
+        _ => return None,
+    })
 }
 
 /// Names the SFU call an effect makes, its participant and its session, for the log, e.g.
@@ -831,4 +812,142 @@ fn last_ping(state: &State, ws: &WebSocket) -> Option<Millis> {
     let date = method.call1(raw, socket).ok()?.dyn_into::<JsDate>().ok()?;
     // Milliseconds since the epoch, always non-negative and integral for a real timestamp.
     Some(Millis(date.get_time() as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use meeting_core::recording::{ConsentRecord, RosterEntry};
+    use meeting_core::{DisplayName, RemoteTrack, Role, SessionId, TrackName};
+    use serde_json::json;
+
+    use super::*;
+
+    /// Every recording effect becomes the request the recorder reads at that path, with the
+    /// effect's data, and the numbered ones carry the room's number beside their own fields.
+    #[test]
+    fn the_recorder_reads_each_request_the_room_posts() {
+        let seq = RequestSeq(7);
+        let who = ParticipantId(3);
+        let name = DisplayName::parse("Robin").expect("a valid name");
+        let meeting = MeetingId::parse("amber-otter-ocean").expect("listed words");
+        let speaker = RosterEntry {
+            id: who,
+            name: name.clone(),
+            role: Role::Host,
+        };
+        let consent = ConsentRecord {
+            who,
+            name: name.clone(),
+            at: Millis(5),
+            notice_version: 1,
+            withdrawn_at: None,
+        };
+        let withdrawn = ConsentRecord {
+            withdrawn_at: Some(Millis(9)),
+            ..consent.clone()
+        };
+        let track = RemoteTrack {
+            session: SessionId::new("session"),
+            name: TrackName::new("audio"),
+        };
+        let cases = [
+            (
+                Effect::StartRecording {
+                    since: Millis(1),
+                    meeting: meeting.clone(),
+                    transcript: TranscriptRef::parse("0123456789abcdef0123456789abcdef")
+                        .expect("a token"),
+                },
+                "/start",
+                RecorderRequest::Start(StartRecording {
+                    meeting,
+                    since: Millis(1),
+                }),
+            ),
+            (
+                Effect::RecordTrack {
+                    speaker: speaker.clone(),
+                    consent: consent.clone(),
+                    track: track.clone(),
+                },
+                "/track",
+                RecorderRequest::Track(Ordered {
+                    seq,
+                    request: TrackRecording {
+                        who,
+                        name: name.clone(),
+                        role: Role::Host,
+                        consent: consent.clone(),
+                        session: track.session.clone(),
+                        track_name: track.name.clone(),
+                    },
+                }),
+            ),
+            (
+                Effect::StopRecordingTrack {
+                    who,
+                    track: track.clone(),
+                    consent: Some(withdrawn.clone()),
+                },
+                "/untrack",
+                RecorderRequest::Untrack(Ordered {
+                    seq,
+                    request: UntrackRecording {
+                        who,
+                        session: track.session.clone(),
+                        track_name: track.name.clone(),
+                        consent: Some(withdrawn.clone()),
+                    },
+                }),
+            ),
+            (
+                Effect::StopRecording,
+                "/stop",
+                RecorderRequest::Stop(Ordered {
+                    seq,
+                    request: Stop {},
+                }),
+            ),
+            (
+                Effect::FinishRecording {
+                    roster: vec![speaker.clone()],
+                    consents: vec![withdrawn.clone()],
+                },
+                "/end",
+                RecorderRequest::End(FinishRecording {
+                    roster: vec![speaker],
+                    consents: vec![withdrawn],
+                }),
+            ),
+        ];
+        for (effect, path, expected) in cases {
+            let request = recorder_request(effect, seq).expect("a recording effect");
+            assert_eq!((request.path(), &request), (path, &expected));
+            let body = serde_json::to_string(&request).expect("serializable");
+            let read = RecorderRequest::parse(path, &body).expect("the recorder reads it");
+            assert_eq!(read.as_ref(), Some(&expected), "{path} {body}");
+        }
+        assert_eq!(recorder_request(Effect::EndMeeting, seq), None);
+    }
+
+    #[test]
+    fn a_numbered_request_is_its_fields_plus_seq() {
+        let stop = RecorderRequest::Stop(Ordered {
+            seq: RequestSeq(7),
+            request: Stop {},
+        });
+        assert_eq!(
+            serde_json::to_value(&stop).expect("serializable"),
+            json!({ "seq": 7 })
+        );
+        // A room that ran older code posts `null` to /stop; the recorder still stops.
+        let RecorderRequest::Stop(old) = RecorderRequest::parse("/stop", "null")
+            .expect("readable")
+            .expect("a stop")
+        else {
+            panic!("not a stop");
+        };
+        assert_eq!(old.seq, RequestSeq::UNORDERED);
+        assert_eq!(RecorderRequest::parse("/transcript", "{}").ok(), Some(None));
+    }
 }

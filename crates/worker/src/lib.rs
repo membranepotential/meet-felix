@@ -64,7 +64,6 @@ use meeting_core::http::ApiErrorCode;
 use meeting_core::{Millis, TranscriptRef};
 use worker::{Context, Date, Env, Request, Response, Result, Router, console_error, event};
 
-// `room.rs` reaches it here as `crate::Jurisdiction`.
 use crate::jurisdiction::Jurisdiction;
 use crate::routes::{create, join, list, owner as owner_routes, transcript};
 
@@ -160,7 +159,9 @@ mod tests {
     /// The path patterns in [`super::route`], read from this file.
     fn route_patterns() -> Vec<&'static str> {
         let source = include_str!("lib.rs");
-        let start = source.find("Router::with_data(").expect("route declares the routes");
+        let start = source
+            .find("Router::with_data(")
+            .expect("route declares the routes");
         let end = start + source[start..].find(".run(req, env)").expect("route runs");
         source[start..end]
             .split("(\"")

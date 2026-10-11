@@ -62,12 +62,6 @@ impl Jurisdiction {
         }
     }
 
-    /// [`Self::parse_var`] with the error as text. Only `room.rs` calls it; it goes once
-    /// `RoomObject::new_recorder` calls [`Self::parse_var`] and [`unique_id`].
-    pub fn from_var(value: &str) -> std::result::Result<Option<Self>, String> {
-        Self::parse_var(value).map_err(|e| e.to_string())
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Eu => "eu",
@@ -106,7 +100,7 @@ mod tests {
             );
         }
         assert_eq!(
-            Jurisdiction::from_var("de"),
+            Jurisdiction::parse_var("de").map_err(|e| e.to_string()),
             Err(format!(
                 "{ROOM_JURISDICTION} must be empty, \"eu\", \"us\" or \"fedramp\", not \"de\""
             ))

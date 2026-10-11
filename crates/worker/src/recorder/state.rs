@@ -153,7 +153,7 @@ impl Default for RequestSeq {
 
 /// A request from the room with its [`RequestSeq`], as the room posts it: the request's own
 /// fields plus `seq`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ordered<R> {
     #[serde(default)]
     pub seq: RequestSeq,
@@ -162,7 +162,7 @@ pub struct Ordered<R> {
 }
 
 /// The body of `/stop`, which has no fields besides its [`RequestSeq`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stop {}
 
 /// The newest requests the recorder applied: per speaker the last `/track` or `/untrack`, and

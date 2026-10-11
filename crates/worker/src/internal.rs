@@ -9,6 +9,8 @@ use meeting_core::{
 use serde::{Deserialize, Serialize};
 use worker::{Method, ObjectNamespace, Request, RequestInit, Response, Result, Stub};
 
+use crate::recorder::{Ordered, RequestSeq, Stop};
+
 /// Origin of internal requests to a Durable Object; the object reads only the path.
 pub const ORIGIN: &str = "https://object";
 /// `POST`: create the room's state. Sent once, right after the router created the object.
@@ -67,7 +69,7 @@ pub const TRANSCRIPT_MD: &str = "transcript.md";
 pub const TRANSCRIPT_JSON: &str = "transcript.json";
 
 /// Body of [`RECORDER_START`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartRecording {
     pub meeting: MeetingId,
@@ -76,7 +78,7 @@ pub struct StartRecording {
 
 /// Body of [`RECORDER_TRACK`]: a consenting speaker's audio track, with their name and consent,
 /// so the recorder knows both even if the final [`FinishRecording`] never arrives.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackRecording {
     pub who: ParticipantId,
@@ -89,7 +91,7 @@ pub struct TrackRecording {
 
 /// Body of [`RECORDER_UNTRACK`], with the speaker's consent record as it stands now, which
 /// shows a withdrawal.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UntrackRecording {
     pub who: ParticipantId,
@@ -106,6 +108,52 @@ pub struct UntrackRecording {
 pub struct FinishRecording {
     pub roster: Vec<RosterEntry>,
     pub consents: Vec<ConsentRecord>,
+}
+
+/// A request from the room to its recorder: the path it goes to and, serialized, its body.
+/// The room builds it from a recording effect and posts it; the recorder reads it back with
+/// [`RecorderRequest::parse`]. `/track`, `/untrack` and `/stop` carry the room's number
+/// ([`Ordered`]).
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum RecorderRequest {
+    Start(StartRecording),
+    Track(Ordered<TrackRecording>),
+    Untrack(Ordered<UntrackRecording>),
+    Stop(Ordered<Stop>),
+    End(FinishRecording),
+}
+
+impl RecorderRequest {
+    /// The recorder's path for this request.
+    pub fn path(&self) -> &'static str {
+        match self {
+            Self::Start(_) => RECORDER_START,
+            Self::Track(_) => RECORDER_TRACK,
+            Self::Untrack(_) => RECORDER_UNTRACK,
+            Self::Stop(_) => RECORDER_STOP,
+            Self::End(_) => RECORDER_END,
+        }
+    }
+
+    /// The request posted to `path` with `body`; `None` if `path` takes no request. A `/stop`
+    /// from a room that ran older code has the body `null` and counts as
+    /// [`RequestSeq::UNORDERED`].
+    pub fn parse(path: &str, body: &str) -> serde_json::Result<Option<Self>> {
+        Ok(Some(match path {
+            RECORDER_START => Self::Start(serde_json::from_str(body)?),
+            RECORDER_TRACK => Self::Track(serde_json::from_str(body)?),
+            RECORDER_UNTRACK => Self::Untrack(serde_json::from_str(body)?),
+            RECORDER_STOP => Self::Stop(
+                serde_json::from_str::<Option<Ordered<Stop>>>(body)?.unwrap_or(Ordered {
+                    seq: RequestSeq::UNORDERED,
+                    request: Stop {},
+                }),
+            ),
+            RECORDER_END => Self::End(serde_json::from_str(body)?),
+            _ => return Ok(None),
+        }))
+    }
 }
 
 /// A `RoomObject`'s id as text (hex), as KV maps meeting words to it and the meeting index keeps
