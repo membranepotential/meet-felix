@@ -1,0 +1,15 @@
+{
+  "open": {
+    "room": {
+      "meeting": "abide-acid-acorn",
+      "participants": {
+        "0": {
+          "name": "Ada",
+          "consent_recording": true
+        }
+      }
+    },
+    "alarm": null,
+    "nextParticipant": 1
+  }
+}

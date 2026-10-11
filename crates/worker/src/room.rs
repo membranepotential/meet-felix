@@ -671,7 +671,7 @@ impl RoomObject {
         let Some(json) = json else {
             return Ok(None);
         };
-        match crate::record::decode(&json).map_err(worker::Error::RustError)? {
+        match crate::record::decode(&json)? {
             Decoded::Current(record) => Ok(Some(record)),
             Decoded::Outdated { version } => {
                 console_warn!(

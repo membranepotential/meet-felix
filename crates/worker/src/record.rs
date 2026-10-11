@@ -1,12 +1,18 @@
 //! What a `RoomObject` keeps across hibernation: one storage record and one attachment per
-//! socket. Pure, so the rules are tested natively.
+//! socket; and the versioned envelope both Durable Objects keep their record in. Pure, so the
+//! rules are tested natively.
 //!
 //! The record is stored with a version ([`RECORD_VERSION`], research 11 item 2), so a change of
 //! its shape cannot make a room fail every request: a record of an older version loads as an
 //! ended meeting ([`decode`]). New fields with an obvious default carry `#[serde(default)]`, so
-//! adding one needs no new version.
+//! adding one needs no new version. Records that deployed code wrote are frozen in
+//! `crates/worker/fixtures/room/`, and the tests at the end of this file fail on any change of
+//! the stored shape until it is handled (see `fixtures` there).
+
+use std::fmt;
 
 use meeting_core::{Effect, Event, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, step};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::internal::FinishRecording;
@@ -15,11 +21,80 @@ use crate::internal::FinishRecording;
 /// 2 added the consent record to the core's participants and the recorder id.
 pub const RECORD_VERSION: u32 = 2;
 
-/// A stored record with its version.
+/// A stored record with its version: the JSON a Durable Object keeps under its storage key.
 #[derive(Serialize, Deserialize)]
-struct Stored<R> {
-    version: u32,
-    record: R,
+pub struct Stored<R> {
+    pub version: u32,
+    pub record: R,
+}
+
+/// Why a stored record cannot be read.
+#[derive(Debug)]
+pub enum DecodeError {
+    /// The JSON does not have the shape its version promises.
+    Malformed(serde_json::Error),
+    /// A newer version of the code wrote the record. An older Worker may run for minutes after
+    /// a deploy, and must leave such a record alone.
+    Newer { found: u32, supported: u32 },
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed(e) => write!(f, "the stored record is malformed: {e}"),
+            Self::Newer { found, supported } => write!(
+                f,
+                "the stored record has version {found}, newer than this code's {supported}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Malformed(e) => Some(e),
+            Self::Newer { .. } => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for DecodeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Malformed(e)
+    }
+}
+
+impl From<DecodeError> for worker::Error {
+    fn from(e: DecodeError) -> Self {
+        Self::RustError(e.to_string())
+    }
+}
+
+/// The version of a stored record: its `version` field, or 1 for a record stored before
+/// records had versions. A version above `supported` is [`DecodeError::Newer`].
+pub fn stored_version(json: &str, supported: u32) -> Result<u32, DecodeError> {
+    #[derive(Deserialize)]
+    struct Version {
+        #[serde(default = "unversioned")]
+        version: u32,
+    }
+    fn unversioned() -> u32 {
+        1
+    }
+    let Version { version } = serde_json::from_str(json)?;
+    if version > supported {
+        return Err(DecodeError::Newer {
+            found: version,
+            supported,
+        });
+    }
+    Ok(version)
+}
+
+/// The record inside a [`Stored`] envelope.
+pub fn stored_record<R: DeserializeOwned>(json: &str) -> Result<R, DecodeError> {
+    Ok(serde_json::from_str::<Stored<R>>(json)?.record)
 }
 
 /// What [`decode`] found in storage.
@@ -42,24 +117,10 @@ pub fn encode(record: &Record) -> serde_json::Result<String> {
 
 /// Reads a stored record. A record from a newer version is an error, not an outdated one: an
 /// older Worker may run for minutes after a deploy, and must not end rooms a newer one stored.
-pub fn decode(json: &str) -> Result<Decoded, String> {
-    #[derive(Deserialize)]
-    struct Version {
-        #[serde(default = "unversioned")]
-        version: u32,
-    }
-    fn unversioned() -> u32 {
-        1
-    }
-    let Version { version } = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    match version {
-        RECORD_VERSION => serde_json::from_str::<Stored<Record>>(json)
-            .map(|stored| Decoded::Current(stored.record))
-            .map_err(|e| e.to_string()),
-        older if older < RECORD_VERSION => Ok(Decoded::Outdated { version: older }),
-        newer => Err(format!(
-            "the record has version {newer}, newer than this code's {RECORD_VERSION}"
-        )),
+pub fn decode(json: &str) -> Result<Decoded, DecodeError> {
+    match stored_version(json, RECORD_VERSION)? {
+        RECORD_VERSION => stored_record(json).map(Decoded::Current),
+        older => Ok(Decoded::Outdated { version: older }),
     }
 }
 
@@ -294,10 +355,11 @@ pub fn is_stale(now: Millis, since: Millis, last_ping: Option<Millis>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use meeting_core::{
-        ClientMsg, DisplayName, LEAVE_GRACE_MS, MeetingId, ResumeToken, SCHEDULED_TTL_MS,
-        SessionId, SessionKind, SfuReply, TranscriptRef,
+        ClientMsg, DisplayName, LEAVE_GRACE_MS, LocalTrack, MeetingId, Mid, OfferedTrack,
+        ResumeToken, SCHEDULED_TTL_MS, Sdp, SessionEpoch, SessionId, SessionKind, SfuReply,
+        TrackKind, TrackName, TranscriptRef,
     };
 
     use super::*;
@@ -458,10 +520,10 @@ mod tests {
         });
         let waiting = ended.clone().with_pending_finish(pending_finish());
         let json = encode(&waiting).unwrap();
-        assert_eq!(decode(&json), Ok(Decoded::Current(waiting)));
-        // The shape before `EndedRoom` was a struct of its own, and before `pendingFinish`.
+        assert_eq!(decode(&json).unwrap(), Decoded::Current(waiting));
+        // The shape before `pendingFinish` (frozen in `older/v2-ended-without-finish.json`).
         let without = r#"{"version":2,"record":{"ended":{"recordingPolicy":"fromStart"}}}"#;
-        assert_eq!(decode(without), Ok(Decoded::Current(ended)));
+        assert_eq!(decode(without).unwrap(), Decoded::Current(ended));
     }
 
     #[test]
@@ -479,22 +541,357 @@ mod tests {
             json.starts_with(r#"{"version":2,"record":{"open":"#),
             "{json}"
         );
-        assert_eq!(decode(&json), Ok(Decoded::Current(record)));
+        assert_eq!(decode(&json).unwrap(), Decoded::Current(record));
     }
 
     #[test]
-    fn an_unversioned_record_loads_as_outdated_and_a_newer_one_fails() {
-        // The shape stored before versioning: the record itself, and participants without the
-        // consent record.
-        let old = r#"{"open":{"room":{"meeting":"abide-acid-acorn","participants":{"0":
-            {"name":"Ada","consent_recording":true}}},"alarm":null,"nextParticipant":1}}"#;
-        assert_eq!(decode(old), Ok(Decoded::Outdated { version: 1 }));
-        assert_eq!(
-            decode(r#"{"ended":{"recordingPolicy":"fromStart"}}"#),
-            Ok(Decoded::Outdated { version: 1 })
+    fn a_newer_record_and_a_malformed_one_are_told_apart() {
+        assert!(matches!(
+            decode(r#"{"version":3,"record":{}}"#),
+            Err(DecodeError::Newer {
+                found: 3,
+                supported: RECORD_VERSION
+            })
+        ));
+        assert!(matches!(
+            decode("not json"),
+            Err(DecodeError::Malformed(_))
+        ));
+        assert!(matches!(
+            decode(r#"{"version":2,"record":{"open":{}}}"#),
+            Err(DecodeError::Malformed(_))
+        ));
+    }
+
+    /// Frozen stored records, one file each, under `crates/worker/fixtures/<object>/`:
+    ///
+    /// - `current/` holds records written by the current code, from a few rich scenarios.
+    ///   Each must load and store again as exactly the same JSON, so any change of the stored
+    ///   shape (a field added, renamed or removed, a variant renamed) fails a test.
+    /// - `older/` holds records that earlier deployed code wrote, named `v<version>-<what>.json`.
+    ///   They must still load: a record of the current version as such, an older one as the
+    ///   object's rule for that version says.
+    ///
+    /// When a `current/` test fails after a change of a stored type, decide: if every older
+    /// record still loads (new fields have a default), move the `current/` files to `older/`
+    /// under a name that says what they lack, and capture new ones with
+    /// `cargo test -p meet-worker -- --ignored capture`. Otherwise raise the version and give
+    /// the old version a rule (for the room: it loads as outdated) before capturing. Never edit
+    /// a file in `older/`: production may hold that exact record.
+    pub(crate) mod fixtures {
+        use std::path::{Path, PathBuf};
+
+        fn dir(object: &str, which: &str) -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join(object)
+                .join(which)
+        }
+
+        /// The fixtures in `fixtures/<object>/<which>/`, as (file name, JSON), sorted by name.
+        pub(crate) fn read(object: &str, which: &str) -> Vec<(String, String)> {
+            let mut files: Vec<(String, String)> = std::fs::read_dir(dir(object, which))
+                .expect("the fixture directory exists")
+                .map(|entry| {
+                    let path = entry.expect("a readable entry").path();
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    (name, std::fs::read_to_string(&path).expect("a readable file"))
+                })
+                .collect();
+            files.sort();
+            assert!(!files.is_empty(), "no fixtures in {object}/{which}");
+            files
+        }
+
+        /// The version a file in `older/` was stored with, from its name `v<version>-…`.
+        pub(crate) fn version_in_name(name: &str) -> u32 {
+            name.strip_prefix('v')
+                .and_then(|rest| rest.split('-').next())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("{name} is not named v<version>-<what>.json"))
+        }
+
+        /// Writes `json` as `fixtures/<object>/current/<name>`, pretty-printed.
+        pub(crate) fn capture(object: &str, name: &str, json: &str) {
+            let value: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            let pretty = serde_json::to_string_pretty(&value).expect("printable") + "\n";
+            std::fs::write(dir(object, "current").join(name), pretty).expect("writable");
+        }
+
+        /// Whether `stored` is the same JSON as `fixture`, ignoring layout.
+        pub(crate) fn same_json(fixture: &str, stored: &str) -> bool {
+            let parse = |json| serde_json::from_str::<serde_json::Value>(json).expect("valid JSON");
+            parse(fixture) == parse(stored)
+        }
+    }
+
+    /// The rooms the `current/` fixtures freeze: a scheduled room with a guest waiting for the
+    /// host, a live room that holds most states a participant and a session can be in, and an
+    /// ended room with a pending finish.
+    fn fixture_rooms() -> [(&'static str, Record); 3] {
+        let live = live_fixture_room();
+        let finish = FinishRecording {
+            roster: live.room.roster(),
+            consents: live.room.consents(),
+        };
+        let ended = Record::Ended(EndedRoom {
+            recording_policy: RecordingPolicy::HostDecides,
+            pending_finish: None,
+        })
+        .with_pending_finish(PendingFinish {
+            recorder: RECORDER_ID.into(),
+            finish,
+        });
+        [
+            ("scheduled.json", Record::Open(scheduled_fixture_room())),
+            ("live.json", Record::Open(live)),
+            ("ended.json", ended),
+        ]
+    }
+
+    const RECORDER_ID: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+    fn client(from: u32, msg: ClientMsg, owner: bool) -> Event {
+        Event::Client {
+            from: ParticipantId(from),
+            msg,
+            owner,
+            fresh_token: ResumeToken::from_random([from as u8 + 1; 16]),
+        }
+    }
+
+    fn join(from: u32, owner: bool, consent: bool) -> Event {
+        let name = DisplayName::parse(&format!("Person {from}")).unwrap();
+        client(
+            from,
+            ClientMsg::Join {
+                name,
+                consent,
+                resume: None,
+            },
+            owner,
+        )
+    }
+
+    fn created(who: u32, kind: SessionKind) -> Event {
+        Event::Sfu(SfuReply::SessionCreated {
+            who: ParticipantId(who),
+            kind,
+            session: SessionId::new(format!("{kind:?}-{who}")),
+        })
+    }
+
+    /// Steps `open` through `event`; returns the open room and the effects.
+    fn drive(open: OpenRoom, now: Millis, event: Event) -> (OpenRoom, Vec<Effect>) {
+        match open.step(now, event) {
+            (Record::Open(open), effects) => (open, effects),
+            (ended, _) => panic!("the fixture room ended: {ended:?}"),
+        }
+    }
+
+    fn scheduled_fixture_room() -> OpenRoom {
+        let (room, effects) = RoomState::new(
+            MeetingId::from_random([4, 5, 6]),
+            TranscriptRef::new("0123456789abcdef0123456789abcdef"),
+            RecordingPolicy::FromStart,
+            T0,
         );
-        assert!(decode(r#"{"version":3,"record":{}}"#).is_err());
-        assert!(decode("not json").is_err());
+        let Record::Open(open) = Record::created(room, &effects) else {
+            panic!("a new room is open")
+        };
+        let (open, _) = open.connect();
+        let Record::Open(open) = open else {
+            panic!("still open")
+        };
+        drive(open, T0.after(1_000), join(0, false, true)).0
+    }
+
+    fn live_fixture_room() -> OpenRoom {
+        let (room, effects) = RoomState::new(
+            MeetingId::from_random([7, 8, 9]),
+            TranscriptRef::new("fedcba9876543210fedcba9876543210"),
+            RecordingPolicy::HostDecides,
+            T0,
+        );
+        let Record::Open(mut open) = Record::created(room, &effects) else {
+            panic!("a new room is open")
+        };
+        let mut now = T0;
+        let mut step = |open: OpenRoom, event: Event| {
+            now = now.after(1_000);
+            drive(open, now, event)
+        };
+        let (host, guest, knocking, awaiting, connecting, left) = (0, 1, 2, 3, 4, 5);
+        let track = |who: u32, kind: TrackKind, mid: &str| LocalTrack {
+            mid: Mid::new(mid),
+            kind,
+            name: TrackName::new(format!("{kind:?}-{who}")),
+        };
+        // The host joins, goes live and records; a guest joins.
+        for event in [
+            join(host, true, true),
+            created(host, SessionKind::Publish),
+            created(host, SessionKind::Subscribe),
+            client(host, ClientMsg::SetRecording { on: true }, true),
+            join(guest, false, true),
+            created(guest, SessionKind::Publish),
+            created(guest, SessionKind::Subscribe),
+        ] {
+            open = step(open, event).0;
+        }
+        // The host publishes; the guest receives both tracks.
+        let offer = ClientMsg::PublishOffer {
+            sdp: Sdp::new("v=0 host offer"),
+            tracks: vec![
+                track(host, TrackKind::Audio, "0"),
+                track(host, TrackKind::Video, "1"),
+            ],
+        };
+        let (next, effects) = step(open, client(host, offer, true));
+        let Some(Effect::SfuPublish { negotiation, .. }) = effects
+            .iter()
+            .find(|e| matches!(e, Effect::SfuPublish { .. }))
+        else {
+            panic!("the offer goes to the SFU")
+        };
+        let published = SfuReply::Published {
+            who: ParticipantId(host),
+            session: SessionId::new("Publish-0"),
+            negotiation: *negotiation,
+            sdp_answer: Sdp::new("v=0 host answer"),
+            rejected: Vec::new(),
+        };
+        let (next, effects) = step(next, Event::Sfu(published));
+        let Some(Effect::SfuSubscribe {
+            negotiation,
+            tracks,
+            ..
+        }) = effects
+            .iter()
+            .find(|e| matches!(e, Effect::SfuSubscribe { .. }))
+        else {
+            panic!("the guest pulls the host's tracks")
+        };
+        let offered = SfuReply::SubscribeOffer {
+            who: ParticipantId(guest),
+            session: SessionId::new("Subscribe-1"),
+            negotiation: *negotiation,
+            sdp_offer: Sdp::new("v=0 subscribe offer"),
+            tracks: tracks
+                .iter()
+                .zip(["0", "1"])
+                .map(|(track, mid)| OfferedTrack {
+                    mid: Mid::new(mid),
+                    track: track.clone(),
+                })
+                .collect(),
+        };
+        let negotiation = *negotiation;
+        let (next, _) = step(next, Event::Sfu(offered));
+        let answer = ClientMsg::SubscribeAnswer {
+            sdp: Sdp::new("v=0 subscribe answer"),
+        };
+        let (next, _) = step(next, client(guest, answer, false));
+        let renegotiated = SfuReply::Renegotiated {
+            who: ParticipantId(guest),
+            session: SessionId::new("Subscribe-1"),
+            negotiation,
+        };
+        open = step(next, Event::Sfu(renegotiated)).0;
+        // The guest offers audio the SFU has not answered yet, then withdraws consent (and is
+        // muted); others wait outside, connect, or left; the host's subscribe session is being
+        // replaced; the guest's socket dropped.
+        let guest_offer = ClientMsg::PublishOffer {
+            sdp: Sdp::new("v=0 guest offer"),
+            tracks: vec![track(guest, TrackKind::Audio, "0")],
+        };
+        let reset = ClientMsg::ResetSession {
+            kind: SessionKind::Subscribe,
+            epoch: SessionEpoch(0),
+        };
+        for event in [
+            client(guest, guest_offer, false),
+            client(guest, ClientMsg::SetConsent { consent: false }, false),
+            join(awaiting, false, false),
+            join(connecting, false, true),
+            created(connecting, SessionKind::Publish),
+            join(left, false, true),
+            client(left, ClientMsg::Leave, false),
+            client(host, ClientMsg::Lock { on: true }, true),
+            join(knocking, false, false),
+            client(host, reset, true),
+            Event::SocketClosed {
+                who: ParticipantId(guest),
+            },
+        ] {
+            open = step(open, event).0;
+        }
+        OpenRoom {
+            next_participant: 6,
+            recorder: Some(RECORDER_ID.into()),
+            ..open
+        }
+    }
+
+    /// Writes the `current/` fixtures from [`fixture_rooms`]; see [`fixtures`] for when.
+    #[test]
+    #[ignore = "writes the fixtures of the current shape; run it only after a shape change"]
+    fn capture_room_fixtures() {
+        for (name, record) in fixture_rooms() {
+            fixtures::capture("room", name, &encode(&record).unwrap());
+        }
+    }
+
+    #[test]
+    fn the_current_code_stores_the_frozen_room_records_unchanged() {
+        for (name, json) in fixtures::read("room", "current") {
+            let Decoded::Current(record) = decode(&json).unwrap_or_else(|e| panic!("{name}: {e}"))
+            else {
+                panic!("{name} is a record of the current version")
+            };
+            assert!(
+                fixtures::same_json(&json, &encode(&record).unwrap()),
+                "{name} no longer stores as frozen: the stored shape changed (see `fixtures`)"
+            );
+        }
+    }
+
+    #[test]
+    fn every_room_record_deployed_code_stored_still_loads() {
+        for (name, json) in fixtures::read("room", "older") {
+            let version = fixtures::version_in_name(&name);
+            match decode(&json).unwrap_or_else(|e| panic!("{name}: {e}")) {
+                Decoded::Current(_) => assert_eq!(version, RECORD_VERSION, "{name}"),
+                Decoded::Outdated { version: found } => {
+                    assert_eq!(found, version, "{name}");
+                    assert!(found < RECORD_VERSION, "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_frozen_live_room_covers_the_participant_states() {
+        let (_, json) = fixtures::read("room", "current")
+            .into_iter()
+            .find(|(name, _)| name == "live.json")
+            .expect("live.json");
+        for tag in [
+            "\"Knocking\"",
+            "\"AwaitingConsent\"",
+            "\"Connecting\"",
+            "\"Joined\"",
+            "\"Left\"",
+            "\"Replacing\"",
+            "\"Requested\"",
+            "\"OfferPending\"",
+            "\"withdrawn_at\"",
+            "\"socket_lost\"",
+            "\"receiving\"",
+            "\"On\"",
+        ] {
+            assert!(json.contains(tag), "live.json lacks {tag}");
+        }
     }
 
     #[test]

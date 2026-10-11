@@ -1,0 +1,72 @@
+{
+  "record": {
+    "ended": {
+      "pendingFinish": {
+        "finish": {
+          "consents": [
+            {
+              "at": 1001000,
+              "name": "Person 0",
+              "noticeVersion": 1,
+              "who": 0
+            },
+            {
+              "at": 1005000,
+              "name": "Person 1",
+              "noticeVersion": 1,
+              "who": 1,
+              "withdrawnAt": 1014000
+            },
+            {
+              "at": 1016000,
+              "name": "Person 4",
+              "noticeVersion": 1,
+              "who": 4
+            },
+            {
+              "at": 1018000,
+              "name": "Person 5",
+              "noticeVersion": 1,
+              "who": 5
+            }
+          ],
+          "roster": [
+            {
+              "id": 0,
+              "name": "Person 0",
+              "role": "host"
+            },
+            {
+              "id": 1,
+              "name": "Person 1",
+              "role": "guest"
+            },
+            {
+              "id": 2,
+              "name": "Person 2",
+              "role": "guest"
+            },
+            {
+              "id": 3,
+              "name": "Person 3",
+              "role": "guest"
+            },
+            {
+              "id": 4,
+              "name": "Person 4",
+              "role": "guest"
+            },
+            {
+              "id": 5,
+              "name": "Person 5",
+              "role": "guest"
+            }
+          ]
+        },
+        "recorder": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+      },
+      "recordingPolicy": "hostDecides"
+    }
+  },
+  "version": 2
+}

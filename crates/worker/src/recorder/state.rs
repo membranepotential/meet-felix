@@ -478,4 +478,117 @@ mod tests {
         assert_eq!(recorder.speakers.len(), 1);
         assert_eq!(recorder.speakers[0].name.as_str(), "Anna");
     }
+
+    /// Recorders the fixtures freeze: one per phase and job step, with speakers, a withdrawn
+    /// consent, and adapters open, closed and being created.
+    fn fixture_recorders() -> Vec<(&'static str, Recorder)> {
+        let (ada, bo) = (ParticipantId(0), ParticipantId(1));
+        let recording = Recorder {
+            meeting: MeetingId::from_random([1, 2, 3]),
+            started_at: Millis(1_791_583_200_000),
+            secret: "00112233445566778899aabbccddeeff".into(),
+            speakers: vec![
+                RosterEntry {
+                    id: ada,
+                    name: DisplayName::parse("Ada").unwrap(),
+                    role: Role::Host,
+                },
+                RosterEntry {
+                    id: bo,
+                    name: DisplayName::parse("Bo").unwrap(),
+                    role: Role::Guest,
+                },
+            ],
+            consents: vec![
+                ConsentRecord {
+                    who: ada,
+                    name: DisplayName::parse("Ada").unwrap(),
+                    at: Millis(1_791_583_200_000),
+                    notice_version: 1,
+                    withdrawn_at: None,
+                },
+                ConsentRecord {
+                    who: bo,
+                    name: DisplayName::parse("Bo").unwrap(),
+                    at: Millis(1_791_583_260_000),
+                    notice_version: 1,
+                    withdrawn_at: Some(Millis(1_791_583_500_000)),
+                },
+            ],
+            adapters: vec![
+                Adapter {
+                    who: ada,
+                    generation: 0,
+                    session: SessionId::new("publish-0"),
+                    track_name: TrackName::new("audio-0"),
+                    id: Some(AdapterId::new("adapter-0")),
+                    open: true,
+                },
+                Adapter {
+                    who: bo,
+                    generation: 0,
+                    session: SessionId::new("publish-1"),
+                    track_name: TrackName::new("audio-1"),
+                    id: Some(AdapterId::new("adapter-1")),
+                    open: false,
+                },
+                Adapter {
+                    who: bo,
+                    generation: 1,
+                    session: SessionId::new("publish-1b"),
+                    track_name: TrackName::new("audio-1b"),
+                    id: None,
+                    open: true,
+                },
+            ],
+            phase: Phase::Recording,
+        };
+        let at = Millis(1_791_586_800_000);
+        let ended = |job| Recorder {
+            phase: Phase::Ended { at, job },
+            ..recording.clone()
+        };
+        vec![
+            ("recording", recording.clone()),
+            (
+                "transcribing",
+                ended(Job::Transcribing {
+                    retry_at: Some(at.after(HOUR_MS)),
+                    waiting_since: Some(at),
+                }),
+            ),
+            (
+                "merging",
+                ended(Job::Merging {
+                    after: Some(SegmentCursor {
+                        start_ms: 1_791_583_300_000,
+                        id: 42,
+                    }),
+                    failures: 1,
+                }),
+            ),
+            (
+                "ready",
+                ended(Job::Ready {
+                    audio_until: at.after(AUDIO_RETENTION_MS),
+                    audio_deleted_at: Some(at.after(AUDIO_RETENTION_MS + 60_000)),
+                }),
+            ),
+            ("failed", ended(Job::Failed { at: at.after(HOUR_MS) })),
+        ]
+    }
+
+    #[test]
+    fn the_frozen_unversioned_recorders_load() {
+        let built = fixture_recorders();
+        for (name, json) in crate::record::tests::fixtures::read("recorder", "older") {
+            let recorder: Recorder =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (_, expected) = built
+                .iter()
+                .find(|(n, _)| format!("v1-{n}.json") == name)
+                .expect("a fixture recorder");
+            assert_eq!(&recorder, expected, "{name}");
+        }
+    }
 }
