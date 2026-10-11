@@ -1417,7 +1417,11 @@ impl Sim {
                     _ => false,
                 };
                 prop_assert!(after.alarms().all(expected));
-                prop_assert!(after.next_alarm() <= Some(since.after(SCHEDULED_TTL_MS)));
+                prop_assert!(
+                    after
+                        .next_alarm()
+                        .is_some_and(|at| at <= since.after(SCHEDULED_TTL_MS))
+                );
             }
             // No room is live without a host having joined. The empty timer runs exactly while
             // nobody is admitted.

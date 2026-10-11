@@ -717,6 +717,27 @@ fn ending_tells_everyone_and_releases_the_link() {
 }
 
 #[test]
+fn ending_closes_every_participants_socket_before_the_meeting_ends_so_the_shell_closes_the_rest() {
+    // A participant in the grace period has no socket of its own: a socket that resumes its
+    // place is bound to nobody until its `Join` is processed. The core closes the participants'
+    // sockets with `Ended`; the shell closes any other open socket with `EndedUnseen` when it
+    // executes `EndMeeting`, which is the last effect.
+    let (mut room, ..) = recorded_guest();
+    room.apply(Event::SocketClosed { who: GUEST });
+    let effects = room.client(HOST, ClientMsg::End);
+    for who in [HOST, GUEST] {
+        assert!(
+            effects.contains(&Effect::CloseSocket {
+                who,
+                why: CloseCode::Ended
+            }),
+            "{who:?}"
+        );
+    }
+    assert_eq!(effects.last(), Some(&Effect::EndMeeting));
+}
+
+#[test]
 fn a_full_room_refuses_new_guests_but_never_the_owner_or_a_resume() {
     let mut room = meeting_room();
     let guest_token = room
@@ -2510,6 +2531,8 @@ fn close_codes_tell_the_client_whether_to_come_back() {
         CloseCode::NoJoin,
         CloseCode::Crowded,
         CloseCode::TryLater,
+        // The client then finds the meeting ended, instead of showing a refusal.
+        CloseCode::EndedUnseen,
     ] {
         assert_eq!(after_close(why.code()), AfterClose::Reconnect, "{why:?}");
     }

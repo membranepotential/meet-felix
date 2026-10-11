@@ -275,6 +275,11 @@ pub enum CloseCode {
     /// The client's protocol is older than [`MIN_PROTOCOL_VERSION`]
     /// ([`ErrorCode::OutdatedClient`] came first).
     Outdated,
+    /// The meeting ended while the socket was bound to no participant, such as a client resuming
+    /// its place whose `Join` was not processed yet, so no [`ServerMsg::Ended`] reached it. The
+    /// client reconnects and its lookup finds the meeting ended; a final code would show it
+    /// "refused".
+    EndedUnseen,
 }
 
 /// What a client does after the room closed its socket with a code.
@@ -301,7 +306,7 @@ impl CloseCode {
         match self {
             Self::Left | Self::Replaced => 1000,
             // Going away.
-            Self::Stale => 1001,
+            Self::Stale | Self::EndedUnseen => 1001,
             // Policy violation.
             Self::OverBudget | Self::NoJoin | Self::Crowded => 1008,
             // Try again later.
@@ -328,6 +333,7 @@ impl CloseCode {
             Self::Ended => "The meeting has ended.",
             Self::RoomFull => "This meeting is full. Try again later.",
             Self::Outdated => "This page is out of date. Reload it to join the meeting.",
+            Self::EndedUnseen => "The meeting has ended.",
         }
     }
 }

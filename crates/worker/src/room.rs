@@ -201,27 +201,13 @@ impl RoomObject {
         }
         let sockets: Vec<_> = self.open_sockets().collect();
         let attached: Vec<OpenSocket> = sockets.iter().map(|(_, socket)| *socket).collect();
-        let orphans = open
-            .orphans(&attached)
-            .into_iter()
-            .map(|who| Input::from(Event::SocketClosed { who }));
         let stale = sockets
             .into_iter()
             .filter(|(ws, socket)| is_stale(now, socket.since, last_ping(&self.state, ws)))
-            .map(|(ws, socket)| Input {
-                event: Event::SocketClosed {
-                    who: socket.participant,
-                },
-                close: Some((ws, CloseCode::Stale)),
-            });
-        // The reports go first: they make no SFU call, while `AlarmFired` may (a grace that
-        // expires closes tracks), and a client could resume on a new socket during that call.
-        // `run` also drops a report whose socket the resume closed meanwhile.
-        let inputs: VecDeque<Input> = orphans
-            .chain(stale)
-            .chain(std::iter::once(Input::from(Event::AlarmFired)))
+            .map(|(ws, socket)| (ws, socket.participant))
             .collect();
-        self.run(inputs).await?;
+        self.run(alarm_inputs(open.orphans(&attached), stale))
+            .await?;
         self.arm().await
     }
 
@@ -479,8 +465,10 @@ impl RoomObject {
                 }
             }
             Effect::EndMeeting => {
+                // The core closed every participant's socket with `Ended` before this effect,
+                // so the open ones left are bound to nobody and never heard `Ended`.
                 for (ws, _) in self.open_sockets() {
-                    close(&ws, CloseCode::Ended);
+                    close(&ws, CloseCode::EndedUnseen);
                 }
                 // Replaces the core's last alarm; a failed `/end` re-arms it sooner.
                 self.delete_later().await?;
@@ -688,15 +676,37 @@ impl RoomObject {
 /// One event for the core and, for a socket the room closes itself (the keepalive check found
 /// it stale, or it overspent its message budget), that socket, which the room closes once the
 /// step reporting it is stored.
-struct Input {
+struct Input<S = WebSocket> {
     event: Event,
-    close: Option<(WebSocket, CloseCode)>,
+    close: Option<(S, CloseCode)>,
 }
 
-impl From<Event> for Input {
+impl<S> From<Event> for Input<S> {
     fn from(event: Event) -> Self {
         Self { event, close: None }
     }
+}
+
+/// What one alarm feeds the core, in order: the reports of `orphans` (participants with no
+/// socket), then of the `stale` sockets, each closed once its report is stored, then the alarm
+/// itself. The reports go first: they make no SFU call, while `AlarmFired` may (a grace that
+/// expires closes tracks), and a client could resume on a new socket during that call. `run`
+/// also drops a report whose socket the resume closed meanwhile.
+fn alarm_inputs<S>(
+    orphans: Vec<ParticipantId>,
+    stale: Vec<(S, ParticipantId)>,
+) -> VecDeque<Input<S>> {
+    let orphans = orphans
+        .into_iter()
+        .map(|who| Input::from(Event::SocketClosed { who }));
+    let stale = stale.into_iter().map(|(socket, who)| Input {
+        event: Event::SocketClosed { who },
+        close: Some((socket, CloseCode::Stale)),
+    });
+    orphans
+        .chain(stale)
+        .chain(std::iter::once(Input::from(Event::AlarmFired)))
+        .collect()
 }
 
 /// Where one step's recorder requests go: the recorder, and the number the next one carries.
@@ -809,6 +819,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn an_alarm_reports_lost_sockets_before_it_fires() {
+        let inputs = alarm_inputs(
+            vec![ParticipantId(1), ParticipantId(2)],
+            vec![("stale socket", ParticipantId(3))],
+        );
+        let events: Vec<_> = inputs.iter().map(|input| &input.event).collect();
+        let lost = |n| Event::SocketClosed {
+            who: ParticipantId(n),
+        };
+        assert_eq!(
+            events,
+            [&lost(1), &lost(2), &lost(3), &Event::AlarmFired],
+            "every report precedes the alarm"
+        );
+        // Only the stale socket is closed, once its report is stored.
+        let closes: Vec<_> = inputs.iter().map(|input| input.close.as_ref()).collect();
+        assert_eq!(
+            closes,
+            [None, None, Some(&("stale socket", CloseCode::Stale)), None]
+        );
+        assert_eq!(
+            alarm_inputs::<()>(vec![], vec![]).len(),
+            1,
+            "the alarm fires without reports"
+        );
+    }
 
     /// Every recording effect becomes the request the recorder reads at that path, with the
     /// effect's data, and the numbered ones carry the room's number beside their own fields.

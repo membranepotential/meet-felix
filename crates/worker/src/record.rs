@@ -593,9 +593,10 @@ pub fn write_for(
 #[cfg(test)]
 pub(crate) mod tests {
     use meeting_core::{
-        ClientMsg, DisplayName, LEAVE_GRACE_MS, LocalTrack, MeetingId, Mid, NEGOTIATION_TIMEOUT_MS,
-        OfferedTrack, PROTOCOL_VERSION, Phase, RecordingPolicy, ResumeToken, SCHEDULED_TTL_MS, Sdp,
-        SessionEpoch, SessionId, SessionKind, SfuReply, TrackKind, TrackName, TranscriptRef,
+        ClientMsg, CloseCode, DisplayName, LEAVE_GRACE_MS, LocalTrack, MeetingId, Mid,
+        NEGOTIATION_TIMEOUT_MS, OfferedTrack, PROTOCOL_VERSION, Phase, Presence, RecordingPolicy,
+        ResumeToken, SCHEDULED_TTL_MS, Sdp, SessionEpoch, SessionId, SessionKind, SfuReply,
+        TrackKind, TrackName, TranscriptRef,
     };
 
     use super::*;
@@ -1266,6 +1267,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_connecting_participant_stored_without_its_time_is_let_go_at_the_next_alarm() {
+        // The deploy that added `since` to `Connecting` restarted the room and lost the replies
+        // such a participant waited for, so it loads with time 0 and times out at once.
+        const WAITING: ParticipantId = ParticipantId(4);
+        let (_, json) = fixtures::read("room", "older")
+            .into_iter()
+            .find(|(name, _)| name == "v2-live-before-connecting-since.json")
+            .expect("the fixture exists");
+        let Ok(Decoded::Current(Record::Open(open))) = decode(&json) else {
+            panic!("the fixture is an open room of the current version");
+        };
+        let before = open.room.view();
+        assert_eq!(
+            before
+                .participants
+                .iter()
+                .find(|p| p.id == WAITING)
+                .map(|p| p.presence),
+            Some(Presence::Connecting)
+        );
+
+        // Time 0 plus the timeout: the only alarm of the room that is due, as the fixture's
+        // other timers lie around T0.
+        let now = Millis(NEGOTIATION_TIMEOUT_MS);
+        let (Record::Open(after), effects) = run(open, now, Event::AlarmFired) else {
+            panic!("the room stays open");
+        };
+        assert!(effects.contains(&Effect::CloseSocket {
+            who: WAITING,
+            why: CloseCode::TryLater
+        }));
+        assert!(
+            effects.iter().all(
+                |effect| !matches!(effect, Effect::CloseSocket { who, .. } if *who != WAITING)
+            ),
+            "{effects:?}"
+        );
+        let view = after.room.view();
+        let others = |view: &meeting_core::RoomView| {
+            view.participants
+                .iter()
+                .filter(|p| p.id != WAITING)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&view), others(&before), "nobody else changes");
+        assert!(view.participants.iter().all(|p| p.id != WAITING));
+    }
+
+    #[test]
     fn the_frozen_live_room_covers_the_participant_states() {
         let (_, json) = fixtures::read("room", "current")
             .into_iter()
@@ -1358,6 +1409,25 @@ pub(crate) mod tests {
             budget = budget.spend(rested).expect("a full burst again");
         }
         assert_eq!(budget.spend(rested), None);
+    }
+
+    #[test]
+    fn a_socket_accepted_into_a_quiet_room_arms_the_alarm_for_its_time_to_join() {
+        // What `RoomObject::accept` sets: the room has no timer of its own, and the new socket
+        // belongs to nobody until its `Join`.
+        let mut open = room_with_host();
+        open.alarm = None;
+        // The helper's host joined without a socket, so its id is not counted yet.
+        open.next_participant = HOST.0 + 1;
+        let (open, participant) = open.connect();
+        let Record::Open(open) = open else {
+            panic!("still open")
+        };
+        let accepted = socket(participant.0, T0, false);
+        assert_eq!(
+            open.alarm_time(&[(accepted, None)]),
+            Some(T0.after(JOIN_TIMEOUT_MS + 1))
+        );
     }
 
     #[test]

@@ -141,18 +141,33 @@ fn owner(ctx: &RouteContext<Config>) -> Result<Response> {
 
 /// [`OWNER_NAME`], or `None` (logged) if it is unset or not a valid display name.
 fn owner_name(ctx: &RouteContext<Config>) -> Option<DisplayName> {
-    let Ok(value) = ctx.var(OWNER_NAME) else {
-        console_error!("{OWNER_NAME} is not set; the app prefills no name for the owner");
-        return None;
-    };
-    let value = value.to_string();
-    DisplayName::parse(&value)
-        .inspect_err(|e| {
-            console_error!(
-                "{OWNER_NAME} {value:?} is not a display name ({e}); the app prefills none"
-            )
-        })
+    let value = ctx.var(OWNER_NAME).ok().map(|value| value.to_string());
+    parse_owner_name(value.as_deref())
+        .inspect_err(|e| console_error!("{e}; the app prefills no name for the owner"))
         .ok()
+}
+
+/// Why [`OWNER_NAME`] gives no name. A deployment mistake: the answer then carries `null`
+/// rather than failing the route.
+#[derive(Debug, PartialEq, Eq)]
+enum OwnerNameError {
+    Unset,
+    Invalid(String),
+}
+
+impl std::fmt::Display for OwnerNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unset => write!(f, "{OWNER_NAME} is not set"),
+            Self::Invalid(value) => write!(f, "{OWNER_NAME} {value:?} is not a display name"),
+        }
+    }
+}
+
+/// The display name in the value of [`OWNER_NAME`]; `value` is `None` if the var is unset.
+fn parse_owner_name(value: Option<&str>) -> Result<DisplayName, OwnerNameError> {
+    let value = value.ok_or(OwnerNameError::Unset)?;
+    DisplayName::parse(value).map_err(|_| OwnerNameError::Invalid(value.to_owned()))
 }
 
 fn with_cookie(response: Response, set_cookie: &str) -> Result<Response> {
@@ -168,6 +183,29 @@ fn bearer_token(header: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_owner_name_is_null_unless_the_var_holds_a_display_name() {
+        let name = |value| {
+            serde_json::to_value(Owner {
+                name: parse_owner_name(value).ok(),
+            })
+            .expect("the answer serializes")
+        };
+        let null = serde_json::json!({ "name": null });
+        assert_eq!(name(None), null, "unset");
+        assert_eq!(name(Some("")), null, "empty");
+        assert_eq!(name(Some("  ")), null, "blank");
+        assert_eq!(name(Some("Ada\nLovelace")), null, "a control character");
+        let long = "x".repeat(200);
+        assert_eq!(name(Some(&long)), null, "too long");
+        assert_eq!(name(Some("Ada")), serde_json::json!({ "name": "Ada" }));
+        assert_eq!(parse_owner_name(None), Err(OwnerNameError::Unset));
+        assert_eq!(
+            parse_owner_name(Some("")),
+            Err(OwnerNameError::Invalid(String::new()))
+        );
+    }
 
     #[test]
     fn the_bearer_token_follows_the_scheme_verbatim() {

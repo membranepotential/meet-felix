@@ -623,11 +623,20 @@ client what to do:
 |---|---|---|
 | `Left`, `Replaced` (the client left, or resumed on another socket) | 1000 | reconnect (it is gone already) |
 | `Stale` (no ping for a minute) | 1001 | reconnect and resume |
+| `EndedUnseen` (the meeting ended while the socket was bound to no participant, so no `Ended` message reached it) | 1001 | reconnect; the lookup before the retry finds the meeting ended |
 | `OverBudget`, `NoJoin`, `Crowded` | 1008 | reconnect and resume |
 | `TryLater` (the SFU refused a join) | 1013 | reconnect with backoff |
 | `Kicked`, `Ended`, `RoomFull` | 4001–4003 | stop |
 | `Outdated` | 4004 | reload the page |
 | anything else, such as 1006 for a lost connection | | reconnect |
+
+When a meeting ends, the core closes the sockets of everyone present with
+`Ended`. The shell then closes every socket still open, which is bound to
+nobody (such as a client resuming its place in the grace period of D35 whose
+`Join` is not processed yet) and never heard the `Ended` message, with
+`EndedUnseen`. That code is not final: the client reconnects, its lookup before
+the retry finds the meeting ended, and it shows the end screen instead of a
+refusal. (Closing it with `Ended` made that client stop and show "refused".)
 
 The final codes and `Outdated` lie in 4000–4099, which version-1 clients
 already treated as final: such a client stops on `Outdated` and shows its
