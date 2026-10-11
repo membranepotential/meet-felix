@@ -128,10 +128,34 @@ describe('SignalingClient', () => {
 			latest().open();
 			latest().receive('{"type":"consentRequired"}');
 			latest().receive('{"type":"error","code":"sfuUnavailable"}');
+			// Even a refusal that takes long to close the socket does not count as a join.
+			await vi.advanceTimersByTimeAsync(6_000);
 			latest().closedBy(1013, 'the media server is not reachable');
 			await vi.runOnlyPendingTimersAsync();
 		}
 		expect(waits()).toEqual([1, 2, 3]);
+	});
+
+	it('starts over once a socket held for a while, as for a guest at the consent question', async () => {
+		for (let i = 0; i < 2; i++) {
+			latest().open();
+			latest().receive('{"type":"error","code":"sfuUnavailable"}');
+			latest().closedBy(1013, 'the media server is not reachable');
+			await vi.runOnlyPendingTimersAsync();
+		}
+		latest().open();
+		latest().receive('{"type":"consentRequired"}');
+		// A drop soon after the answer still backs off further.
+		latest().closedBy(1006);
+		await vi.runOnlyPendingTimersAsync();
+		expect(waits()).toEqual([1, 2, 3]);
+		// The guest sits at the consent question; then the network drops.
+		latest().open();
+		latest().receive('{"type":"consentRequired"}');
+		await vi.advanceTimersByTimeAsync(5_000);
+		latest().closedBy(1006);
+		const last = statuses.at(-1);
+		expect(last?.kind === 'waiting' && last.retryInMs).toBeLessThanOrEqual(500);
 	});
 
 	it('stops for good on a final close code, and asks for a reload on an outdated one', () => {

@@ -5,9 +5,11 @@
  * once when the page becomes visible or the network returns (iOS drops sockets of
  * backgrounded tabs). After every (re)connect `onOpen` runs, where the caller sends `Join`;
  * the server answers with `Welcome` and a full state, so no message replay is needed. The
- * backoff starts over only once the room placed us, in the meeting (`Welcome`) or outside it
- * (`Waiting`), so a room that refuses the join and closes the socket (the SFU is down) is asked
- * less and less often. The room's close code says whether to come back at all (`afterClose`).
+ * backoff starts over once the room placed us, in the meeting (`Welcome`) or outside it
+ * (`Waiting`), or once the socket stayed open for `STABLE_MS` without an error from the room
+ * (a guest who waits at the consent question gets only `ConsentRequired`). So a room that
+ * refuses the join and closes the socket (the SFU is down) is asked less and less often. The
+ * room's close code says whether to come back at all (`afterClose`).
  *
  * While open, the client sends `{"type":"ping"}` every 30 s: the room closes a socket with code
  * 1001 after about 60 s without one, and answers `{"type":"pong"}` without waking its Durable
@@ -75,6 +77,8 @@ export function decodeFrame(raw: string): ServerMsg | null {
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 10_000;
+/** A socket open this long without an error from the room has a join that holds. */
+const STABLE_MS = 5_000;
 
 /** Pure: delay before attempt `attempt` (1-based), with "equal jitter" from `random()`. */
 export function backoffDelay(attempt: number, random: () => number = Math.random): number {
@@ -96,6 +100,8 @@ export class SignalingClient {
 	#attempt = 0;
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
 	#keepalive: ReturnType<typeof setInterval> | undefined;
+	/** Starts the backoff over once the current socket has held for `STABLE_MS`. */
+	#stableTimer: ReturnType<typeof setTimeout> | undefined;
 	#stopped = false;
 
 	constructor(meeting: MeetingId, handlers: SignalingHandlers) {
@@ -141,6 +147,7 @@ export class SignalingClient {
 	reconnect(): void {
 		if (this.#stopped || this.#replaced !== null) return;
 		clearTimeout(this.#retryTimer);
+		clearTimeout(this.#stableTimer);
 		clearInterval(this.#keepalive);
 		// Detached first, so the old socket's messages and `close` event are ignored.
 		this.#replaced = this.#socket;
@@ -153,6 +160,7 @@ export class SignalingClient {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		clearTimeout(this.#retryTimer);
+		clearTimeout(this.#stableTimer);
 		clearInterval(this.#keepalive);
 		document.removeEventListener('visibilitychange', this.#retryNow);
 		window.removeEventListener('online', this.#retryNow);
@@ -175,6 +183,8 @@ export class SignalingClient {
 			this.#keepalive = setInterval(() => {
 				if (socket.readyState === WebSocket.OPEN) socket.send(PING);
 			}, KEEPALIVE_MS);
+			clearTimeout(this.#stableTimer);
+			this.#stableTimer = setTimeout(() => (this.#attempt = 0), STABLE_MS);
 			this.#handlers.onStatus({ kind: 'open' });
 			this.#handlers.onOpen();
 		});
@@ -185,13 +195,15 @@ export class SignalingClient {
 			if (msg === null) return;
 			// The room placed us: the next lost connection starts the backoff over. Not on
 			// `ConsentRequired`: a host gets it before the room asks the SFU for sessions, so it
-			// does not mean the join holds.
+			// does not mean the join holds. An error means it may not: wait for the next socket.
 			if (msg.type === 'welcome' || msg.type === 'waiting') this.#attempt = 0;
+			if (msg.type === 'error') clearTimeout(this.#stableTimer);
 			this.#handlers.onMessage(msg);
 		});
 		socket.addEventListener('close', (event) => {
 			if (socket !== this.#socket || this.#stopped) return;
 			this.#socket = null;
+			clearTimeout(this.#stableTimer);
 			clearInterval(this.#keepalive);
 			const after = afterClose(event.code);
 			if (after === 'reconnect') {
