@@ -43,10 +43,14 @@
 		meetingInfo = { kind: 'loading' };
 		const result = await getMeeting(meeting);
 		meetingInfo = result.ok ? { kind: 'done', info: result.value } : { kind: 'failed' };
+		// Camera and mic go on only for a meeting that can be joined. A press on a pre-join
+		// toggle while the lookup ran may have started a capture: a dead link ends it.
+		if (!result.ok) return;
+		if (result.value.kind === 'open') void media.start();
+		else media.dispose();
 	}
 
 	onMount(() => {
-		void media.start();
 		void lookUp();
 		void owner.check();
 		return () => {

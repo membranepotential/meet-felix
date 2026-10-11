@@ -165,6 +165,10 @@ shows that placeholder.
   ([D15](../recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
 - The pre-join does not show who is already in the room (mockup question G2:
   no "2 people are in the meeting" line).
+- Camera and microphone start only once the meeting lookup says the meeting
+  can be joined (added 2026-10-11). A link to an ended or unknown meeting
+  shows its message without a permission prompt or a camera light, and a
+  capture that finishes after the user left is stopped.
 
 Why the name: a returning guest should not type it again. Why the button
 text: pressing it is the explicit consent that §201 StGB requires, so the

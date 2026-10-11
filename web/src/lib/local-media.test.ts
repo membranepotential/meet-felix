@@ -207,6 +207,38 @@ describe('LocalMedia device switches', () => {
 		expect(media.error).toBeNull();
 	});
 
+	it('stops the tracks of a start that finishes after dispose', async () => {
+		const media = new LocalMedia();
+		const starting = media.start();
+		media.dispose();
+		const tracks = next().grant();
+		await starting;
+		expect(tracks).toHaveLength(2);
+		expect(tracks.every((t) => t.stopped)).toBe(true);
+		expect(media.tracks.audio).toBeNull();
+		expect(media.tracks.video).toBeNull();
+	});
+
+	it('stops a screen share that the picker returns after dispose', async () => {
+		const media = new LocalMedia();
+		const track = new FakeTrack('video', 'screen-0');
+		let pick: (stream: MediaStream) => void = () => {};
+		vi.stubGlobal('navigator', {
+			mediaDevices: {
+				getDisplayMedia: () => new Promise<MediaStream>((resolve) => (pick = resolve)),
+				enumerateDevices: () => Promise.resolve([]),
+				addEventListener() {},
+				removeEventListener() {}
+			}
+		});
+		const sharing = media.startScreenShare();
+		media.dispose();
+		pick({ getVideoTracks: () => [track] } as unknown as MediaStream);
+		expect(await sharing).toBe(false);
+		expect(track.stopped).toBe(true);
+		expect(media.screen).toBeNull();
+	});
+
 	it('restarts the same mic and keeps it muted', async () => {
 		const { media, mic } = await started();
 		media.mute();

@@ -94,6 +94,11 @@ export class LocalMedia {
 			result = await captureUserMedia(this.choice, { audio: true, video: false });
 		}
 		this.starting = false;
+		// Left while the permission prompt was open: nobody will stop these tracks later.
+		if (this.#disposed) {
+			if (result.ok) stopTracks(tracksOf(result.stream));
+			return;
+		}
 		if (!result.ok) {
 			this.error = result.error;
 			await this.refreshDevices();
@@ -188,6 +193,11 @@ export class LocalMedia {
 	async startScreenShare(): Promise<boolean> {
 		const result = await captureScreen();
 		if (!result.ok) return false;
+		// The meeting ended while the picker was open: end the share the browser just began.
+		if (this.#disposed) {
+			result.track.stop();
+			return false;
+		}
 		this.screen?.stop();
 		this.screen = result.track;
 		// The browser's own "Stop sharing" button ends the track.
