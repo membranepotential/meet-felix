@@ -94,6 +94,10 @@ pub struct Recorder {
     #[serde(default)]
     pub consents: Vec<ConsentRecord>,
     pub adapters: Vec<Adapter>,
+    /// Stretches in which a speaker's track was to be recorded but had no adapter, because
+    /// creating it failed ([`Recorder::settle`]); the transcript shows them as missing audio.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrecorded: Vec<Unrecorded>,
     pub phase: RecorderPhase,
     /// The newest of the room's requests the recorder applied, so it can drop one that arrives
     /// after a newer one ([`RequestSeq`]). Recorders stored before it existed load as having
@@ -216,10 +220,10 @@ pub enum TrackPlan {
     Stale,
     /// The speaker's open adapter carries the track already; only the name and consent changed.
     Unchanged,
-    /// A new adapter of this generation is to be created, after closing `replaced`, the
-    /// speaker's previous ones.
+    /// `adapter` is to be created at the SFU, after closing `replaced`, the speaker's previous
+    /// ones.
     New {
-        generation: u32,
+        adapter: Adapter,
         replaced: Vec<Adapter>,
     },
 }
@@ -259,12 +263,133 @@ pub struct Adapter {
     pub generation: u32,
     pub session: SessionId,
     pub track_name: TrackName,
-    /// The SFU's id, stored as soon as the SFU returns it; `None` while it is being created, or
-    /// if creating it failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<AdapterId>,
+    #[serde(flatten)]
+    pub creation: Creation,
     /// Whether the recorder still accepts this adapter's stream.
     pub open: bool,
+}
+
+impl Adapter {
+    /// The SFU's id, once it created the adapter.
+    pub fn id(&self) -> Option<&AdapterId> {
+        match &self.creation {
+            Creation::Created(id) => Some(id),
+            Creation::Asked | Creation::Failing(_) => None,
+        }
+    }
+
+    /// Whether the recorder stopped asking the SFU for it.
+    fn gave_up(&self) -> bool {
+        matches!(
+            self.creation,
+            Creation::Failing(Failing { retry_at: None, .. })
+        )
+    }
+}
+
+/// Where creating an adapter at the SFU stands. Stored as the adapter's `id` once created, and
+/// as `failing` while creating it fails; neither while the first call is out, as before
+/// creating could fail (2026-10-11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "CreationFields", into = "CreationFields")]
+pub enum Creation {
+    /// The recorder asked the SFU and has no answer yet, or an eviction cut the call off.
+    Asked,
+    /// The SFU created it.
+    Created(AdapterId),
+    /// Calls to create it failed.
+    Failing(Failing),
+}
+
+/// Calls to create an adapter that failed, and when the recorder calls again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Failing {
+    /// When the first call failed. From then on the speaker's audio is missing, until the
+    /// adapter exists or closes.
+    pub since: Millis,
+    /// How many calls failed.
+    pub failures: u32,
+    /// When the next call is due; `None` after [`MAX_ADAPTER_CALLS`] failed calls, when the
+    /// recorder gave up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<Millis>,
+}
+
+/// [`Creation`] as the adapter's stored fields.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreationFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<AdapterId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failing: Option<Failing>,
+}
+
+impl From<CreationFields> for Creation {
+    fn from(CreationFields { id, failing }: CreationFields) -> Self {
+        match (id, failing) {
+            (Some(id), _) => Self::Created(id),
+            (None, Some(failing)) => Self::Failing(failing),
+            (None, None) => Self::Asked,
+        }
+    }
+}
+
+impl From<Creation> for CreationFields {
+    fn from(creation: Creation) -> Self {
+        let (id, failing) = match creation {
+            Creation::Asked => (None, None),
+            Creation::Created(id) => (Some(id), None),
+            Creation::Failing(failing) => (None, Some(failing)),
+        };
+        Self { id, failing }
+    }
+}
+
+/// A stretch of a speaker's audio that was to be recorded but had no adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unrecorded {
+    pub who: ParticipantId,
+    pub start: Millis,
+    pub end: Millis,
+}
+
+/// Calls to create an adapter before the recorder gives up on it, about five minutes after the
+/// first ([`adapter_retry`]).
+pub const MAX_ADAPTER_CALLS: u32 = 10;
+
+/// The wait before the next call to create an adapter after the `failures`-th failed one, or
+/// `None` once [`MAX_ADAPTER_CALLS`] failed: 1 s, 2 s, 5 s, 10 s, 30 s, then a minute. The first
+/// wait outlasts the 0.5–1 s after a publish in which the SFU refuses to pull the new track
+/// (measured for subscriber pulls on 2026-10-10; an adapter pulls the track too).
+pub fn adapter_retry(failures: u32) -> Option<u64> {
+    (failures < MAX_ADAPTER_CALLS).then_some(match failures {
+        0 | 1 => 1_000,
+        2 => 2_000,
+        3 => 5_000,
+        4 => 10_000,
+        5 => 30_000,
+        _ => 60_000,
+    })
+}
+
+/// What a call to create an adapter came to ([`Recorder::settle`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settled {
+    /// The adapter exists and streams.
+    Created,
+    /// The SFU created the adapter after the recorder closed it (an untrack, a stop, the end):
+    /// the caller closes it at the SFU.
+    Orphaned(Adapter),
+    /// The call failed; the next is due then.
+    RetryAt(Millis),
+    /// The call failed for the last time: the speaker stays unrecorded until their next track.
+    GaveUp,
+    /// The call failed after the recorder closed the adapter, or the adapter is unknown: there
+    /// is nothing to do.
+    Moot,
 }
 
 /// Where the recording stands. Not `meeting_core::Phase`, the meeting's phase: a recorder
@@ -368,20 +493,113 @@ impl Recorder {
         true
     }
 
-    /// Marks the adapters that `which` selects closed; returns those that were open.
-    pub fn close_adapters(&mut self, which: impl Fn(&Adapter) -> bool) -> Vec<Adapter> {
+    /// Marks the adapters that `which` selects closed at `now`; returns those that were open.
+    /// An adapter that creating failed for leaves the stretch since its first failure
+    /// unrecorded.
+    pub fn close_adapters(
+        &mut self,
+        which: impl Fn(&Adapter) -> bool,
+        now: Millis,
+    ) -> Vec<Adapter> {
         let mut closed = Vec::new();
         for adapter in self.adapters.iter_mut().filter(|a| a.open && which(a)) {
             adapter.open = false;
+            if let Creation::Failing(Failing { since, .. }) = adapter.creation {
+                self.unrecorded.push(Unrecorded {
+                    who: adapter.who,
+                    start: since,
+                    end: now,
+                });
+            }
             closed.push(adapter.clone());
         }
         closed
     }
 
-    /// Applies the room's `/track` numbered `seq`, unless it is stale: records the speaker's
-    /// name and consent, and opens an adapter for the track unless the speaker's open one
-    /// carries it already. The caller creates a new adapter at the SFU.
-    pub fn begin_track(&mut self, track: &TrackRecording, seq: RequestSeq) -> TrackPlan {
+    /// Stores what the call to create the adapter of `(who, generation)` came to at `now`:
+    /// the SFU's id, or a failure, after which the next call is due at the [`adapter_retry`]
+    /// wait. A late success ends the adapter's unrecorded stretch.
+    pub fn settle(
+        &mut self,
+        (who, generation): (ParticipantId, u32),
+        created: Result<AdapterId, ()>,
+        now: Millis,
+    ) -> Settled {
+        let Some(adapter) = self
+            .adapters
+            .iter_mut()
+            .find(|a| a.who == who && a.generation == generation)
+        else {
+            return Settled::Moot;
+        };
+        let failing = match adapter.creation {
+            Creation::Failing(failing) => Some(failing),
+            Creation::Asked | Creation::Created(_) => None,
+        };
+        match created {
+            Ok(id) => {
+                adapter.creation = Creation::Created(id);
+                if !adapter.open {
+                    // Its unrecorded stretch ended when it closed.
+                    return Settled::Orphaned(adapter.clone());
+                }
+                if let Some(Failing { since, .. }) = failing {
+                    self.unrecorded.push(Unrecorded {
+                        who,
+                        start: since,
+                        end: now,
+                    });
+                }
+                Settled::Created
+            }
+            Err(()) if !adapter.open => Settled::Moot,
+            Err(()) => {
+                let failures = failing.map_or(0, |f| f.failures) + 1;
+                let retry_at = adapter_retry(failures).map(|wait| now.after(wait));
+                adapter.creation = Creation::Failing(Failing {
+                    since: failing.map_or(now, |f| f.since),
+                    failures,
+                    retry_at,
+                });
+                retry_at.map_or(Settled::GaveUp, Settled::RetryAt)
+            }
+        }
+    }
+
+    /// The open adapters whose next call to create them is due at `now`.
+    pub fn adapters_due(&self, now: Millis) -> Vec<Adapter> {
+        self.adapters
+            .iter()
+            .filter(|a| {
+                a.open
+                    && matches!(a.creation, Creation::Failing(Failing { retry_at: Some(at), .. }) if at <= now)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// When the next call to create an open adapter is due, if one is.
+    pub fn next_adapter_call(&self) -> Option<Millis> {
+        self.adapters
+            .iter()
+            .filter(|a| a.open)
+            .filter_map(|a| match a.creation {
+                Creation::Failing(Failing { retry_at, .. }) => retry_at,
+                Creation::Asked | Creation::Created(_) => None,
+            })
+            .min()
+    }
+
+    /// Applies the room's `/track` numbered `seq` at `now`, unless it is stale: records the
+    /// speaker's name and consent, and opens an adapter for the track unless the speaker's open
+    /// one carries it already and the recorder has not given up creating it. The caller creates
+    /// a new adapter at the SFU.
+    pub fn begin_track(
+        &mut self,
+        track: &TrackRecording,
+        seq: RequestSeq,
+        now: Millis,
+    ) -> TrackPlan {
         let who = track.who;
         if seq < self.applied.stop.max(self.applied.speaker(who)) {
             return TrackPlan::Stale;
@@ -395,26 +613,22 @@ impl Recorder {
             },
             consent: track.consent.clone(),
         });
-        if self
-            .open_adapter(who)
-            .is_some_and(|a| a.session == track.session && a.track_name == track.track_name)
-        {
+        if self.open_adapter(who).is_some_and(|a| {
+            a.session == track.session && a.track_name == track.track_name && !a.gave_up()
+        }) {
             return TrackPlan::Unchanged;
         }
-        let replaced = self.close_adapters(|a| a.who == who);
-        let generation = self.next_generation(who);
-        self.adapters.push(Adapter {
+        let replaced = self.close_adapters(|a| a.who == who, now);
+        let adapter = Adapter {
             who,
-            generation,
+            generation: self.next_generation(who),
             session: track.session.clone(),
             track_name: track.track_name.clone(),
-            id: None,
+            creation: Creation::Asked,
             open: true,
-        });
-        TrackPlan::New {
-            generation,
-            replaced,
-        }
+        };
+        self.adapters.push(adapter.clone());
+        TrackPlan::New { adapter, replaced }
     }
 
     /// Applies the room's `/untrack` numbered `seq`, unless it is older than a `/track` or
@@ -425,12 +639,17 @@ impl Recorder {
     /// records, so after the newest request for a speaker is an `/untrack`, nothing of theirs
     /// is recorded. An older `/track` for another of their tracks may have opened an adapter
     /// before this arrived.
-    pub fn untrack(&mut self, untrack: &UntrackRecording, seq: RequestSeq) -> Option<Vec<Adapter>> {
+    pub fn untrack(
+        &mut self,
+        untrack: &UntrackRecording,
+        seq: RequestSeq,
+        now: Millis,
+    ) -> Option<Vec<Adapter>> {
         let who = untrack.who;
         if !self.applied.untrack(who, seq) {
             return None;
         }
-        let closed = self.close_adapters(|a| a.who == who);
+        let closed = self.close_adapters(|a| a.who == who, now);
         if let Some(consent) = &untrack.consent {
             self.learn(Learned::Consent(consent.clone()));
         }
@@ -446,9 +665,9 @@ impl Recorder {
     /// `/track` the room sent while it recorded, and after a stop the room records nothing
     /// until it starts again and sends new `/track`s. Leaving a speaker unrecorded is the safe
     /// mistake; recording one after a stop is the one D15 forbids.
-    pub fn stop(&mut self, seq: RequestSeq) -> (Vec<Adapter>, Vec<ParticipantId>) {
+    pub fn stop(&mut self, seq: RequestSeq, now: Millis) -> (Vec<Adapter>, Vec<ParticipantId>) {
         let late = self.applied.stop(seq);
-        (self.close_adapters(|_| true), late)
+        (self.close_adapters(|_| true, now), late)
     }
 }
 
@@ -630,9 +849,10 @@ pub struct ChunkSpan {
 pub const MIN_GAP_MS: u64 = 1_000;
 
 /// The audio the transcript lacks: holes of at least [`MIN_GAP_MS`] between consecutive chunks
-/// of one adapter stream, and chunks that never reached R2 or the speech model failed on. Time between two adapters of a
-/// speaker is not a gap: the speaker had stopped publishing.
-pub fn gaps(mut chunks: Vec<ChunkSpan>) -> Vec<Gap> {
+/// of one adapter stream, chunks that never reached R2 or the speech model failed on, and
+/// stretches of at least [`MIN_GAP_MS`] without an adapter because creating it failed. Time
+/// between two adapters of a speaker is not a gap: the speaker had stopped publishing.
+pub fn gaps(mut chunks: Vec<ChunkSpan>, unrecorded: &[Unrecorded]) -> Vec<Gap> {
     chunks.sort_by_key(|c| (c.who, c.generation, c.start));
     let holes = chunks.windows(2).filter_map(|pair| {
         let [a, b] = pair else { return None };
@@ -653,7 +873,16 @@ pub fn gaps(mut chunks: Vec<ChunkSpan>) -> Vec<Gap> {
             reason: c.lacking?,
         })
     });
-    holes.chain(failed).collect()
+    let unrecorded = unrecorded
+        .iter()
+        .filter(|u| u.end.0 >= u.start.0 + MIN_GAP_MS)
+        .map(|u| Gap {
+            who: u.who,
+            start: u.start,
+            end: u.end,
+            reason: GapReason::Missing,
+        });
+    holes.chain(failed).chain(unrecorded).collect()
 }
 
 #[cfg(test)]
@@ -745,13 +974,24 @@ mod tests {
     fn gaps_are_holes_within_one_adapter_stream_and_failed_chunks() {
         let mut failed = span(2, 0, 0, 5_000);
         failed.lacking = Some(GapReason::Untranscribed);
-        let found = gaps(vec![
-            span(1, 0, 45_000, 10_000),
-            span(1, 0, 0, 30_000),
-            span(1, 0, 30_500, 9_000), // 500 ms hole: not reported
-            span(1, 1, 90_000, 1_000), // a new adapter: no gap
-            failed,
-        ]);
+        let unrecorded = |who, start, end| Unrecorded {
+            who: ParticipantId(who),
+            start: Millis(start),
+            end: Millis(end),
+        };
+        let found = gaps(
+            vec![
+                span(1, 0, 45_000, 10_000),
+                span(1, 0, 0, 30_000),
+                span(1, 0, 30_500, 9_000), // 500 ms hole: not reported
+                span(1, 1, 90_000, 1_000), // a new adapter: no gap
+                failed,
+            ],
+            &[
+                unrecorded(3, 2_000, 62_000),
+                unrecorded(3, 70_000, 70_600), // under a second: not reported
+            ],
+        );
         assert_eq!(
             found,
             [
@@ -767,6 +1007,12 @@ mod tests {
                     end: Millis(5_000),
                     reason: GapReason::Untranscribed
                 },
+                Gap {
+                    who: ParticipantId(3),
+                    start: Millis(2_000),
+                    end: Millis(62_000),
+                    reason: GapReason::Missing
+                },
             ]
         );
     }
@@ -780,6 +1026,7 @@ mod tests {
             speakers: Vec::new(),
             consents: Vec::new(),
             adapters: Vec::new(),
+            unrecorded: Vec::new(),
             phase: RecorderPhase::Recording,
             applied: Applied::default(),
         };
@@ -790,7 +1037,7 @@ mod tests {
             generation: 0,
             session: SessionId::new("s"),
             track_name: TrackName::new("t"),
-            id: None,
+            creation: Creation::Asked,
             open: false,
         });
         assert_eq!(recorder.next_generation(who), 1);
@@ -897,6 +1144,7 @@ mod tests {
             speakers: Vec::new(),
             consents: Vec::new(),
             adapters: Vec::new(),
+            unrecorded: Vec::new(),
             phase: RecorderPhase::Recording,
             applied: Applied::default(),
         }
@@ -906,13 +1154,13 @@ mod tests {
     fn apply(recorder: &mut Recorder, (seq, request): &(RequestSeq, Request)) {
         match request {
             Request::Track(track) => {
-                recorder.begin_track(track, *seq);
+                recorder.begin_track(track, *seq, Millis(0));
             }
             Request::Untrack(untrack) => {
-                recorder.untrack(untrack, *seq);
+                recorder.untrack(untrack, *seq, Millis(0));
             }
             Request::Stop => {
-                recorder.stop(*seq);
+                recorder.stop(*seq, Millis(0));
             }
         }
     }
@@ -950,11 +1198,14 @@ mod tests {
     fn a_track_older_than_a_stop_or_untrack_that_arrived_first_records_nothing() {
         // Recording starts with speaker 0's track (1) and stops (2); the stop arrives first.
         let mut recorder = empty_recorder();
-        recorder.stop(RequestSeq(2));
+        recorder.stop(RequestSeq(2), Millis(0));
         let Request::Track(late) = track(0, "p0", "a0") else {
             unreachable!()
         };
-        assert_eq!(recorder.begin_track(&late, RequestSeq(1)), TrackPlan::Stale);
+        assert_eq!(
+            recorder.begin_track(&late, RequestSeq(1), Millis(0)),
+            TrackPlan::Stale
+        );
         assert_eq!(recorder, {
             let mut stopped = empty_recorder();
             stopped.applied.stop = RequestSeq(2);
@@ -966,10 +1217,13 @@ mod tests {
             unreachable!()
         };
         assert_eq!(
-            recorder.untrack(&withdrawn, RequestSeq(4)),
+            recorder.untrack(&withdrawn, RequestSeq(4), Millis(0)),
             Some(Vec::new())
         );
-        assert_eq!(recorder.begin_track(&late, RequestSeq(3)), TrackPlan::Stale);
+        assert_eq!(
+            recorder.begin_track(&late, RequestSeq(3), Millis(0)),
+            TrackPlan::Stale
+        );
         assert!(recorded(&recorder).is_empty());
         assert_eq!(recorder.consents, [consent(ParticipantId(0), true)]);
     }
@@ -1029,6 +1283,115 @@ mod tests {
     }
 
     #[test]
+    fn adapter_calls_back_off_from_1_s_to_a_minute_and_stop_after_ten() {
+        let waits: Vec<u64> = (1..MAX_ADAPTER_CALLS).filter_map(adapter_retry).collect();
+        assert_eq!(
+            waits,
+            [
+                1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 60_000, 60_000, 60_000
+            ]
+        );
+        assert_eq!(adapter_retry(MAX_ADAPTER_CALLS), None);
+    }
+
+    /// A recording recorder with speaker 0's track asked for at `Millis(0)`.
+    fn asked_for_one_track() -> (Recorder, (ParticipantId, u32)) {
+        let Request::Track(request) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        let mut recorder = empty_recorder();
+        let TrackPlan::New { adapter, .. } =
+            recorder.begin_track(&request, RequestSeq(1), Millis(0))
+        else {
+            panic!("a new adapter")
+        };
+        (recorder, (adapter.who, adapter.generation))
+    }
+
+    #[test]
+    fn a_failed_adapter_is_called_for_again_and_the_audio_it_missed_is_a_gap() {
+        let (mut recorder, key) = asked_for_one_track();
+        assert_eq!(
+            recorder.settle(key, Err(()), Millis(100)),
+            Settled::RetryAt(Millis(1_100))
+        );
+        assert_eq!(recorder.next_adapter_call(), Some(Millis(1_100)));
+        assert!(recorder.adapters_due(Millis(1_099)).is_empty());
+        assert_eq!(recorder.adapters_due(Millis(1_100)).len(), 1);
+        assert_eq!(
+            recorder.settle(key, Err(()), Millis(1_100)),
+            Settled::RetryAt(Millis(3_100))
+        );
+        let id = AdapterId::new("adapter-0");
+        assert_eq!(
+            recorder.settle(key, Ok(id.clone()), Millis(3_100)),
+            Settled::Created
+        );
+        assert_eq!(recorder.adapters[0].id(), Some(&id));
+        assert_eq!(recorder.next_adapter_call(), None);
+        // The speaker was not recorded from the first failure until the adapter existed.
+        assert_eq!(
+            recorder.unrecorded,
+            [Unrecorded {
+                who: ParticipantId(0),
+                start: Millis(100),
+                end: Millis(3_100),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_given_up_adapter_misses_audio_until_it_closes_and_the_same_track_asks_again() {
+        let (mut recorder, key) = asked_for_one_track();
+        let mut now = Millis(100);
+        let mut last = Settled::Moot;
+        for _ in 0..MAX_ADAPTER_CALLS {
+            last = recorder.settle(key, Err(()), now);
+            now = now.after(60_000);
+        }
+        assert_eq!(last, Settled::GaveUp);
+        assert!(recorder.adapters_due(now).is_empty());
+        assert!(recorder.unrecorded.is_empty(), "still open");
+        // The room sends the same track again (consent given again, recording restarted):
+        // the recorder asks for a new adapter instead of keeping the given-up one.
+        let Request::Track(again) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        let TrackPlan::New { adapter, replaced } = recorder.begin_track(&again, RequestSeq(2), now)
+        else {
+            panic!("a new adapter")
+        };
+        assert_eq!((adapter.generation, replaced.len()), (1, 1));
+        assert_eq!(
+            recorder.unrecorded,
+            [Unrecorded {
+                who: ParticipantId(0),
+                start: Millis(100),
+                end: now,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_call_that_returns_after_the_adapter_closed_changes_nothing_but_the_sfu() {
+        let (mut recorder, key) = asked_for_one_track();
+        recorder.stop(RequestSeq(2), Millis(50));
+        assert_eq!(recorder.settle(key, Err(()), Millis(60)), Settled::Moot);
+        assert_eq!(recorder.next_adapter_call(), None);
+        let Settled::Orphaned(adapter) =
+            recorder.settle(key, Ok(AdapterId::new("late")), Millis(70))
+        else {
+            panic!("orphaned")
+        };
+        assert_eq!(adapter.id(), Some(&AdapterId::new("late")));
+        assert!(recorder.unrecorded.is_empty());
+        assert_eq!(
+            recorder.settle((ParticipantId(9), 0), Err(()), Millis(80)),
+            Settled::Moot
+        );
+    }
+
+    #[test]
     fn a_stop_closes_every_adapter_whatever_its_number() {
         // A room whose counter restarted below the recorder's (older code dropped it): its
         // stop still closes what the newer numbers opened.
@@ -1037,10 +1400,10 @@ mod tests {
         };
         let mut recorder = empty_recorder();
         assert!(matches!(
-            recorder.begin_track(&track, RequestSeq(9_000)),
+            recorder.begin_track(&track, RequestSeq(9_000), Millis(0)),
             TrackPlan::New { .. }
         ));
-        let (closed, late) = recorder.stop(RequestSeq(5));
+        let (closed, late) = recorder.stop(RequestSeq(5), Millis(0));
         assert_eq!(closed.len(), 1);
         assert_eq!(late, [ParticipantId(0)]);
         assert!(recorded(&recorder).is_empty());
@@ -1072,7 +1435,7 @@ mod tests {
             ..empty_recorder()
         };
         for track in &tracks {
-            recorder.begin_track(&track.request, track.seq);
+            recorder.begin_track(&track.request, track.seq, Millis(0));
         }
         assert_eq!(recorded(&recorder), [(ParticipantId(0), "a0b".to_owned())]);
     }
@@ -1090,7 +1453,10 @@ mod tests {
             applied: before_start,
             ..empty_recorder()
         };
-        assert_eq!(recorder.begin_track(&late, RequestSeq(2)), TrackPlan::Stale);
+        assert_eq!(
+            recorder.begin_track(&late, RequestSeq(2), Millis(0)),
+            TrackPlan::Stale
+        );
         // The same for a `/stop` (3).
         let mut before_start = Applied::default();
         before_start.stop(RequestSeq(3));
@@ -1098,7 +1464,10 @@ mod tests {
             applied: before_start,
             ..empty_recorder()
         };
-        assert_eq!(recorder.begin_track(&late, RequestSeq(2)), TrackPlan::Stale);
+        assert_eq!(
+            recorder.begin_track(&late, RequestSeq(2), Millis(0)),
+            TrackPlan::Stale
+        );
         assert!(recorded(&recorder).is_empty());
     }
 
@@ -1110,14 +1479,14 @@ mod tests {
         // A room that ran older code: its unnumbered requests apply as they arrive.
         let mut recorder = empty_recorder();
         assert!(matches!(
-            recorder.begin_track(&track, RequestSeq::UNORDERED),
+            recorder.begin_track(&track, RequestSeq::UNORDERED, Millis(0)),
             TrackPlan::New { .. }
         ));
-        assert_eq!(recorder.stop(RequestSeq::UNORDERED).0.len(), 1);
+        assert_eq!(recorder.stop(RequestSeq::UNORDERED, Millis(0)).0.len(), 1);
         // Once a numbered request was applied, an unnumbered one is stale.
-        recorder.stop(RequestSeq(1));
+        recorder.stop(RequestSeq(1), Millis(0));
         assert_eq!(
-            recorder.begin_track(&track, RequestSeq::UNORDERED),
+            recorder.begin_track(&track, RequestSeq::UNORDERED, Millis(0)),
             TrackPlan::Stale
         );
     }
@@ -1150,7 +1519,8 @@ mod tests {
     }
 
     /// Recorders the fixtures freeze: one per phase and job step, with speakers, a withdrawn
-    /// consent, and adapters open, closed and being created.
+    /// consent, and adapters open, closed and being created; and one whose adapters failed to
+    /// be created, with the stretches they left unrecorded.
     fn fixture_recorders() -> Vec<(&'static str, Recorder)> {
         let (ada, bo) = (ParticipantId(0), ParticipantId(1));
         let recording = Recorder {
@@ -1191,7 +1561,7 @@ mod tests {
                     generation: 0,
                     session: SessionId::new("publish-0"),
                     track_name: TrackName::new("audio-0"),
-                    id: Some(AdapterId::new("adapter-0")),
+                    creation: Creation::Created(AdapterId::new("adapter-0")),
                     open: true,
                 },
                 Adapter {
@@ -1199,7 +1569,7 @@ mod tests {
                     generation: 0,
                     session: SessionId::new("publish-1"),
                     track_name: TrackName::new("audio-1"),
-                    id: Some(AdapterId::new("adapter-1")),
+                    creation: Creation::Created(AdapterId::new("adapter-1")),
                     open: false,
                 },
                 Adapter {
@@ -1207,16 +1577,34 @@ mod tests {
                     generation: 1,
                     session: SessionId::new("publish-1b"),
                     track_name: TrackName::new("audio-1b"),
-                    id: None,
+                    creation: Creation::Asked,
                     open: true,
                 },
             ],
+            unrecorded: Vec::new(),
             phase: RecorderPhase::Recording,
             applied: Applied {
                 stop: RequestSeq(4),
                 speakers: vec![(ada, RequestSeq(3)), (bo, RequestSeq(7))],
             },
         };
+        let since = Millis(1_791_583_300_000);
+        let failing = |failures, retry_at| {
+            Creation::Failing(Failing {
+                since,
+                failures,
+                retry_at,
+            })
+        };
+        let mut retrying = recording.clone();
+        retrying.adapters[0].creation = failing(2, Some(since.after(3_000)));
+        retrying.adapters[1].creation = failing(MAX_ADAPTER_CALLS, None);
+        retrying.adapters[2].creation = Creation::Created(AdapterId::new("adapter-1b"));
+        retrying.unrecorded = vec![Unrecorded {
+            who: bo,
+            start: since,
+            end: since.after(290_000),
+        }];
         let at = Millis(1_791_586_800_000);
         let ended = |job| Recorder {
             phase: RecorderPhase::Ended { at, job },
@@ -1224,6 +1612,7 @@ mod tests {
         };
         vec![
             ("recording", recording.clone()),
+            ("retrying", retrying),
             (
                 "transcribing",
                 ended(Job::Transcribing {

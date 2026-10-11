@@ -1,0 +1,89 @@
+{
+  "record": {
+    "adapters": [
+      {
+        "failing": {
+          "failures": 2,
+          "retryAt": 1791583303000,
+          "since": 1791583300000
+        },
+        "generation": 0,
+        "open": true,
+        "session": "publish-0",
+        "trackName": "audio-0",
+        "who": 0
+      },
+      {
+        "failing": {
+          "failures": 10,
+          "since": 1791583300000
+        },
+        "generation": 0,
+        "open": false,
+        "session": "publish-1",
+        "trackName": "audio-1",
+        "who": 1
+      },
+      {
+        "generation": 1,
+        "id": "adapter-1b",
+        "open": true,
+        "session": "publish-1b",
+        "trackName": "audio-1b",
+        "who": 1
+      }
+    ],
+    "applied": {
+      "speakers": [
+        [
+          0,
+          3
+        ],
+        [
+          1,
+          7
+        ]
+      ],
+      "stop": 4
+    },
+    "consents": [
+      {
+        "at": 1791583200000,
+        "name": "Ada",
+        "noticeVersion": 1,
+        "who": 0
+      },
+      {
+        "at": 1791583260000,
+        "name": "Bo",
+        "noticeVersion": 1,
+        "who": 1,
+        "withdrawnAt": 1791583500000
+      }
+    ],
+    "meeting": "abide-ablaze-abroad",
+    "phase": "recording",
+    "secret": "00112233445566778899aabbccddeeff",
+    "speakers": [
+      {
+        "id": 0,
+        "name": "Ada",
+        "role": "host"
+      },
+      {
+        "id": 1,
+        "name": "Bo",
+        "role": "guest"
+      }
+    ],
+    "startedAt": 1791583200000,
+    "unrecorded": [
+      {
+        "end": 1791583590000,
+        "start": 1791583300000,
+        "who": 1
+      }
+    ]
+  },
+  "version": 2
+}

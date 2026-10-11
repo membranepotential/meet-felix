@@ -250,11 +250,18 @@ impl Inner {
             return Err("the meeting has not ended".into());
         }
         let paragraphs = self.store.paragraphs()?;
-        let spoke: HashSet<ParticipantId> = paragraphs.iter().map(|p| p.who).collect();
+        let gaps = gaps(self.store.spans()?, &recorder.unrecorded);
+        // Everyone the transcript mentions gets their name, also a speaker of whom it has only
+        // gaps.
+        let mentioned: HashSet<ParticipantId> = paragraphs
+            .iter()
+            .map(|p| p.who)
+            .chain(gaps.iter().map(|g| g.who))
+            .collect();
         let speakers: Vec<RosterEntry> = recorder
             .speakers
             .iter()
-            .filter(|s| spoke.contains(&s.id))
+            .filter(|s| mentioned.contains(&s.id))
             .cloned()
             .collect();
         let transcript = Transcript::new(
@@ -263,7 +270,7 @@ impl Inner {
             ended_at,
             label_speakers(&speakers),
             recorder.consents.clone(),
-            gaps(self.store.spans()?),
+            gaps,
             paragraphs,
         );
         let bucket = self.bucket()?;

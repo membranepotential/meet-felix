@@ -248,6 +248,21 @@ As built (2026-10-09):
   generation. The recorder stores each adapter before and its id right after
   the SFU call, and creates one adapter per call, so a retry never duplicates
   one.
+- A failed adapter call is retried (2026-10-11, audit finding P2-027). Until
+  then a failure left the speaker unrecorded for the rest of the meeting, and
+  the transcript did not say so. One likely cause, not verified for adapters:
+  the room asks for the adapter right after the publish, and the SFU refuses
+  pulls of a new track for 0.5–1 s (measured for subscriber pulls on
+  2026-10-10). Now the recorder answers the room's `/track` with success
+  either way, stores the failure on the adapter, and its alarm calls again
+  after 1 s, 2 s, 5 s, 10 s, 30 s, then every minute; after ten failed calls
+  (about five minutes) it gives up until the speaker's next `/track`, which
+  then asks for a new adapter even for the same track. From the first failure
+  until the adapter exists or closes, the speaker's audio is missing, and the
+  transcript shows that stretch as a "missing" gap if it lasts at least 1 s.
+  The rule is `Recorder::settle` in `crates/worker/src/recorder/state.rs`.
+  Not covered: an eviction during the first call, which leaves the adapter
+  asked for and never answered, as before.
 - A message whose `sequenceNumber` is not newer than the last, by at most
   1,000, is a duplicate and dropped; a step back of more than 1,000 means the
   counter restarted (a new connection, or a 16-bit RTP counter wrapping inside
@@ -289,7 +304,10 @@ As built (2026-10-09):
 - Gaps in the transcript are derived from the chunk list: a hole of at least
   1 s between consecutive chunks of one adapter stream, chunks that never
   reached R2 ("missing"), and chunks the speech model gave up on ("not
-  transcribed").
+  transcribed"); and from the recorder record, stretches of at least 1 s in
+  which a speaker had no adapter because creating it failed ("missing",
+  `unrecorded` in the record). The transcript names every speaker it
+  mentions, also one of whom it has only gaps.
 
 Rejected: R2 multipart upload during the meeting
 ([09 §2](../research/09-post-meeting-transcription-recording.md)). It needs
@@ -404,7 +422,11 @@ readable (2026-10-11, audit finding P1-003). The record is stored in the same
 version 1, the bare record stored until then, is read as it is. Unlike a
 room, which treats an older record as an ended meeting, a recorder never
 gives up a version: a change of shape adds a version and a migration.
-Frozen records under `crates/worker/fixtures/recorder/` pin every shape. The
+Frozen records under `crates/worker/fixtures/recorder/` pin every shape.
+A field that older records lack and older code ignores keeps the version
+(the procedure in `crate::record`'s fixture tests): the adapter's `failing`
+and the record's `unrecorded` (P2-027) are such fields, pinned by the
+`retrying` fixture. The
 SQL tables carry a version too, in a `schema_version` table, because Durable
 Objects refuse `PRAGMA user_version` (it is not on workerd's pragma
 allowlist, checked 2026-10-11); `Store::open` runs the migrations a database

@@ -11,7 +11,6 @@ use worker::{Response, Result, console_error, console_log, console_warn};
 use super::state::{
     self, BeforeStart, Job, Learned, Ordered, Recorder, RecorderPhase, RequestSeq, TrackPlan,
 };
-use super::streams::StreamKey;
 use super::{Inner, no_content, not_found};
 use crate::internal::{FinishRecording, StartRecording, TrackRecording, UntrackRecording};
 use crate::{now, random};
@@ -36,6 +35,7 @@ impl Inner {
                 speakers: Vec::new(),
                 consents: Vec::new(),
                 adapters: Vec::new(),
+                unrecorded: Vec::new(),
                 phase: RecorderPhase::Recording,
                 applied,
             };
@@ -69,7 +69,7 @@ impl Inner {
             return Response::error("the meeting ended", 409);
         }
         let who = track.who;
-        let (generation, replaced) = match recorder.begin_track(&track, seq) {
+        let (adapter, replaced) = match recorder.begin_track(&track, seq, now()) {
             TrackPlan::Stale => {
                 console_log!("recorder: dropped a /track for {who:?} older than a later request");
                 return no_content();
@@ -78,52 +78,15 @@ impl Inner {
                 self.save(&recorder).await?;
                 return no_content();
             }
-            TrackPlan::New {
-                generation,
-                replaced,
-            } => (generation, replaced),
+            TrackPlan::New { adapter, replaced } => (adapter, replaced),
         };
         // Stored before the SFU call, so the adapter's socket is accepted the moment it opens.
         self.save(&recorder).await?;
         self.end_streams(&replaced);
         self.close_sfu_adapters(&replaced).await;
-
-        let key: StreamKey = (who, generation);
-        let created = match self.endpoint(&recorder.secret, key) {
-            Ok(endpoint) => {
-                self.create_adapter(track.session, track.track_name, endpoint)
-                    .await
-            }
-            Err(e) => Err(e),
-        };
-        // Reloaded: the record may have changed while the SFU call was out.
-        let mut recorder = self.load().await?.unwrap_or(recorder);
-        let adapter = recorder
-            .adapters
-            .iter_mut()
-            .find(|a| a.who == who && a.generation == generation);
-        let mut orphaned = None;
-        let response = match (created, adapter) {
-            (Ok(id), Some(adapter)) => {
-                adapter.id = Some(id);
-                if !adapter.open {
-                    // Closed (an untrack, a stop, the end) while the SFU created it.
-                    orphaned = Some(adapter.clone());
-                }
-                no_content()
-            }
-            (Err(e), Some(adapter)) => {
-                adapter.open = false;
-                console_error!("recorder: no adapter for {who:?} generation {generation}: {e}");
-                Response::error("could not create the adapter", 502)
-            }
-            (_, None) => Response::error("adapter vanished", 409),
-        };
-        self.save(&recorder).await?;
-        if let Some(adapter) = orphaned {
-            self.close_sfu_adapters(&[adapter]).await;
-        }
-        response
+        // A failed call is the recorder's to retry, not the room's: the answer is the same.
+        self.create_adapter(&recorder.secret, &adapter).await?;
+        no_content()
     }
 
     /// The requests noted before `/start` created the record ([`state::BEFORE_START_KEY`]).
@@ -158,7 +121,7 @@ impl Inner {
                 })
                 .await;
         };
-        let Some(closed) = recorder.untrack(&untrack.request, untrack.seq) else {
+        let Some(closed) = recorder.untrack(&untrack.request, untrack.seq, now()) else {
             console_log!(
                 "recorder: dropped an /untrack for {:?} older than a later request",
                 untrack.request.who
@@ -179,7 +142,7 @@ impl Inner {
                 })
                 .await;
         };
-        let (closed, late) = recorder.stop(seq);
+        let (closed, late) = recorder.stop(seq, now());
         if !late.is_empty() {
             console_warn!(
                 "recorder: /stop {seq:?} arrived after newer requests of {late:?}; \
@@ -216,7 +179,7 @@ impl Inner {
         finish: Option<FinishRecording>,
         now: Millis,
     ) -> Result<()> {
-        let closed = recorder.close_adapters(|_| true);
+        let closed = recorder.close_adapters(|_| true, now);
         if let Some(finish) = finish {
             recorder.learn(Learned::Everyone(finish));
         }
@@ -238,7 +201,8 @@ impl Inner {
     }
 
     /// While the meeting runs: closes the chunks of streams that went quiet, recovers chunks an
-    /// eviction left behind, and ends a recording nobody ended.
+    /// eviction left behind, ends a recording nobody ended, and calls the SFU again for adapters
+    /// that creating failed for.
     pub(super) async fn look_after(
         self: &Rc<Self>,
         recorder: &mut Recorder,
@@ -255,6 +219,10 @@ impl Inner {
             self.finish(recorder, None, now).await?;
             return Ok(Some(now));
         }
-        Ok(Some(now.after(HOUSEKEEPING_MS)))
+        let next_call = self.retry_adapters(recorder, now).await?;
+        let housekeeping = now.after(HOUSEKEEPING_MS);
+        Ok(Some(
+            next_call.map_or(housekeeping, |at| at.min(housekeeping)),
+        ))
     }
 }

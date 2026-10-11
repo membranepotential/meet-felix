@@ -150,7 +150,8 @@ impl DurableObject for RecorderObject {
 
     /// Runs one step of whatever is due and arms the next alarm. Never fails: an error is logged
     /// and the step retried [`ALARM_RETRY_MS`] later, because the runtime retries a failing
-    /// alarm only six times.
+    /// alarm only six times. A request that armed a sooner alarm while the step ran (a failed
+    /// adapter call) keeps it; every step checks what is due, so an early alarm is harmless.
     async fn alarm(&self) -> Result<Response> {
         let now = now();
         let next = match self.inner.work(now).await {
@@ -161,7 +162,7 @@ impl DurableObject for RecorderObject {
             }
         };
         if let Some(at) = next
-            && let Err(e) = self.inner.arm(at).await
+            && let Err(e) = self.inner.arm_by(at).await
         {
             console_error!("recorder: setting the alarm failed: {e}");
         }
@@ -186,6 +187,15 @@ impl Inner {
     async fn arm(&self, at: Millis) -> Result<()> {
         let offset = i64::try_from(at.0.saturating_sub(now().0)).unwrap_or(i64::MAX);
         self.state.storage().set_alarm(offset).await
+    }
+
+    /// Arms the alarm for `at`, unless it is set for an earlier time already.
+    async fn arm_by(&self, at: Millis) -> Result<()> {
+        let set = self.state.storage().get_alarm().await?;
+        if set.is_some_and(|set| u64::try_from(set).is_ok_and(|set| set <= at.0)) {
+            return Ok(());
+        }
+        self.arm(at).await
     }
 
     fn id(&self) -> String {
