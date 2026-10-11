@@ -82,8 +82,7 @@ test('mute and camera: the buttons, the own tile, and the others’ view follow'
 
 	await host.control('Mute').click();
 	await expect(host.control('Unmute')).toHaveAttribute('aria-pressed', 'true');
-	// The mic-off icon is the only icon in a tile's caption and has no accessible name.
-	await expect(host.tile(`${OWNER_NAME} (you)`).locator('figcaption svg')).toBeVisible();
+	await expect(host.tile(`${OWNER_NAME} (you)`).getByText('(muted)')).toBeVisible();
 
 	await host.control('Stop video').click();
 	await expect(host.control('Start video')).toBeVisible();

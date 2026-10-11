@@ -156,7 +156,9 @@
 		</button>
 	{/if}
 	<figcaption class={[variant === 'chip' && 'visually-hidden']}>
-		{#if !tile.micOn}<span class="muted"><Icon name="mic-off" size={16} /></span>{/if}
+		{#if !tile.micOn}<span class="muted"
+				><Icon name="mic-off" size={16} /><span class="visually-hidden">(muted)</span></span
+			>{/if}
 		{#if speaking}
 			<span class="bars" aria-hidden="true">
 				{#each bars as height, i (i)}<span style:--h={height}></span>{/each}

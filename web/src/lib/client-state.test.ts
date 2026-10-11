@@ -205,24 +205,21 @@ describe('over', () => {
 });
 
 describe('awaitingConsent', () => {
-	const recording = { since: 0, by: 1 };
 	const participants = [
-		person(1, 'Ada', { role: 'host', consentRecording: false }),
-		person(2, 'Bo', { consentRecording: false }),
-		person(3, 'Cy', { consentRecording: false, presence: 'awaitingConsent' }),
-		person(4, 'Di'),
-		person(5, 'Ed', { consentRecording: false, presence: 'knocking' }),
-		person(6, 'Fay', { consentRecording: false, presence: 'connecting' }),
-		// The owner's second device: a host without consent is admitted, muted and unrecorded.
-		person(7, 'Gil', { role: 'host', consentRecording: false })
+		person(1, 'Ada', { role: 'host', awaitingConsent: true }),
+		person(2, 'Bo', { awaitingConsent: true }),
+		person(3, 'Cy'),
+		person(4, 'Di', { awaitingConsent: true })
 	];
 
-	it('lists the others in the room or let in who have not accepted the running recording', () => {
-		const names = awaitingConsent(room({ recording, participants }), 1).map((p) => p.name);
-		expect(names).toEqual(['Bo', 'Cy', 'Fay', 'Gil']);
+	it('lists the others the core flags, never yourself', () => {
+		const names = awaitingConsent(room({ participants }), 1).map((p) => p.name);
+		expect(names).toEqual(['Bo', 'Di']);
 	});
 
-	it('is empty while nothing records', () => {
-		expect(awaitingConsent(room({ participants }), 1)).toEqual([]);
+	it('is empty when the core flags nobody', () => {
+		expect(awaitingConsent(room({ participants: [person(1, 'Ada'), person(2, 'Bo')] }), 1)).toEqual(
+			[]
+		);
 	});
 });
