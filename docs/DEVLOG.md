@@ -3,6 +3,36 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-11 — Cleanup before publishing
+
+The repo is being prepared to go public while the owner's deployment keeps
+running, so nothing about that deployment may stay in tracked files.
+
+- **Deployment values in `.env`.** `wrangler.toml` holds placeholders
+  (`${RECORDER_ORIGIN}`, `${MEETINGS_KV_ID}`, `${OWNER_NAME}`); the
+  git-ignored `.env` holds the values (`.env.example` lists them).
+  `pnpm run wrangler:config` (`scripts/wrangler-config.mjs`) writes the
+  git-ignored `wrangler.local.toml`, which `pnpm dev` and `pnpm run release`
+  use. Wrangler has no variable substitution in its config, and its KV
+  auto-provisioning writes the id back into the config file, so a rendered
+  copy is the only way to keep the KV id out of git. The e2e stacks read
+  `wrangler.toml` itself and set the values with `--var`.
+- **Owner name from the deployment.** The web app no longer hardcodes the
+  owner's name: `GET /api/me` and a successful `POST /api/login` answer 200
+  with `{"name": …}` (the Worker var `OWNER_NAME`, checked as a
+  `DisplayName`, else `null`) and `Cache-Control: no-store`; the pre-join
+  prefills from it. Tests use the invented name Robin Hart.
+- PLAN.md deleted (the plan moved into docs/ on 2026-10-09). README
+  rewritten: features, layout, "Run your own" with `.env`, commands. MIT
+  LICENSE text added (the license was declared but had no text). CLAUDE.md
+  and STATUS.md name D1–D35. The custom-domain comment in `edge/` no longer
+  names the domain.
+- Checks: core 72, sfu-api 16, worker 56, web 144, e2e 66 passed 3 skipped.
+- Next: the codebase audit of today (report in the git-ignored
+  `reports/reviews/`) found 4 P1 and 29 P2 findings, several of them abuse
+  paths that matter once the code is public; then rewrite the history
+  without the deployment's details and publish it as a new repository.
+
 ## 2026-10-10 — Polish after the day's reviews
 
 Small follow-ups that today's code reviews collected.

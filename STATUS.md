@@ -1,12 +1,14 @@
 # STATUS
 
 ## Goal
-Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D21), phases in docs/architecture/README.md.
+Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D35), phases in docs/architecture/README.md.
 
 ## Now
+- publish — repo cleaned for publication; owner decides which audit findings to fix before going public, then history rewrite (filter-repo rules tested) into a new GitHub repo — waiting for owner
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-11 Cleanup before publishing: deployment values in git-ignored .env (wrangler.toml placeholders, rendered to wrangler.local.toml), owner name from `/api/me`, PLAN.md deleted, README rewritten, MIT LICENSE; codebase audit 4 P1 / 29 P2 / 45 P3 (reports/reviews/2026-10-11-1341, git-ignored).
 - 2026-10-10 Deployed version b88fda55, commit 497ad78: polish batch (control bar stays on screen after a resize or rotation, lobby heading under the consent dialog, one capture per Start video, expected not-found pulls logged as info); web 144, e2e 66 passed 3 skipped.
 - 2026-10-10 Deployed version 8c934a70, commit b3c5287: first pull retried after 500 ms (5×, then 3 s) when the SFU does not know the track yet; slowest first pull 4.2 s → 1.9 s against the real SFU; core 72, sfu-api 16.
 - 2026-10-10 Deployed version 6fedc9d7, commit 397dab6: simulcast layer holds (`priorityOrdering: none`; the SFU climbed back to full after 12 s with `asciibetical`), real-SFU hold check and a five-person run (2 @real passed); sfu-api 16 tests.

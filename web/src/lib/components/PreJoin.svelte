@@ -14,7 +14,7 @@
 	import { describeCaptureError } from '../media/capture.ts';
 	import { showStream } from '../media/video.ts';
 	import type { OwnerSession } from '../owner-session.svelte.ts';
-	import { OWNER_NAME, hostOffer } from '../owner-state.ts';
+	import { hostOffer } from '../owner-state.ts';
 	import type { MeetingId, RecordingPolicy } from '../protocol.ts';
 	import DevicePickers from './DevicePickers.svelte';
 	import Icon from './Icon.svelte';
@@ -55,9 +55,13 @@
 		if (canJoin) onjoin(recorded);
 	}
 
-	/** The host is always the owner (D32), so an empty name field gets the owner's name. */
+	/**
+	 * The host is always the owner (D32), so an empty name field gets the owner's name, if the
+	 * deployment sets one.
+	 */
 	function prefillOwner() {
-		if (name.trim() === '') name = OWNER_NAME;
+		const ownerName = owner.state.kind === 'signed-in' ? owner.state.owner.name : null;
+		if (ownerName !== null && name.trim() === '') name = ownerName;
 	}
 
 	// Once per login, not on every keystroke: the owner may still type another name.

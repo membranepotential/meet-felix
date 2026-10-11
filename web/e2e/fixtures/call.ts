@@ -1,10 +1,9 @@
 /** Browser flows that several specs share: a meeting with the host and guests in it. */
 import { expect } from '@playwright/test';
 import type { MeetingId } from '../../src/lib/protocol.ts';
-import { OWNER_NAME } from '../../src/lib/owner-state.ts';
 import type { Participant } from './participant.ts';
 
-export { OWNER_NAME };
+export { OWNER_NAME } from './stack.ts';
 
 /** The host opens the link: the pre-join knows the owner and prefills the name. */
 export async function hostPreJoin(host: Participant, meeting: MeetingId): Promise<void> {

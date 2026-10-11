@@ -184,7 +184,7 @@ export function upgradeStatus(url: string): Promise<number> {
 export async function loginAsOwner(api: Api, password: string): Promise<OwnerSession> {
 	const response = await api.login(password);
 	const cookie = cookieOf(response);
-	if (response.status !== 204 || !cookie.startsWith('owner=')) {
+	if (response.status !== 200 || !cookie.startsWith('owner=')) {
 		throw new Error(`owner login failed: ${response.status}`);
 	}
 	return { headers: { cookie }, value: cookie.slice('owner='.length) };

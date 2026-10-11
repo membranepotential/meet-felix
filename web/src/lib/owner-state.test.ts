@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ApiResult } from './api.ts';
+import type { ApiResult, Owner } from './api.ts';
 import { CHECKING, hostOffer, reduce, type OwnerEvent, type OwnerState } from './owner-state.ts';
 
 const ok = <T>(value: T): ApiResult<T> => ({ ok: true, value });
@@ -9,12 +9,13 @@ const wrong: ApiResult<never> = { ok: false, error: { kind: 'unauthorized' } };
 const run = (state: OwnerState, ...events: OwnerEvent[]): OwnerState =>
 	events.reduce(reduce, state);
 
-const signedOut = run(CHECKING, { kind: 'checked', result: ok(false) });
-const signedIn = run(CHECKING, { kind: 'checked', result: ok(true) });
+const robin: Owner = { name: 'Robin Hart' };
+const signedOut = run(CHECKING, { kind: 'checked', result: ok({ kind: 'none' }) });
+const signedIn = run(CHECKING, { kind: 'checked', result: ok({ kind: 'owner', owner: robin }) });
 
 describe('reduce', () => {
 	it('follows the session check', () => {
-		expect(signedIn).toEqual({ kind: 'signed-in', logout: { kind: 'idle' } });
+		expect(signedIn).toEqual({ kind: 'signed-in', owner: robin, logout: { kind: 'idle' } });
 		expect(signedOut).toEqual({ kind: 'signed-out', login: { kind: 'idle' } });
 		// A failed check shows the login form with the error, as a failed login would.
 		expect(run(CHECKING, { kind: 'checked', result: network })).toEqual({
@@ -29,8 +30,14 @@ describe('reduce', () => {
 		const failed = run(sending, { kind: 'login-answered', result: wrong });
 		expect(failed).toEqual({ kind: 'signed-out', login: { kind: 'failed', error: wrong.error } });
 		expect(
-			run(failed, { kind: 'login-sent' }, { kind: 'login-answered', result: ok(undefined) })
+			run(failed, { kind: 'login-sent' }, { kind: 'login-answered', result: ok(robin) })
 		).toEqual(signedIn);
+		// A deployment without a name: signed in all the same, with nothing to prefill.
+		expect(run(sending, { kind: 'login-answered', result: ok({ name: null }) })).toEqual({
+			kind: 'signed-in',
+			owner: { name: null },
+			logout: { kind: 'idle' }
+		});
 	});
 
 	it('logs out, and stays in when the server cannot be reached', () => {
@@ -46,7 +53,11 @@ describe('reduce', () => {
 		).toEqual(signedOut);
 		expect(
 			run(signedIn, { kind: 'logout-sent' }, { kind: 'logout-answered', result: network })
-		).toEqual({ kind: 'signed-in', logout: { kind: 'failed', error: { kind: 'network' } } });
+		).toEqual({
+			kind: 'signed-in',
+			owner: robin,
+			logout: { kind: 'failed', error: { kind: 'network' } }
+		});
 	});
 
 	it('signs out when an owner request is rejected', () => {
@@ -54,8 +65,8 @@ describe('reduce', () => {
 	});
 
 	it('ignores events that do not fit the state', () => {
-		expect(run(signedIn, { kind: 'checked', result: ok(false) })).toEqual(signedIn);
-		expect(run(signedOut, { kind: 'login-answered', result: ok(undefined) })).toEqual(signedOut);
+		expect(run(signedIn, { kind: 'checked', result: ok({ kind: 'none' }) })).toEqual(signedIn);
+		expect(run(signedOut, { kind: 'login-answered', result: ok(robin) })).toEqual(signedOut);
 		expect(run(CHECKING, { kind: 'login-sent' })).toEqual(CHECKING);
 		expect(run(signedOut, { kind: 'logout-sent' })).toEqual(signedOut);
 	});

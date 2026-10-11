@@ -20,16 +20,16 @@ const transcript: Transcript = {
 	startedAt: 1_000,
 	endedAt: 3_601_000,
 	speakers: [
-		{ who: 0, label: 'Felix (host)', role: 'host' },
+		{ who: 0, label: 'Robin (host)', role: 'host' },
 		{ who: 3, label: 'Anna', role: 'guest' }
 	],
 	consents: [
-		{ who: 0, name: 'Felix', at: 800, noticeVersion: 1, withdrawnAt: null },
+		{ who: 0, name: 'Robin', at: 800, noticeVersion: 1, withdrawnAt: null },
 		{ who: 3, name: 'Anna', at: 900, noticeVersion: 1, withdrawnAt: 50_000 }
 	],
 	gaps: [{ who: 3, start: 10_000, end: 22_000, reason: 'missing' }],
 	paragraphs: [
-		{ who: 0, label: 'Felix (host)', startMs: 1_000, endMs: 4_000, text: 'Guten Tag.' },
+		{ who: 0, label: 'Robin (host)', startMs: 1_000, endMs: 4_000, text: 'Guten Tag.' },
 		{ who: 3, label: 'Anna', startMs: 10_000, endMs: 12_000, text: 'Hello.' }
 	]
 };
@@ -55,7 +55,7 @@ describe('transcript status', () => {
 			transcript: {
 				version: 1,
 				...transcript,
-				consents: [{ who: 0, name: 'Felix', at: 800, noticeVersion: 1 }, transcript.consents[1]]
+				consents: [{ who: 0, name: 'Robin', at: 800, noticeVersion: 1 }, transcript.consents[1]]
 			}
 		});
 		expect(await getTranscript(TOKEN)).toEqual({

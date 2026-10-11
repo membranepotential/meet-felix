@@ -3,9 +3,11 @@
 //!
 //! Routes ("owner only" means the owner's session cookie or
 //! `Authorization: Bearer <CREATE_SECRET>`, else 401):
-//! - `POST /api/login` with `{"password"}` sets the owner's session cookie (204), or 401.
+//! - `POST /api/login` with `{"password"}` sets the owner's session cookie and answers like
+//!   `GET /api/me`, or 401.
 //! - `POST /api/logout` clears it (204).
-//! - `GET /api/me` answers 204 with a valid session cookie, 401 without.
+//! - `GET /api/me` with a valid session cookie returns `{"name"}` (the owner's display name from
+//!   the var `OWNER_NAME`, or `null`) with `Cache-Control: no-store`; 401 without.
 //! - `POST /api/new` (owner only, optional body `{"recording": "fromStart" | "hostDecides"}`)
 //!   creates a scheduled meeting and returns `{"meeting"}` with status 201.
 //! - `GET /api/meetings` (owner only) returns the owner's last meetings, newest first:
@@ -36,7 +38,9 @@ mod room;
 mod sfu;
 
 use futures_util::future::join_all;
-use meeting_core::{MeetingId, Millis, Phase, RecordingPolicy, SCHEDULED_TTL_MS, TranscriptRef};
+use meeting_core::{
+    DisplayName, MeetingId, Millis, Phase, RecordingPolicy, SCHEDULED_TTL_MS, TranscriptRef,
+};
 use serde::{Deserialize, Serialize};
 use worker::{
     Context, Date, Env, KvStore, Method, ObjectNamespace, Request, RequestInit, Response, Result,
@@ -61,6 +65,10 @@ const ROOM_JURISDICTION: &str = "ROOM_JURISDICTION";
 /// The owner's password, which `POST /api/login` checks and owner-only routes also accept as a
 /// bearer token (D7 in `docs/links`).
 const CREATE_SECRET: &str = "CREATE_SECRET";
+/// Var with the owner's display name, which the app prefills when the owner joins (D32 in
+/// `docs/architecture`). An unrendered config leaves the placeholder `${OWNER_NAME}`, which is a
+/// valid name and shows as such.
+const OWNER_NAME: &str = "OWNER_NAME";
 /// Upper bound for a meeting link's life (90 days); the room releases it when it ends. Longer
 /// than the core's `SCHEDULED_TTL_MS` (60 days), so a scheduled link works until the room
 /// expires (D6 in `docs/links`).
@@ -129,6 +137,14 @@ struct LoginRequest {
     password: String,
 }
 
+/// Body of `GET /api/me` and of a successful `POST /api/login`.
+#[derive(Serialize)]
+struct Me {
+    /// [`OWNER_NAME`]; `None` if it is unset or not a valid display name, so the app prefills
+    /// nothing.
+    name: Option<DisplayName>,
+}
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let jurisdiction = match Jurisdiction::from_var(&env.var(ROOM_JURISDICTION)?.to_string()) {
@@ -148,7 +164,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 return not_configured();
             };
             if is_owner_session(&req, &secret)? {
-                Ok(Response::empty()?.with_status(204))
+                me(&ctx)
             } else {
                 Response::error("unauthorized", 401)
             }
@@ -231,7 +247,8 @@ async fn recorder_stream(req: Request, ctx: RouteContext<Config>) -> Result<Resp
     id.get_stub()?.fetch_with_request(req).await
 }
 
-/// `POST /api/login`: sets the owner's session cookie if the password is `CREATE_SECRET`.
+/// `POST /api/login`: sets the owner's session cookie if the password is `CREATE_SECRET`, and
+/// answers like `GET /api/me`, so the app learns the owner's name without asking again.
 async fn login(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     let Some(secret) = create_secret(&ctx) else {
         return not_configured();
@@ -243,10 +260,7 @@ async fn login(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> 
     if !secret.matches(&request.password) {
         return Response::error("wrong password", 401);
     }
-    with_cookie(
-        Response::empty()?.with_status(204),
-        &OwnerSession::new(&secret).issue(now()),
-    )
+    with_cookie(me(&ctx)?, &OwnerSession::new(&secret).issue(now()))
 }
 
 async fn new_meeting(mut req: Request, ctx: RouteContext<Config>) -> Result<Response> {
@@ -401,6 +415,31 @@ fn create_secret(ctx: &RouteContext<Config>) -> Option<CreateSecret> {
         console_error!("{CREATE_SECRET} is not set; nobody can log in, create or list meetings");
     }
     secret
+}
+
+/// The owner's [`Me`], never cached: the answer depends on the session cookie.
+fn me(ctx: &RouteContext<Config>) -> Result<Response> {
+    let response = Response::from_json(&Me {
+        name: owner_name(ctx),
+    })?;
+    response.headers().set("Cache-Control", "no-store")?;
+    Ok(response)
+}
+
+/// [`OWNER_NAME`], or `None` (logged) if it is unset or not a valid display name.
+fn owner_name(ctx: &RouteContext<Config>) -> Option<DisplayName> {
+    let Ok(value) = ctx.var(OWNER_NAME) else {
+        console_error!("{OWNER_NAME} is not set; the app prefills no name for the owner");
+        return None;
+    };
+    let value = value.to_string();
+    DisplayName::parse(&value)
+        .inspect_err(|e| {
+            console_error!(
+                "{OWNER_NAME} {value:?} is not a display name ({e}); the app prefills none"
+            )
+        })
+        .ok()
 }
 
 fn not_configured() -> Result<Response> {

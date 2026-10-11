@@ -86,12 +86,12 @@ test('mute and camera: the buttons, the own tile, and the others’ view follow'
 
 	await host.control('Stop video').click();
 	await expect(host.control('Start video')).toBeVisible();
-	await expect(host.tile(`${OWNER_NAME} (you)`).locator('.avatar')).toHaveText('FP');
+	await expect(host.tile(`${OWNER_NAME} (you)`).locator('.avatar')).toHaveText('RH');
 	// The room's view drops the camera: the guest shows the host's initials instead.
 	await guest.waitForReceived('state', (m) =>
 		m.state.participants.some((p) => p.role === 'host' && !p.tracks.includes('video'))
 	);
-	await expect(hostOnGuest.locator('.avatar')).toHaveText('FP');
+	await expect(hostOnGuest.locator('.avatar')).toHaveText('RH');
 
 	await host.control('Start video').click();
 	await expect(hostOnGuest.locator('video')).toBeAttached({ timeout: 15_000 });

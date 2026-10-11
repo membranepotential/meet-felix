@@ -45,6 +45,9 @@ export interface Stack {
 	stop(): Promise<void>;
 }
 
+/** The owner's display name (`OWNER_NAME`) in every stack; invented, like all test names. */
+export const OWNER_NAME = 'Robin Hart';
+
 /** The secrets a `real` stack needs from `.dev.vars`. */
 const REAL_SECRETS = ['CREATE_SECRET', 'CALLS_APP_ID', 'CALLS_APP_SECRET'] as const;
 
@@ -145,7 +148,7 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 		// never race for a port. Against the mock SFU, the recorder's `RECORDER_ORIGIN` must name
 		// the Worker itself (the mock's adapters connect there), so the port is chosen up front.
 		let port = 0;
-		const flags = ['--var', 'ROOM_JURISDICTION:'];
+		const flags = ['--var', 'ROOM_JURISDICTION:', '--var', `OWNER_NAME:${OWNER_NAME}`];
 		if (kind === 'mock' || kind === 'recorder') {
 			// `--local` disables the remote bindings; Workers AI is the only one this Worker has.
 			if (kind === 'mock') flags.push('--local');
@@ -166,8 +169,8 @@ export async function startStack(kind: StackKind, name: string): Promise<Stack> 
 				].flatMap((v) => ['--var', v])
 			);
 		} else {
-			// Keeps wrangler.toml's production `RECORDER_ORIGIN` on purpose: the real SFU cannot
-			// reach localhost, and the @real specs never record (that would need `wrangler dev --tunnel`).
+			// Leaves wrangler.toml's placeholder `RECORDER_ORIGIN` as it is: the @real specs never
+			// record (the real SFU cannot reach localhost; that would need `wrangler dev --tunnel`).
 			if (!hasRealSfuSecrets()) throw new Error(`${DEV_VARS} lacks ${REAL_SECRETS.join(', ')}`);
 			ownerPassword = parseDevVars(readFileSync(DEV_VARS, 'utf8')).get('CREATE_SECRET') ?? '';
 			// Read in place: the secrets are never copied into the stack's directory.

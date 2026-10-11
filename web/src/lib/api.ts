@@ -4,6 +4,7 @@
  */
 import {
 	parseMeetingId,
+	type DisplayName,
 	type MeetingId,
 	type Millis,
 	type Phase,
@@ -20,6 +21,15 @@ export interface PastMeeting {
 	/** The transcript link token; `null` if the meeting was not recorded. */
 	transcript: TranscriptRef | null;
 }
+
+/** The owner, as `GET /api/me` and `POST /api/login` describe them to a valid session. */
+export interface Owner {
+	/** The deployment's `OWNER_NAME`; `null` if it sets none, or no valid one. */
+	name: DisplayName | null;
+}
+
+/** What `GET /api/me` finds in this browser: the owner's valid session, or none. */
+export type SessionCheck = { kind: 'owner'; owner: Owner } | { kind: 'none' };
 
 /** A meeting that can still be joined: waiting for the host, or running. */
 export type OpenPhase = Exclude<Phase, 'ended'>;
@@ -97,6 +107,11 @@ const isOpenPhase = (value: unknown): value is OpenPhase =>
 
 const isPhase = (value: unknown): value is Phase => value === 'ended' || isOpenPhase(value);
 
+const parseOwner = (body: unknown): Owner | null =>
+	isObject(body) && (typeof body.name === 'string' || body.name === null)
+		? { name: body.name }
+		: null;
+
 const postJson = (body: unknown): RequestInit => ({
 	method: 'POST',
 	headers: { 'Content-Type': 'application/json' },
@@ -104,11 +119,11 @@ const postJson = (body: unknown): RequestInit => ({
 });
 
 /**
- * Logs the owner in: the Worker checks `password` and sets the session cookie. A wrong
- * password is `unauthorized`.
+ * Logs the owner in: the Worker checks `password`, sets the session cookie and describes the
+ * owner. A wrong password is `unauthorized`.
  */
-export function login(password: string): Promise<ApiResult<void>> {
-	return request('/api/login', postJson({ password }), noContent);
+export function login(password: string): Promise<ApiResult<Owner>> {
+	return request('/api/login', postJson({ password }), json(parseOwner));
 }
 
 /** Ends the owner's session on this device: the Worker clears the cookie. */
@@ -116,13 +131,16 @@ export function logout(): Promise<ApiResult<void>> {
 	return request('/api/logout', { method: 'POST' }, noContent);
 }
 
-/** Whether this browser holds a valid owner session cookie. */
-export function isOwner(): Promise<ApiResult<boolean>> {
-	return request(
+/** Whether this browser holds a valid owner session cookie, and if so, who the owner is. */
+export function checkSession(): Promise<ApiResult<SessionCheck>> {
+	return request<SessionCheck>(
 		'/api/me',
 		{},
-		async (response) => ((await noContent(response)) === null ? null : true),
-		(status) => (status === 401 ? false : null)
+		json((body) => {
+			const owner = parseOwner(body);
+			return owner === null ? null : { kind: 'owner', owner };
+		}),
+		(status) => (status === 401 ? { kind: 'none' } : null)
 	);
 }
 

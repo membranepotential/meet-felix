@@ -3,7 +3,7 @@
  * valid, and the login or logout in flight. `owner-session.svelte.ts` runs the requests and
  * feeds their results through `reduce`.
  */
-import type { ApiError, ApiResult } from './api.ts';
+import type { ApiError, ApiResult, Owner, SessionCheck } from './api.ts';
 
 /** One login or logout request. */
 export type Attempt = { kind: 'idle' } | { kind: 'sending' } | { kind: 'failed'; error: ApiError };
@@ -13,12 +13,12 @@ export type OwnerState =
 	| { kind: 'checking' }
 	/** No valid session: pages show the login form. A failed check shows its error there. */
 	| { kind: 'signed-out'; login: Attempt }
-	| { kind: 'signed-in'; logout: Attempt };
+	| { kind: 'signed-in'; owner: Owner; logout: Attempt };
 
 export type OwnerEvent =
-	| { kind: 'checked'; result: ApiResult<boolean> }
+	| { kind: 'checked'; result: ApiResult<SessionCheck> }
 	| { kind: 'login-sent' }
-	| { kind: 'login-answered'; result: ApiResult<void> }
+	| { kind: 'login-answered'; result: ApiResult<Owner> }
 	| { kind: 'logout-sent' }
 	| { kind: 'logout-answered'; result: ApiResult<void> }
 	/** An owner request came back `unauthorized`: the session expired or was revoked. */
@@ -28,7 +28,7 @@ export const CHECKING: OwnerState = { kind: 'checking' };
 
 const IDLE: Attempt = { kind: 'idle' };
 const SENDING: Attempt = { kind: 'sending' };
-const SIGNED_IN: OwnerState = { kind: 'signed-in', logout: IDLE };
+const signedIn = (owner: Owner): OwnerState => ({ kind: 'signed-in', owner, logout: IDLE });
 const SIGNED_OUT: OwnerState = { kind: 'signed-out', login: IDLE };
 
 /** Applies one event. Events that do not fit the current state change nothing. */
@@ -38,24 +38,24 @@ export function reduce(state: OwnerState, event: OwnerEvent): OwnerState {
 			if (state.kind !== 'checking') return state;
 			const { result } = event;
 			if (!result.ok) return { kind: 'signed-out', login: { kind: 'failed', error: result.error } };
-			return result.value ? SIGNED_IN : SIGNED_OUT;
+			return result.value.kind === 'owner' ? signedIn(result.value.owner) : SIGNED_OUT;
 		}
 		case 'login-sent':
 			return state.kind === 'signed-out' ? { kind: 'signed-out', login: SENDING } : state;
 		case 'login-answered':
 			if (state.kind !== 'signed-out' || state.login.kind !== 'sending') return state;
 			return event.result.ok
-				? SIGNED_IN
+				? signedIn(event.result.value)
 				: { kind: 'signed-out', login: { kind: 'failed', error: event.result.error } };
 		case 'logout-sent':
-			return state.kind === 'signed-in' ? { kind: 'signed-in', logout: SENDING } : state;
+			return state.kind === 'signed-in' ? { ...state, logout: SENDING } : state;
 		case 'logout-answered': {
 			if (state.kind !== 'signed-in' || state.logout.kind !== 'sending') return state;
 			const { result } = event;
 			// `unauthorized`: the session was already gone, which is what logging out wants.
 			return result.ok || result.error.kind === 'unauthorized'
 				? SIGNED_OUT
-				: { kind: 'signed-in', logout: { kind: 'failed', error: result.error } };
+				: { ...state, logout: { kind: 'failed', error: result.error } };
 		}
 		case 'rejected':
 			return SIGNED_OUT;
@@ -72,12 +72,6 @@ export type HostOffer =
 	| { kind: 'link' }
 	/** No session, and the link was opened: the password form. */
 	| { kind: 'form' };
-
-/**
- * The owner's display name, prefilled when the owner's session joins a meeting (D32: there is
- * exactly one owner, so the app can know their name).
- */
-export const OWNER_NAME = 'Felix Peppert';
 
 /**
  * Decides the hosting line of the pre-join and the lobby. `formOpen`: the user opened "Join

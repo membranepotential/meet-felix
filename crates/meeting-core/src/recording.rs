@@ -51,7 +51,7 @@ pub struct Speaker {
 
 /// Labels speakers so that every label names one person (D31 in `docs/ui`): names that are
 /// equal, ignoring case, get numbers in participant order ("Anna", "Anna 2"), and hosts are
-/// marked ("Felix (host)"). The result is ordered by participant id.
+/// marked ("Robin (host)"). The result is ordered by participant id.
 pub fn label_speakers(speakers: &[RosterEntry]) -> Vec<Speaker> {
     let mut sorted: Vec<&RosterEntry> = speakers.iter().collect();
     sorted.sort_by_key(|entry| entry.id);

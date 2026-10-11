@@ -1,5 +1,6 @@
 /** The owner's session: `POST /api/login`, `GET /api/me`, `POST /api/logout` (D32). */
 import { cookieOf } from '../fixtures/api.ts';
+import { OWNER_NAME } from '../fixtures/stack.ts';
 import { expect, test } from '../fixtures/test.ts';
 
 const SESSION_COOKIE =
@@ -15,17 +16,21 @@ test('a login without a password gets 400', async ({ api }) => {
 	expect((await api.loginWith('{}')).status).toBe(400);
 });
 
-test('the right password gets 204 and the session cookie', async ({ api, stack }) => {
+test('the right password gets the session cookie and the owner’s name', async ({ api, stack }) => {
 	const response = await api.login(stack.ownerPassword);
-	expect(response.status).toBe(204);
+	expect(response.status).toBe(200);
 	expect(response.headers.getSetCookie()[0]).toMatch(SESSION_COOKIE);
+	expect(await response.json()).toEqual({ name: OWNER_NAME });
 });
 
-test('GET /api/me answers 204 with the cookie and 401 without or with a forged one', async ({
+test('GET /api/me names the owner with the cookie and answers 401 without or with a forged one', async ({
 	api,
 	owner
 }) => {
-	expect((await api.me(owner.headers)).status).toBe(204);
+	const me = await api.me(owner.headers);
+	expect(me.status).toBe(200);
+	expect(me.headers.get('cache-control')).toBe('no-store');
+	expect(await me.json()).toEqual({ name: OWNER_NAME });
 	expect((await api.me({})).status).toBe(401);
 	expect((await api.me({ cookie: `owner=99999999999999.${'0'.repeat(64)}` })).status).toBe(401);
 });

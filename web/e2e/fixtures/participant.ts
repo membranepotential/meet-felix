@@ -175,7 +175,7 @@ export class Participant {
 		return this.page.getByTestId('tile');
 	}
 
-	/** The tile whose name is `name` exactly, e.g. "Guest" or "Felix Peppert (you)". */
+	/** The tile whose name is `name` exactly, e.g. "Guest" or "Robin Hart (you)". */
 	tile(name: string): Locator {
 		return this.tiles.filter({
 			has: this.page

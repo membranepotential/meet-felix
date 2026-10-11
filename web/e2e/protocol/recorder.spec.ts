@@ -37,7 +37,7 @@ test(
 		await sfu.setAdapterAudio(audio);
 
 		const meeting = await createMeeting(api, owner.headers, 'fromStart');
-		const host = await joinAs(rooms, meeting, 'Felix', owner.headers);
+		const host = await joinAs(rooms, meeting, 'Robin', owner.headers);
 		await test.step('the host joins and recording starts', () => {
 			expect(host.welcome.state.recording?.by).toBe(host.id);
 		});
@@ -153,10 +153,10 @@ test(
 
 		await test.step('the transcript names the meeting, the speaker and the consent', () => {
 			expect.soft(transcript.meeting).toBe(meeting);
-			expect.soft(transcript.speakers.map((s) => s.label)).toEqual(['Felix (host)']);
+			expect.soft(transcript.speakers.map((s) => s.label)).toEqual(['Robin (host)']);
 			expect
 				.soft(transcript.consents)
-				.toEqual([expect.objectContaining({ name: 'Felix', noticeVersion: 1, withdrawnAt: null })]);
+				.toEqual([expect.objectContaining({ name: 'Robin', noticeVersion: 1, withdrawnAt: null })]);
 		});
 		await test.step('no audio is missing or untranscribed', () => {
 			expect.soft(transcript.gaps).toEqual([]);

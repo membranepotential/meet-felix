@@ -1,3 +1,7 @@
+# The deployment's own values are placeholders (`${…}`), filled from the git-ignored `.env`
+# (see `.env.example`): `pnpm run wrangler:config` writes the result to the git-ignored
+# `wrangler.local.toml`, which `pnpm dev` and `pnpm run release` use. The e2e stacks read this
+# file directly and set the values with `--var`.
 name = "meet-felix"
 main = "build/index.js"
 # Newest date the pinned workerd (1.20261001.1) supports. `RoomObject::alarm` relies on
@@ -33,9 +37,11 @@ new_sqlite_classes = ["RecorderObject"]
 # "", "eu", "us" or "fedramp" makes every request fail with 500.
 ROOM_JURISDICTION = "eu"
 # Where the SFU's WebSocket adapters deliver recorded audio (`/rec/...`). The workers.dev host,
-# not meet.example.com: the media stream skips the Pages front door and its double billing
+# not a custom domain: the media stream skips the Pages front door and its double billing
 # (research 11). For a local test, `--var RECORDER_ORIGIN:http://localhost:<port>`.
-RECORDER_ORIGIN = "https://meet-felix.example.workers.dev"
+RECORDER_ORIGIN = "${RECORDER_ORIGIN}"
+# The owner's display name, prefilled when the owner joins a meeting (D32).
+OWNER_NAME = "${OWNER_NAME}"
 # Optional SFU_API_URL replaces https://rtc.live.cloudflare.com/v1, for the spike's mock SFU only.
 
 # Secrets (`pnpm exec wrangler secret put NAME`; locally in the git-ignored `.dev.vars`):
@@ -45,7 +51,7 @@ RECORDER_ORIGIN = "https://meet-felix.example.workers.dev"
 # - TURN_KEY_ID, TURN_KEY_API_TOKEN: a Realtime TURN key. With them, `GET /api/ice` adds TURN
 #   servers with 24-hour credentials; without them it serves STUN only.
 
-# Namespace MEETINGS created on 2026-10-09; `wrangler dev` uses a local store.
+# `wrangler dev` uses a local store, so the placeholder id works there.
 [[kv_namespaces]]
 binding = "MEETINGS"
 id = "${MEETINGS_KV_ID}"

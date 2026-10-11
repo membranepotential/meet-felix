@@ -150,7 +150,8 @@ sharing state:
   `[build]` table is dropped and `main` points at the prebuilt bundle, so
   wrangler neither rebuilds nor watches `crates/worker` while tests run, and
   local workerd gets `ROOM_JURISDICTION` empty (no jurisdictions locally,
-  [D5](architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09)).
+  [D5](architecture/README.md#d5-pin-data-to-the-eu-where-cloudflare-allows-it-2026-10-09))
+  and `OWNER_NAME` the invented test name from `fixtures/stack.ts`.
 
 A project picks the stack's kind with the `stackKind` option:
 
@@ -164,7 +165,8 @@ The mock SFU listens on port 0 and reports the port it got in its log. Against
 the mock SFU, `wrangler dev` gets a port picked just before it starts and
 `RECORDER_ORIGIN=http://localhost:<port>`, so the recorder's adapter
 endpoints name this Worker and the mock's adapters stream into it (the
-`wrangler.toml` value is the production host). If another process takes the
+stacks read `wrangler.toml` itself, whose value is the `${RECORDER_ORIGIN}`
+placeholder). If another process takes the
 port in between, `wrangler dev` fails with an `[ERROR]` line and the stack
 fails at once. The `real` stack keeps port 0. Each child runs in its own
 process group and is stopped by signalling that group by its PID, never by
@@ -245,7 +247,7 @@ Protocol layer (`web/e2e/protocol/`, Node only, about 25 s):
 
 | Spec | Covers |
 |---|---|
-| `owner-session.spec.ts` | `POST /api/login` (401 wrong password, 400 without one, 204 with the cookie `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`), `GET /api/me` (cookie, none, forged), `POST /api/logout` |
+| `owner-session.spec.ts` | `POST /api/login` (401 wrong password, 400 without one, 200 with the cookie `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` and the owner's name), `GET /api/me` (cookie: 200 with the name and `no-store`; none, forged: 401), `POST /api/logout` |
 | `http-routes.spec.ts` | `POST /api/new` (401 without or with a wrong secret, 201 with the secret or the cookie, three words and nothing else), `GET /api/meeting/{words}` (policy, `scheduled`, case-insensitive, 404), 426 without upgrade, `GET /api/ice` (STUN for a known meeting, 404 otherwise) |
 | `lifecycle.spec.ts` | A guest waits in a scheduled room despite a forged `x-meet-owner`; the owner joins as host, the room goes live, the guest is let in; ping and pong; a malformed frame; leaving; a dropped socket keeps the participant and its tracks, shown `reconnecting`, until the resume with the token brings it back with the same id and epochs; a knocking guest whose socket closes is gone at once; resume with the token; "join as host" with the cookie; `End` closes every socket, refuses the next one and releases the words; the room keeps its participants through an idle phase |
 | `consent-recording.spec.ts` | Recording from the host's arrival in a `fromStart` meeting, the transcript token in `Ended`; a guest without consent waits in `awaitingConsent` until `SetConsent`; `hostDecides`: recording on and off by the host, `ConsentRequired` and `Muted` for a guest without consent; a guest cannot record |

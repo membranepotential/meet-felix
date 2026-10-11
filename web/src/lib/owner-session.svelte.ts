@@ -2,7 +2,7 @@
  * The owner's session in this browser (D32), as reactive state for the pages: checks the
  * session cookie, logs in and out. Each page makes its own and calls `check()` on mount.
  */
-import { isOwner, login, logout } from './api.ts';
+import { checkSession, login, logout } from './api.ts';
 import { CHECKING, reduce, type OwnerEvent, type OwnerState } from './owner-state.ts';
 
 export class OwnerSession {
@@ -10,7 +10,7 @@ export class OwnerSession {
 	signedIn = $derived(this.state.kind === 'signed-in');
 
 	async check(): Promise<void> {
-		this.#apply({ kind: 'checked', result: await isOwner() });
+		this.#apply({ kind: 'checked', result: await checkSession() });
 	}
 
 	/** Returns whether the login succeeded. The password is not kept. */

@@ -149,7 +149,12 @@ read-modify-write without atomicity.
 An empty name field on the pre-join screen is filled with the owner's name
 once the owner's session is present: there is exactly one owner
 ([D32](../architecture/README.md#d32-one-owner-is-the-only-host-everyone-else-is-a-guest-2026-10-09)),
-so the app knows it (`OWNER_NAME` in `web/src/lib/owner-state.ts`).
+so the deployment names them in the Worker var `OWNER_NAME`. `GET /api/me`
+and a successful `POST /api/login` return it as `{"name"}`; the name is
+`null` if the var is unset or not a valid display name (1 to 40 characters,
+no control characters), and then nothing is prefilled. A config whose
+placeholder `${OWNER_NAME}` was never rendered is a valid name, so the app
+shows that placeholder.
 
 ## D27: The guest pre-join remembers the name and does not show who is in the room (2026-10-09)
 

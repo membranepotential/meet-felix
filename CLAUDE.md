@@ -6,7 +6,7 @@ Self-hosted, serverless video meetings on Cloudflare, written in Rust with a fun
 
 - [STATUS.md](STATUS.md) — the live dashboard: what is in flight, what just landed, what is next. Keep it true.
 - [docs/README.md](docs/README.md) — the index of every doc, with each design decision linked. Cross-cutting decisions (platform, core and shells, browser stack, backend, EU location), the component map, phases and risks are in [docs/architecture/](docs/architecture/README.md); feature decisions are in [docs/links/](docs/links/README.md), [docs/media/](docs/media/README.md), [docs/recording/](docs/recording/README.md), [docs/core/](docs/core/README.md) and [docs/cost/](docs/cost/README.md).
-- The decision records D1–D21, indexed in [docs/README.md](docs/README.md#design-decisions) — **binding**. A change that departs from a decision updates that decision in the same commit, with the reason. New decisions get the next free number and a row in the index.
+- The decision records D1–D35, indexed in [docs/README.md](docs/README.md#design-decisions) — **binding**. A change that departs from a decision updates that decision in the same commit, with the reason. New decisions get the next free number and a row in the index.
 - [docs/DEVLOG.md](docs/DEVLOG.md) — the running log. Add an entry at the top (newest first) for every non-trivial change: what, why, what's next.
 - [docs/TESTING.md](docs/TESTING.md) — the test layers and what exists today.
 - [docs/research/](docs/research/README.md) — the research the design rests on; cite it, don't re-argue it without new evidence. Read-only: do not rewrite the notes.
@@ -23,7 +23,7 @@ Self-hosted, serverless video meetings on Cloudflare, written in Rust with a fun
 ## Commands
 
 - Rust: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo check -p meeting-core --target wasm32-unknown-unknown --features wasm`.
-- Worker: `pnpm exec wrangler dev` (local; needs `worker-build` from `cargo install worker-build`; add `--var ROOM_JURISDICTION:` because local workerd has no jurisdictions), `pnpm exec wrangler deploy`.
+- Worker: `pnpm dev` (local; needs `worker-build` from `cargo install worker-build`), `pnpm run release` (build and deploy). Both render the git-ignored `wrangler.local.toml` from `wrangler.toml` and the git-ignored `.env`; plain `wrangler dev`/`deploy` would use the `${…}` placeholders.
 - Web: `pnpm --filter web dev|check|build`.
 - Package manager is pnpm with a 7-day minimum release age (`.npmrc`); build-script approvals live in `pnpm-workspace.yaml` (`allowBuilds`).
 
@@ -34,4 +34,4 @@ Self-hosted, serverless video meetings on Cloudflare, written in Rust with a fun
 - Recording state is part of `RoomState` and broadcast on every change; never add a recording path that bypasses it ([D15](docs/recording/README.md#d15-recording-is-announced-by-the-core-and-joining-means-consent-2026-10-09)).
 - Meeting ids are three short English words from `meeting-core::words`; they are ephemeral and recycled ([D6](docs/links/README.md#d6-meeting-ids-are-three-short-english-words-that-live-only-while-the-meeting-runs-2026-10-09)).
 - Verify Cloudflare and crate facts against docs/source; prices and limits are in [docs/cost/](docs/cost/README.md) and [docs/research/](docs/research/README.md), with dates.
-- Secrets (`.dev.vars`, API tokens, host tokens) never go into git.
+- Secrets (`.dev.vars`, API tokens, host tokens) and the deployment's own values (`.env`: hostnames, KV id, owner name) never go into git.

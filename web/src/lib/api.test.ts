@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
+	checkSession,
 	createMeeting,
 	getIceServers,
 	getMeeting,
 	ICE_TIMEOUT_MS,
-	isOwner,
 	listMeetings,
 	login
 } from './api.ts';
@@ -30,8 +30,8 @@ function serve(status: number, body?: unknown) {
 
 describe('owner session', () => {
 	it('logs in with the password as JSON and reports a wrong one', async () => {
-		const fetch = serve(204);
-		expect(await login('secret')).toEqual({ ok: true, value: undefined });
+		const fetch = serve(200, { name: 'Robin Hart' });
+		expect(await login('secret')).toEqual({ ok: true, value: { name: 'Robin Hart' } });
 		expect(fetch).toHaveBeenCalledWith('/api/login', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -42,15 +42,26 @@ describe('owner session', () => {
 	});
 
 	it('tells a valid session from none, and a missing route from both', async () => {
-		serve(204);
-		expect(await isOwner()).toEqual({ ok: true, value: true });
+		serve(200, { name: 'Robin Hart' });
+		expect(await checkSession()).toEqual({
+			ok: true,
+			value: { kind: 'owner', owner: { name: 'Robin Hart' } }
+		});
+		// A deployment without a valid `OWNER_NAME`.
+		serve(200, { name: null });
+		expect(await checkSession()).toEqual({
+			ok: true,
+			value: { kind: 'owner', owner: { name: null } }
+		});
 		serve(401);
-		expect(await isOwner()).toEqual({ ok: true, value: false });
+		expect(await checkSession()).toEqual({ ok: true, value: { kind: 'none' } });
 		serve(404);
-		expect(await isOwner()).toEqual({ ok: false, error: { kind: 'server', status: 404 } });
+		expect(await checkSession()).toEqual({ ok: false, error: { kind: 'server', status: 404 } });
 		// The static app's fallback page answers 200 for a route the Worker does not have.
 		serve(200, '<!doctype html>');
-		expect(await isOwner()).toEqual({ ok: false, error: { kind: 'malformed' } });
+		expect(await checkSession()).toEqual({ ok: false, error: { kind: 'malformed' } });
+		serve(204);
+		expect(await checkSession()).toEqual({ ok: false, error: { kind: 'malformed' } });
 	});
 
 	it('creates a meeting with the cookie alone and reads its words', async () => {

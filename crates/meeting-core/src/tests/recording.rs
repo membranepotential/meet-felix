@@ -22,17 +22,17 @@ fn entry(id: u32, n: &str, role: Role) -> RosterEntry {
 fn equal_names_get_numbers_in_id_order_and_hosts_are_marked() {
     let labels: Vec<String> = label_speakers(&[
         entry(4, "anna", Role::Guest),
-        entry(0, "Felix", Role::Host),
+        entry(0, "Robin", Role::Host),
         entry(2, "Anna", Role::Guest),
         entry(7, "Bo", Role::Guest),
-        entry(9, "Felix", Role::Host),
+        entry(9, "Robin", Role::Host),
     ])
     .into_iter()
     .map(|s| s.label)
     .collect();
     assert_eq!(
         labels,
-        ["Felix (host)", "Anna", "anna 2", "Bo", "Felix 2 (host)"]
+        ["Robin (host)", "Anna", "anna 2", "Bo", "Robin 2 (host)"]
     );
 }
 
@@ -211,7 +211,7 @@ fn berlin_time_follows_summer_time() {
 
 #[test]
 fn the_transcript_labels_paragraphs_and_renders_markdown_with_gaps() {
-    let speakers = label_speakers(&[entry(0, "Felix", Role::Host), entry(3, "Anna", Role::Guest)]);
+    let speakers = label_speakers(&[entry(0, "Robin", Role::Host), entry(3, "Anna", Role::Guest)]);
     let paragraphs = merge_segments(
         None,
         [
@@ -238,8 +238,8 @@ fn the_transcript_labels_paragraphs_and_renders_markdown_with_gaps() {
         transcript.markdown(),
         "# Transcript: amber-otter-ocean\n\n\
          9 October 2026, 14:00–15:00 (Europe/Berlin)\n\n\
-         Speakers: Felix (host), Anna\n\n\
-         **Felix (host)** 14:00 — Guten Tag.\n\n\
+         Speakers: Robin (host), Anna\n\n\
+         **Robin (host)** 14:00 — Guten Tag.\n\n\
          _14:00 — 12 s of Anna missing_\n\n\
          **Anna** 14:01 — Hello.\n\n"
     );
@@ -256,6 +256,6 @@ fn the_transcript_labels_paragraphs_and_renders_markdown_with_gaps() {
         marked.markdown()
     );
     assert_eq!(json["paragraphs"][0]["startMs"], NOON_UTC);
-    assert_eq!(json["speakers"][0]["label"], "Felix (host)");
+    assert_eq!(json["speakers"][0]["label"], "Robin (host)");
     assert_eq!(json["gaps"][0]["reason"], "missing");
 }
