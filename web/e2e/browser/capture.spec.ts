@@ -98,6 +98,28 @@ test('the link of an open meeting captures once the meeting is known', async ({
 	await expect.poll(() => liveTracks(guest)).toBeGreaterThan(0);
 });
 
+test('a camera started during the lookup is stopped when the link turns out dead', async ({
+	guest
+}) => {
+	await watchCapture(guest, { hold: false });
+	let answerLookup: () => void = () => {};
+	const lookupHeld = new Promise<void>((resolve) => (answerLookup = resolve));
+	await guest.page.route('**/api/meeting/*', async (route) => {
+		await lookupHeld;
+		await route.fulfill({ status: 404 });
+	});
+	await guest.page.goto(`/${UNKNOWN_MEETING}`);
+	// The pre-join shows while the lookup runs; the user presses the camera button already.
+	await guest.page.getByRole('button', { name: 'Turn camera off' }).click();
+	await expect.poll(() => liveTracks(guest)).toBeGreaterThan(0);
+
+	answerLookup();
+	await expect(
+		guest.page.getByRole('heading', { name: 'This meeting does not exist' })
+	).toBeVisible();
+	await expect.poll(() => liveTracks(guest)).toBe(0);
+});
+
 test('a capture that finishes after leaving is stopped', async ({ api, owner, host }) => {
 	const meeting = await createMeeting(api, owner.headers, 'hostDecides');
 	await watchCapture(host, { hold: true });

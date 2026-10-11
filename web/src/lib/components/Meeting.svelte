@@ -150,10 +150,12 @@
 		}
 	}
 
-	// Nothing expanded any more (Exit, or the share ended): leave fullscreen. `expandedRef` may
-	// keep a stale screen; `expanded` ignores it, and a new share has a new stream.
+	// Nothing expanded any more (Exit, or the share ended): forget the screen, leave fullscreen.
+	// Forgetting matters: a stream is cached per receiver track and the SFU may reuse a slot, so a
+	// share that returns with the same key and stream would otherwise open expanded again.
 	$effect(() => {
 		if (expanded !== null) return;
+		if (expandedRef !== null) expandedRef = null;
 		if (root && document.fullscreenElement === root) document.exitFullscreen().catch(() => {});
 	});
 

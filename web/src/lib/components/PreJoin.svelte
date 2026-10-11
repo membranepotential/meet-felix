@@ -276,7 +276,7 @@
 		height: var(--touch);
 		border: 0;
 		border-radius: 50%;
-		background: var(--scrim);
+		background: var(--scrim-button);
 		color: var(--fog);
 		backdrop-filter: blur(6px);
 	}

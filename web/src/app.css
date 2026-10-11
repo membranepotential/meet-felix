@@ -19,10 +19,14 @@
 	/* Black behind an expanded screen share; the dark grey behind a screen tile. */
 	--stage: #000;
 	--screen-bg: #08100f;
-	/* Translucent lake over a picture (tile captions, preview buttons); the soft one is fainter. */
-	--scrim: color-mix(in srgb, var(--lake) 78%, transparent);
-	--scrim-soft: color-mix(in srgb, var(--lake) 62%, transparent);
-	--signal-wash: color-mix(in srgb, var(--signal) 10%, transparent);
+	/*
+	 * Translucent lake over a picture (tile captions, preview buttons) and signal red as a wash.
+	 * Plain rgb() copies of --lake and --signal: color-mix() needs Safari 16.2 or later.
+	 */
+	--scrim: rgb(14 28 34 / 0.78);
+	--scrim-soft: rgb(14 28 34 / 0.62);
+	--scrim-button: rgb(14 28 34 / 0.72);
+	--signal-wash: rgb(229 72 77 / 0.1);
 	--backdrop: rgb(6 12 15 / 0.7);
 
 	--font: 'Atkinson Hyperlegible Next Variable', system-ui, sans-serif;

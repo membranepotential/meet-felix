@@ -61,7 +61,9 @@
 				Join as host
 			</button>
 		{:else if offer.kind === 'form'}
-			<HostLogin {owner} onlogin={() => session.reconnect()} />
+			<div class="host-login">
+				<HostLogin {owner} onlogin={() => session.reconnect()} />
+			</div>
 		{/if}
 	{/if}
 </main>
@@ -98,6 +100,10 @@
 	.actions {
 		display: flex;
 		gap: 0.75rem;
+	}
+
+	.host-login {
+		max-width: 26rem;
 	}
 
 	/* Quiet on purpose: only the owner needs it. */

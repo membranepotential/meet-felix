@@ -87,6 +87,8 @@ export class LocalMedia {
 	}
 
 	async start(): Promise<void> {
+		// Disposed before the lookup answered (the user left the page): no prompt, no camera light.
+		if (this.#disposed) return;
 		this.starting = true;
 		let result = await captureUserMedia(this.choice, { audio: true, video: true });
 		// Desktops without a webcam are common: fall back to the mic alone.
@@ -191,6 +193,7 @@ export class LocalMedia {
 
 	/** Returns `false` if the user cancelled the picker or sharing failed. */
 	async startScreenShare(): Promise<boolean> {
+		if (this.#disposed) return false;
 		const result = await captureScreen();
 		if (!result.ok) return false;
 		// The meeting ended while the picker was open: end the share the browser just began.

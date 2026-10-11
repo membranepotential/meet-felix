@@ -15,7 +15,6 @@
 	.host-login {
 		display: grid;
 		gap: 1rem;
-		max-width: 26rem;
 		padding: 1rem;
 		border-radius: var(--radius-s);
 		background: var(--water);

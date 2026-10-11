@@ -219,6 +219,26 @@ describe('LocalMedia device switches', () => {
 		expect(media.tracks.video).toBeNull();
 	});
 
+	it('asks for no device when start() or startScreenShare() run after dispose', async () => {
+		const media = new LocalMedia();
+		media.dispose();
+		const getDisplayMedia = vi.fn();
+		vi.stubGlobal('navigator', {
+			mediaDevices: {
+				getUserMedia,
+				getDisplayMedia,
+				enumerateDevices: () => Promise.resolve([]),
+				addEventListener() {},
+				removeEventListener() {}
+			}
+		});
+		await media.start();
+		expect(await media.startScreenShare()).toBe(false);
+		expect(requests).toHaveLength(0);
+		expect(getDisplayMedia).not.toHaveBeenCalled();
+		expect(media.starting).toBe(false);
+	});
+
 	it('stops a screen share that the picker returns after dispose', async () => {
 		const media = new LocalMedia();
 		const track = new FakeTrack('video', 'screen-0');
