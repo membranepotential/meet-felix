@@ -1,8 +1,8 @@
 # meet-felix
 
 A personal, self-hosted, serverless video meeting app. One owner is the only
-host; everyone else joins as a guest through a link. It replaces Google Meet
-for small meetings (2–10 people) and runs entirely on Cloudflare: the Realtime
+host; everyone else joins as a guest through a link. It is made for small
+meetings (2–10 people) and runs entirely on Cloudflare: the Realtime
 SFU carries the media, Rust Durable Objects hold the meetings, and a Svelte
 app in the browser calls a pure Rust core compiled to WASM. Nothing runs, and
 nothing is billed, while no meeting is on.
