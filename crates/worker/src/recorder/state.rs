@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sfu_api::wire::AdapterId;
 
+use crate::internal::{TrackRecording, UntrackRecording};
 use crate::record::{DecodeError, Stored, stored_record, stored_version};
 
 /// The recorder's storage key.
@@ -63,6 +64,101 @@ pub struct Recorder {
     pub consents: Vec<ConsentRecord>,
     pub adapters: Vec<Adapter>,
     pub phase: Phase,
+    /// The newest of the room's requests the recorder applied, so it can drop one that arrives
+    /// after a newer one ([`RequestSeq`]). Recorders stored before it existed load as having
+    /// applied none.
+    #[serde(default)]
+    pub applied: Applied,
+}
+
+/// The place of a request from the room among all the requests the room sends its recorder,
+/// counted from [`RequestSeq::FIRST`] in the order the room's steps produced them.
+///
+/// The room carries out a step's effects after storing the step, and each request to the
+/// recorder awaits a fetch with the input gate open, so a later step's `/stop` or `/untrack`
+/// can reach the recorder before an earlier step's `/track`. Applied as it arrives, that
+/// `/track` would record audio that `RoomState` says is not recorded (D15). The recorder
+/// instead drops a request older than one it applied for the same speaker, and a `/track` older
+/// than the last `/stop` ([`Recorder::begin_track`], [`Recorder::untrack`], [`Recorder::stop`]),
+/// so it ends up as if every request had arrived in order. A request without a number (from a
+/// room that ran older code) counts as [`RequestSeq::UNORDERED`], older than every numbered one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequestSeq(pub u64);
+
+impl RequestSeq {
+    /// What a request from a room that numbered none carries.
+    pub const UNORDERED: Self = Self(0);
+    /// The number of a room's first request.
+    pub const FIRST: Self = Self(1);
+
+    /// The number `n` requests after this one.
+    #[must_use]
+    pub fn after(self, n: usize) -> Self {
+        Self(self.0 + n as u64)
+    }
+}
+
+impl Default for RequestSeq {
+    fn default() -> Self {
+        Self::UNORDERED
+    }
+}
+
+/// A request from the room with its [`RequestSeq`], as the room posts it: the request's own
+/// fields plus `seq`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Ordered<R> {
+    #[serde(default)]
+    pub seq: RequestSeq,
+    #[serde(flatten)]
+    pub request: R,
+}
+
+/// The body of `/stop`, which has no fields besides its [`RequestSeq`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Stop {}
+
+/// The newest requests the recorder applied: per speaker the last `/track` or `/untrack`, and
+/// the last `/stop`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Applied {
+    pub stop: RequestSeq,
+    pub speakers: Vec<(ParticipantId, RequestSeq)>,
+}
+
+impl Applied {
+    /// The last `/track` or `/untrack` applied for `who`.
+    fn speaker(&self, who: ParticipantId) -> RequestSeq {
+        self.speakers
+            .iter()
+            .find(|(id, _)| *id == who)
+            .map_or(RequestSeq::UNORDERED, |&(_, seq)| seq)
+    }
+
+    fn set_speaker(&mut self, who: ParticipantId, seq: RequestSeq) {
+        match self.speakers.iter_mut().find(|(id, _)| *id == who) {
+            Some((_, known)) => *known = seq,
+            None => self.speakers.push((who, seq)),
+        }
+    }
+}
+
+/// What a `/track` asks of the recorder ([`Recorder::begin_track`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackPlan {
+    /// The request is older than a `/stop`, `/track` or `/untrack` already applied: nothing
+    /// changed.
+    Stale,
+    /// The speaker's open adapter carries the track already; only the name and consent changed.
+    Unchanged,
+    /// A new adapter of this generation is to be created, after closing `replaced`, the
+    /// speaker's previous ones.
+    New {
+        generation: u32,
+        replaced: Vec<Adapter>,
+    },
 }
 
 /// One WebSocket adapter: one speaker's audio track, streamed to
@@ -161,6 +257,88 @@ impl Recorder {
             Some(known) => *known = entry,
             None => self.speakers.push(entry),
         }
+    }
+
+    /// Marks the adapters that `which` selects closed; returns those that were open.
+    pub fn close_adapters(&mut self, which: impl Fn(&Adapter) -> bool) -> Vec<Adapter> {
+        let mut closed = Vec::new();
+        for adapter in self.adapters.iter_mut().filter(|a| a.open && which(a)) {
+            adapter.open = false;
+            closed.push(adapter.clone());
+        }
+        closed
+    }
+
+    /// Applies the room's `/track` numbered `seq`, unless it is stale: records the speaker's
+    /// name and consent, and opens an adapter for the track unless the speaker's open one
+    /// carries it already. The caller creates a new adapter at the SFU.
+    pub fn begin_track(&mut self, track: &TrackRecording, seq: RequestSeq) -> TrackPlan {
+        let who = track.who;
+        if seq < self.applied.stop.max(self.applied.speaker(who)) {
+            return TrackPlan::Stale;
+        }
+        self.applied.set_speaker(who, seq);
+        self.name_speaker(RosterEntry {
+            id: who,
+            name: track.name.clone(),
+            role: track.role,
+        });
+        self.record_consent(track.consent.clone());
+        if self
+            .open_adapter(who)
+            .is_some_and(|a| a.session == track.session && a.track_name == track.track_name)
+        {
+            return TrackPlan::Unchanged;
+        }
+        let replaced = self.close_adapters(|a| a.who == who);
+        let generation = self.next_generation(who);
+        self.adapters.push(Adapter {
+            who,
+            generation,
+            session: track.session.clone(),
+            track_name: track.track_name.clone(),
+            id: None,
+            open: true,
+        });
+        TrackPlan::New {
+            generation,
+            replaced,
+        }
+    }
+
+    /// Applies the room's `/untrack` numbered `seq`, unless it is older than a `/track` or
+    /// `/untrack` applied for the speaker (`None`): closes the speaker's adapters and records
+    /// the consent it carries. Returns the adapters it closed.
+    ///
+    /// It closes all of them, not only the named track's: the room untracks only the track it
+    /// records, so after the newest request for a speaker is an `/untrack`, nothing of theirs
+    /// is recorded. An older `/track` for another of their tracks may have opened an adapter
+    /// before this arrived.
+    pub fn untrack(&mut self, untrack: &UntrackRecording, seq: RequestSeq) -> Option<Vec<Adapter>> {
+        let who = untrack.who;
+        if seq < self.applied.speaker(who) {
+            return None;
+        }
+        self.applied.set_speaker(who, seq);
+        let closed = self.close_adapters(|a| a.who == who);
+        if let Some(consent) = &untrack.consent {
+            self.record_consent(consent.clone());
+        }
+        Some(closed)
+    }
+
+    /// Applies the room's `/stop` numbered `seq`: closes the adapters of every speaker whose
+    /// last applied request is not newer. Returns the adapters it closed.
+    pub fn stop(&mut self, seq: RequestSeq) -> Vec<Adapter> {
+        self.applied.stop = self.applied.stop.max(seq);
+        let applied = &self.applied;
+        let newer: Vec<ParticipantId> = applied
+            .speakers
+            .iter()
+            .filter(|&&(_, last)| last > seq)
+            .map(|&(who, _)| who)
+            .collect();
+        self.close_adapters(|a| !newer.contains(&a.who))
     }
 }
 
@@ -482,6 +660,7 @@ mod tests {
             consents: Vec::new(),
             adapters: Vec::new(),
             phase: Phase::Recording,
+            applied: Applied::default(),
         };
         let who = ParticipantId(4);
         assert_eq!(recorder.next_generation(who), 0);
@@ -504,6 +683,208 @@ mod tests {
         recorder.name_speaker(entry("Anna"));
         assert_eq!(recorder.speakers.len(), 1);
         assert_eq!(recorder.speakers[0].name.as_str(), "Anna");
+    }
+
+    /// A request from the room, as the recorder receives it.
+    #[derive(Debug)]
+    enum Request {
+        Track(TrackRecording),
+        Untrack(UntrackRecording),
+        Stop,
+    }
+
+    fn consent(who: ParticipantId, withdrawn: bool) -> ConsentRecord {
+        ConsentRecord {
+            who,
+            name: DisplayName::parse("Ada").unwrap(),
+            at: Millis(0),
+            notice_version: 1,
+            withdrawn_at: withdrawn.then_some(Millis(1)),
+        }
+    }
+
+    fn track(who: u32, session: &str, name: &str) -> Request {
+        let who = ParticipantId(who);
+        Request::Track(TrackRecording {
+            who,
+            name: DisplayName::parse("Ada").unwrap(),
+            role: Role::Guest,
+            consent: consent(who, false),
+            session: SessionId::new(session),
+            track_name: TrackName::new(name),
+        })
+    }
+
+    fn untrack(who: u32, session: &str, name: &str) -> Request {
+        let who = ParticipantId(who);
+        Request::Untrack(UntrackRecording {
+            who,
+            session: SessionId::new(session),
+            track_name: TrackName::new(name),
+            consent: Some(consent(who, true)),
+        })
+    }
+
+    fn empty_recorder() -> Recorder {
+        Recorder {
+            meeting: MeetingId::from_random([0, 0, 0]),
+            started_at: Millis(0),
+            secret: "s".into(),
+            speakers: Vec::new(),
+            consents: Vec::new(),
+            adapters: Vec::new(),
+            phase: Phase::Recording,
+            applied: Applied::default(),
+        }
+    }
+
+    /// Applies `(seq, request)` the way `RecorderObject` does, with adapters created at once.
+    fn apply(recorder: &mut Recorder, (seq, request): &(RequestSeq, Request)) {
+        match request {
+            Request::Track(track) => {
+                recorder.begin_track(track, *seq);
+            }
+            Request::Untrack(untrack) => {
+                recorder.untrack(untrack, *seq);
+            }
+            Request::Stop => {
+                recorder.stop(*seq);
+            }
+        }
+    }
+
+    /// The tracks the recorder records: its open adapters.
+    fn recorded(recorder: &Recorder) -> Vec<(ParticipantId, String)> {
+        let mut open: Vec<_> = recorder
+            .adapters
+            .iter()
+            .filter(|a| a.open)
+            .map(|a| (a.who, a.track_name.as_str().to_owned()))
+            .collect();
+        open.sort();
+        open
+    }
+
+    /// Every order of `items`.
+    fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        (0..items.len())
+            .flat_map(|i| {
+                let mut rest = items.to_vec();
+                let first = rest.remove(i);
+                permutations(&rest).into_iter().map(move |mut tail| {
+                    tail.insert(0, first);
+                    tail
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_track_older_than_a_stop_or_untrack_that_arrived_first_records_nothing() {
+        // Recording starts with speaker 0's track (1) and stops (2); the stop arrives first.
+        let mut recorder = empty_recorder();
+        recorder.stop(RequestSeq(2));
+        let Request::Track(late) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        assert_eq!(recorder.begin_track(&late, RequestSeq(1)), TrackPlan::Stale);
+        assert_eq!(recorder, {
+            let mut stopped = empty_recorder();
+            stopped.applied.stop = RequestSeq(2);
+            stopped
+        });
+        // Speaker 0 withdraws consent (4) after their track (3); the untrack arrives first.
+        let mut recorder = empty_recorder();
+        let Request::Untrack(withdrawn) = untrack(0, "p0", "a0") else {
+            unreachable!()
+        };
+        assert_eq!(recorder.untrack(&withdrawn, RequestSeq(4)), Some(Vec::new()));
+        assert_eq!(recorder.begin_track(&late, RequestSeq(3)), TrackPlan::Stale);
+        assert!(recorded(&recorder).is_empty());
+        assert_eq!(recorder.consents, [consent(ParticipantId(0), true)]);
+    }
+
+    #[test]
+    fn the_recorder_ends_as_if_the_rooms_requests_had_arrived_in_order() {
+        // What a room sends: speakers 0 and 1 are recorded; 0 withdraws consent; recording
+        // stops and starts again with 0, who consented again, and 1, who republished; then 1
+        // unpublishes.
+        let history: Vec<(RequestSeq, Request)> = [
+            track(0, "p0", "a0"),
+            track(1, "p1", "a1"),
+            untrack(0, "p0", "a0"),
+            Request::Stop,
+            track(0, "p0", "a0"),
+            track(1, "p1b", "a1b"),
+            untrack(1, "p1b", "a1b"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, request)| (RequestSeq::FIRST.after(i), request))
+        .collect();
+        let mut in_order = empty_recorder();
+        for request in &history {
+            apply(&mut in_order, request);
+        }
+        assert_eq!(recorded(&in_order), [(ParticipantId(0), "a0".to_owned())]);
+        let indices: Vec<usize> = (0..history.len()).collect();
+        for arrival in permutations(&indices) {
+            let mut recorder = empty_recorder();
+            for &i in &arrival {
+                apply(&mut recorder, &history[i]);
+            }
+            assert_eq!(recorded(&recorder), recorded(&in_order), "arrival {arrival:?}");
+        }
+    }
+
+    #[test]
+    fn requests_without_a_number_count_as_older_than_numbered_ones() {
+        let Request::Track(track) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        // A room that ran older code: its unnumbered requests apply as they arrive.
+        let mut recorder = empty_recorder();
+        assert!(matches!(
+            recorder.begin_track(&track, RequestSeq::UNORDERED),
+            TrackPlan::New { .. }
+        ));
+        assert_eq!(recorder.stop(RequestSeq::UNORDERED).len(), 1);
+        // Once a numbered request was applied, an unnumbered one is stale.
+        recorder.stop(RequestSeq::FIRST);
+        assert_eq!(
+            recorder.begin_track(&track, RequestSeq::UNORDERED),
+            TrackPlan::Stale
+        );
+    }
+
+    #[test]
+    fn the_rooms_requests_carry_their_number_beside_their_fields() {
+        let Request::Track(track) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        let json = serde_json::to_value(Ordered {
+            seq: RequestSeq(5),
+            request: track,
+        })
+        .unwrap();
+        assert_eq!(json["seq"], 5);
+        assert_eq!(json["trackName"], "a0");
+        // A body without a number, as a room on older code posts it.
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("seq");
+        let parsed: Ordered<TrackRecording> = serde_json::from_value(old).unwrap();
+        assert_eq!(parsed.seq, RequestSeq::UNORDERED);
+        let stop = serde_json::to_string(&Ordered {
+            seq: RequestSeq(6),
+            request: Stop {},
+        })
+        .unwrap();
+        assert_eq!(stop, r#"{"seq":6}"#);
+        let old_stop: Option<Ordered<Stop>> = serde_json::from_str("null").unwrap();
+        assert!(old_stop.is_none());
     }
 
     /// Recorders the fixtures freeze: one per phase and job step, with speakers, a withdrawn
@@ -569,6 +950,10 @@ mod tests {
                 },
             ],
             phase: Phase::Recording,
+            applied: Applied {
+                stop: RequestSeq(4),
+                speakers: vec![(ada, RequestSeq(3)), (bo, RequestSeq(7))],
+            },
         };
         let at = Millis(1_791_586_800_000);
         let ended = |job| Recorder {
@@ -638,12 +1023,17 @@ mod tests {
             let version = fixtures::version_in_name(&name);
             assert_eq!(stored_version(&json, RECORDER_VERSION).unwrap(), version);
             let recorder = decode(&json).unwrap_or_else(|e| panic!("{name}: {e}"));
-            // The unversioned records were captured from these scenarios.
+            // The unversioned records were captured from these scenarios, before the recorder
+            // kept the requests it applied.
             if let Some((_, expected)) = built
                 .iter()
                 .find(|(n, _)| format!("v1-{n}.json") == name)
             {
-                assert_eq!(&recorder, expected, "{name}");
+                let before_applied = Recorder {
+                    applied: Applied::default(),
+                    ..expected.clone()
+                };
+                assert_eq!(recorder, before_applied, "{name}");
             }
         }
     }

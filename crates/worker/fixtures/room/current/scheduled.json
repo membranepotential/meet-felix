@@ -3,6 +3,7 @@
     "open": {
       "alarm": 5185000000,
       "nextParticipant": 1,
+      "nextRecorderRequest": 1,
       "room": {
         "lifecycle": {
           "Scheduled": {

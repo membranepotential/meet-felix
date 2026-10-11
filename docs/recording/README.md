@@ -113,6 +113,26 @@ final `/end` (`Effect::FinishRecording`, the whole roster and consent record)
 never arrives; a failed `/end` is kept in the room's ended record and sent
 once more by the room's alarm 30 s later.
 
+The recorder ends up as if the room's requests had arrived in order
+(2026-10-11, audit finding P1-002). The room carries out a step's effects
+after storing the step, and each request to the recorder awaits a fetch while
+other events run, so a later step's `/stop` or `/untrack` (a stop, a consent
+withdrawal, a speaker leaving) could reach the recorder before an earlier
+step's `/track`, which then recorded audio that `RoomState` says is not
+recorded. Now the room numbers every recorder request in the order its steps
+produce them (`next_recorder_request` in the room record, `seq` in the
+request body), and the recorder keeps the newest number it applied per
+speaker and for `/stop`. It drops a `/track` older than the speaker's last
+request or the last `/stop`, and an `/untrack` older than the speaker's last
+request; a `/stop` closes only the adapters of speakers whose last request is
+not newer, and an applied `/untrack` closes all of the speaker's adapters.
+The pure rule is `Recorder::begin_track`, `untrack` and `stop` in
+`crates/worker/src/recorder/state.rs`; a test applies a seven-request history
+in all 5,040 arrival orders and gets the in-order result every time. Why
+numbers and not one queue of recorder calls per room: the rule holds whatever
+order the requests arrive in, survives the room being evicted, and is tested
+without a Durable Object.
+
 What the notice says (owner's decision, 2026-10-09): that the meeting is
 recorded, that voices become a transcript everyone in the meeting gets, and
 that video is not recorded. It does not list Cloudflare's subprocessors or
@@ -331,6 +351,19 @@ expires `audio/` after 3 days; it is set once with
 (wrangler 4.147, flags checked with `--help`). Transcripts live under
 `transcripts/`, untouched by it. The link itself is a KV entry
 (`transcript:<token>`) without expiry; the delete button will remove it.
+
+Because a `RecorderObject` lives as long as its transcript, and the
+transcript page reads its record, every record it ever stored must stay
+readable (2026-10-11, audit finding P1-003). The record is stored in the same
+`{version, record}` envelope as the room's (`RECORDER_VERSION`, now 2);
+version 1, the bare record stored until then, is read as it is. Unlike a
+room, which treats an older record as an ended meeting, a recorder never
+gives up a version: a change of shape adds a version and a migration.
+Frozen records under `crates/worker/fixtures/recorder/` pin every shape. The
+SQL tables carry a version too, in a `schema_version` table, because Durable
+Objects refuse `PRAGMA user_version` (it is not on workerd's pragma
+allowlist, checked 2026-10-11); `Store::open` runs the migrations a database
+still needs, and their count is tied to `SCHEMA_VERSION` at compile time.
 
 Context: R2 storage costs less than $0.01 per month for a recorded 4-person
 meeting-hour of Opus audio ([cost/](../cost/README.md)).

@@ -1,0 +1,35 @@
+{
+  "record": {
+    "open": {
+      "alarm": 5185000000,
+      "nextParticipant": 1,
+      "room": {
+        "lifecycle": {
+          "Scheduled": {
+            "since": 1000000
+          }
+        },
+        "locked": false,
+        "meeting": "absurd-accent-acid",
+        "participants": {
+          "0": {
+            "connection": "WaitingForHost",
+            "consent": {
+              "at": 1001000,
+              "notice_version": 1,
+              "withdrawn_at": null
+            },
+            "muted": false,
+            "name": "Person 0",
+            "resume": "01010101010101010101010101010101",
+            "role": "guest"
+          }
+        },
+        "recording": "NeverStarted",
+        "recording_policy": "fromStart",
+        "transcript": "0123456789abcdef0123456789abcdef"
+      }
+    }
+  },
+  "version": 2
+}

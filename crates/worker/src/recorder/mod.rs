@@ -49,10 +49,11 @@ use worker::{
 use self::capture::{Capture, Note};
 use self::opus::{ogg_opus, spooled_packets};
 use self::packet::Packet;
+pub(crate) use self::state::{Ordered, RequestSeq, Stop};
 use self::state::{
-    AUDIO_RETENTION_MS, Adapter, Job, MAX_QUOTA_WAIT_MS, MAX_STEP_FAILURES, Phase, Recorder,
-    SegmentCursor, Status, audio_prefix, backoff, chunk_key, gaps, quota_retry, secret_matches,
-    transcript_key,
+    AUDIO_RETENTION_MS, Adapter, Applied, Job, MAX_QUOTA_WAIT_MS, MAX_STEP_FAILURES, Phase, Recorder,
+    SegmentCursor, Status, TrackPlan, audio_prefix, backoff, chunk_key, gaps, quota_retry,
+    secret_matches, transcript_key,
 };
 use self::store::{ChunkId, ChunkRow, ChunkState, Store};
 use self::whisper::{TranscribeError, Transcriber, WhisperTurbo};
@@ -150,7 +151,13 @@ impl DurableObject for RecorderObject {
             (Method::Post, RECORDER_START) => inner.start(req.json().await?).await,
             (Method::Post, RECORDER_TRACK) => inner.track(req.json().await?).await,
             (Method::Post, RECORDER_UNTRACK) => inner.untrack(req.json().await?).await,
-            (Method::Post, RECORDER_STOP) => inner.stop().await,
+            // A room that ran older code posts `null`.
+            (Method::Post, RECORDER_STOP) => {
+                let stop: Option<Ordered<Stop>> = req.json().await?;
+                inner
+                    .stop(stop.map_or(RequestSeq::UNORDERED, |stop| stop.seq))
+                    .await
+            }
             (Method::Post, RECORDER_END) => inner.end(req.json().await?).await,
             (Method::Get, RECORDER_STATUS) => inner.status().await,
             (Method::Get, file) => match file.strip_prefix('/') {
@@ -253,6 +260,7 @@ impl Inner {
                 consents: Vec::new(),
                 adapters: Vec::new(),
                 phase: Phase::Recording,
+                applied: Applied::default(),
             };
             self.save(&recorder).await?;
             self.arm(now().after(HOUSEKEEPING_MS)).await?;
@@ -262,8 +270,10 @@ impl Inner {
     }
 
     /// Records a speaker's audio track: creates an adapter for it, after closing the speaker's
-    /// previous one if the track changed (a republish or a replaced session).
-    async fn track(self: &Rc<Self>, track: TrackRecording) -> Result<Response> {
+    /// previous one if the track changed (a republish or a replaced session). A `/track` older
+    /// than a `/stop` or `/untrack` already applied changes nothing ([`Recorder::begin_track`]).
+    async fn track(self: &Rc<Self>, track: Ordered<TrackRecording>) -> Result<Response> {
+        let Ordered { seq, request: track } = track;
         let Some(mut recorder) = self.load().await? else {
             return Response::error("unknown recorder", 404);
         };
@@ -271,29 +281,20 @@ impl Inner {
             return Response::error("the meeting ended", 409);
         }
         let who = track.who;
-        recorder.name_speaker(RosterEntry {
-            id: who,
-            name: track.name,
-            role: track.role,
-        });
-        recorder.record_consent(track.consent);
-        if recorder
-            .open_adapter(who)
-            .is_some_and(|a| a.session == track.session && a.track_name == track.track_name)
-        {
-            self.save(&recorder).await?;
-            return Response::empty().map(|r| r.with_status(204));
-        }
-        let replaced = close_adapters(&mut recorder, |a| a.who == who);
-        let generation = recorder.next_generation(who);
-        recorder.adapters.push(Adapter {
-            who,
-            generation,
-            session: track.session.clone(),
-            track_name: track.track_name.clone(),
-            id: None,
-            open: true,
-        });
+        let (generation, replaced) = match recorder.begin_track(&track, seq) {
+            TrackPlan::Stale => {
+                console_log!("recorder: dropped a /track for {who:?} older than a later request");
+                return Response::empty().map(|r| r.with_status(204));
+            }
+            TrackPlan::Unchanged => {
+                self.save(&recorder).await?;
+                return Response::empty().map(|r| r.with_status(204));
+            }
+            TrackPlan::New {
+                generation,
+                replaced,
+            } => (generation, replaced),
+        };
         // Stored before the SFU call, so the adapter's socket is accepted the moment it opens.
         self.save(&recorder).await?;
         self.end_streams(&replaced);
@@ -379,29 +380,28 @@ impl Inner {
         ))
     }
 
-    async fn untrack(self: &Rc<Self>, untrack: UntrackRecording) -> Result<Response> {
+    async fn untrack(self: &Rc<Self>, untrack: Ordered<UntrackRecording>) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
             return Response::error("unknown recorder", 404);
         };
-        let closed = close_adapters(&mut recorder, |a| {
-            a.who == untrack.who
-                && a.session == untrack.session
-                && a.track_name == untrack.track_name
-        });
-        if let Some(consent) = untrack.consent {
-            recorder.record_consent(consent);
-        }
+        let Some(closed) = recorder.untrack(&untrack.request, untrack.seq) else {
+            console_log!(
+                "recorder: dropped an /untrack for {:?} older than a later request",
+                untrack.request.who
+            );
+            return Response::empty().map(|r| r.with_status(204));
+        };
         self.save(&recorder).await?;
         self.end_streams(&closed);
         self.close_sfu_adapters(&closed).await;
         Response::empty().map(|r| r.with_status(204))
     }
 
-    async fn stop(self: &Rc<Self>) -> Result<Response> {
+    async fn stop(self: &Rc<Self>, seq: RequestSeq) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
             return Response::error("unknown recorder", 404);
         };
-        let closed = close_adapters(&mut recorder, |_| true);
+        let closed = recorder.stop(seq);
         self.save(&recorder).await?;
         self.end_streams(&closed);
         self.close_sfu_adapters(&closed).await;
@@ -428,7 +428,7 @@ impl Inner {
         finish: Option<FinishRecording>,
         now: Millis,
     ) -> Result<()> {
-        let closed = close_adapters(recorder, |_| true);
+        let closed = recorder.close_adapters(|_| true);
         if let Some(finish) = finish {
             for entry in finish.roster {
                 recorder.name_speaker(entry);
@@ -1142,16 +1142,6 @@ impl Inner {
             None => Ok(None),
         }
     }
-}
-
-/// Marks the adapters that `which` selects closed; returns those that were open.
-fn close_adapters(recorder: &mut Recorder, which: impl Fn(&Adapter) -> bool) -> Vec<Adapter> {
-    let mut closed = Vec::new();
-    for adapter in recorder.adapters.iter_mut().filter(|a| a.open && which(a)) {
-        adapter.open = false;
-        closed.push(adapter.clone());
-    }
-    closed
 }
 
 fn set_job(recorder: &mut Recorder, new: Job) {

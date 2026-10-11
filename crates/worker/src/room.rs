@@ -37,8 +37,9 @@ use crate::internal::{
 };
 use crate::record::{
     Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS,
-    MessageBudget, OpenSocket, PendingFinish, Record, alarm_time, is_stale,
+    MessageBudget, OpenSocket, PendingFinish, Record, alarm_time, is_recording, is_stale,
 };
+use crate::recorder::{Ordered, RequestSeq, Stop};
 use crate::{
     Jurisdiction, MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu,
     transcript_key,
@@ -324,11 +325,12 @@ impl RoomObject {
                 return Ok(());
             };
             let now = now();
-            let before = (
-                open.recorder.clone(),
-                open.room.meeting().clone(),
-                open.room.transcript().clone(),
-            );
+            let before = Before {
+                recorder: open.recorder.clone(),
+                meeting: open.room.meeting().clone(),
+                transcript: open.room.transcript().clone(),
+                next_request: open.next_recorder_request,
+            };
             let (mut record, effects) = open.step(now, event);
             let recorder = self.recorder_link(before, &mut record, &effects);
             let json = crate::record::encode(&record)?;
@@ -338,9 +340,7 @@ impl RoomObject {
             if let Some((ws, why)) = close {
                 self::close(&ws, why.code(), why.reason());
             }
-            let replies = self
-                .execute_step(effects, recorder.as_ref(), &mut sfu_calls)
-                .await?;
+            let replies = self.execute_step(effects, recorder, &mut sfu_calls).await?;
             queue.extend(
                 replies
                     .into_iter()
@@ -352,14 +352,20 @@ impl RoomObject {
 
     /// What the room needs to carry out a step's recording effects, or `None` if it has none.
     /// Creates the recorder's id at the first `StartRecording` and keeps it in the record;
-    /// `before` is the recorder id, meeting and transcript token before the step, which an
-    /// ending step's record no longer holds.
+    /// `before` is what the record held before the step, which an ending step's record no
+    /// longer holds.
     fn recorder_link(
         &self,
-        (id, meeting, transcript): (Option<String>, MeetingId, TranscriptRef),
+        before: Before,
         record: &mut Record,
         effects: &[Effect],
     ) -> Option<RecorderLink> {
+        let Before {
+            recorder: id,
+            meeting,
+            transcript,
+            next_request,
+        } = before;
         if !effects.iter().any(is_recording) {
             return None;
         }
@@ -395,6 +401,7 @@ impl RoomObject {
             transcript,
             roster,
             consents,
+            next_request,
         })
     }
 
@@ -417,18 +424,21 @@ impl RoomObject {
     /// arrive meanwhile: a `CloseSocket` or `Rebind` behind an SFU call would let a kicked or
     /// replaced socket send a `Join` first and come back as a participant whose close is never
     /// reported. The core gets SFU replies back as events, so nothing it emits depends on how
-    /// the two groups interleave.
+    /// the two groups interleave. Recorder calls of different steps may still reach the
+    /// recorder out of order; each carries its number for that ([`RecorderLink::next_request`]).
     async fn execute_step(
         &self,
         effects: Vec<Effect>,
-        recorder: Option<&RecorderLink>,
+        mut recorder: Option<RecorderLink>,
         sfu_calls: &mut usize,
     ) -> Result<Vec<SfuReply>> {
+        // `partition` keeps the order, and every recorder call is remote, so the recorder calls
+        // run in effect order and take their numbers in the order `OpenRoom::step` counted.
         let (remote, local): (Vec<Effect>, Vec<Effect>) =
             effects.into_iter().partition(is_remote_call);
         let mut replies = Vec::new();
         for effect in local.into_iter().chain(remote) {
-            replies.extend(self.execute(effect, recorder, sfu_calls).await?);
+            replies.extend(self.execute(effect, recorder.as_mut(), sfu_calls).await?);
         }
         Ok(replies)
     }
@@ -437,7 +447,7 @@ impl RoomObject {
     async fn execute(
         &self,
         effect: Effect,
-        recorder: Option<&RecorderLink>,
+        recorder: Option<&mut RecorderLink>,
         sfu_calls: &mut usize,
     ) -> Result<Option<SfuReply>> {
         match effect {
@@ -494,9 +504,12 @@ impl RoomObject {
         Ok(None)
     }
 
-    /// Carries out a recording effect at the recorder. Failures are logged, not returned: the
-    /// meeting goes on without its recording rather than failing.
-    async fn tell_recorder(&self, recorder: &RecorderLink, effect: Effect) {
+    /// Carries out a recording effect at the recorder, with the effect's number. Failures are
+    /// logged, not returned: the meeting goes on without its recording rather than failing.
+    async fn tell_recorder(&self, recorder: &mut RecorderLink, effect: Effect) {
+        // Taken first, so every recording effect uses up its number as `OpenRoom::step` counted.
+        let seq = recorder.next_request;
+        recorder.next_request = seq.after(1);
         let told = match effect {
             Effect::StartRecording { since } => {
                 // The link works from now on, showing "recording" until the meeting ends.
@@ -515,7 +528,7 @@ impl RoomObject {
                     console_error!("recording {who:?}, who has no name or consent on record");
                     return;
                 };
-                let body = TrackRecording {
+                let request = TrackRecording {
                     who,
                     name: entry.name.clone(),
                     role: entry.role,
@@ -523,20 +536,28 @@ impl RoomObject {
                     session: track.session,
                     track_name: track.name,
                 };
+                let body = Ordered { seq, request };
                 self.post_recorder(&recorder.id, RECORDER_TRACK, &body)
                     .await
             }
             Effect::StopRecordingTrack { who, track } => {
-                let body = UntrackRecording {
+                let request = UntrackRecording {
                     who,
                     session: track.session,
                     track_name: track.name,
                     consent: recorder.consents.iter().find(|c| c.who == who).cloned(),
                 };
+                let body = Ordered { seq, request };
                 self.post_recorder(&recorder.id, RECORDER_UNTRACK, &body)
                     .await
             }
-            Effect::StopRecording => self.post_recorder(&recorder.id, RECORDER_STOP, &()).await,
+            Effect::StopRecording => {
+                let body = Ordered {
+                    seq,
+                    request: Stop {},
+                };
+                self.post_recorder(&recorder.id, RECORDER_STOP, &body).await
+            }
             Effect::FinishRecording { roster, consents } => {
                 let finish = FinishRecording { roster, consents };
                 let finished = self
@@ -781,6 +802,17 @@ struct RecorderLink {
     roster: Vec<RosterEntry>,
     /// The room's consent record after the step.
     consents: Vec<ConsentRecord>,
+    /// The number the step's next recorder call carries.
+    next_request: RequestSeq,
+}
+
+/// What [`RoomObject::recorder_link`] needs from the record as it was before the step.
+struct Before {
+    recorder: Option<String>,
+    meeting: MeetingId,
+    transcript: TranscriptRef,
+    /// The number of the step's first recorder call.
+    next_request: RequestSeq,
 }
 
 /// Whether `effect` is an SFU or recorder call, carried out after the step's other effects
@@ -808,17 +840,6 @@ fn is_remote_call(effect: &Effect) -> bool {
     }
 }
 
-/// Whether `effect` is for the recorder.
-fn is_recording(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::StartRecording { .. }
-            | Effect::RecordTrack { .. }
-            | Effect::StopRecordingTrack { .. }
-            | Effect::StopRecording
-            | Effect::FinishRecording { .. }
-    )
-}
 
 /// Names the SFU call an effect makes, its participant and its session, for the log, e.g.
 /// `SFU Subscribe for ParticipantId(0) on session 2a45…`.

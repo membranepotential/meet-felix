@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::internal::FinishRecording;
+use crate::recorder::RequestSeq;
 
 /// The version of the stored record's shape. 1 was the unversioned record before 2026-10-09;
 /// 2 added the consent record to the core's participants and the recorder id.
@@ -211,6 +212,7 @@ impl Record {
             alarm: None,
             next_participant: 0,
             recorder: None,
+            next_recorder_request: RequestSeq::FIRST,
         }
         .settle(effects)
     }
@@ -256,11 +258,34 @@ pub struct OpenRoom {
     /// The id (hex) of the meeting's `RecorderObject`, once recording started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorder: Option<String>,
+    /// The number the next request to the recorder gets. A step's recorder requests are
+    /// numbered from here in effect order, so the recorder can drop one that arrives after a
+    /// newer one (`RequestSeq` in `crate::recorder`). Records stored before it existed start
+    /// at [`RequestSeq::FIRST`].
+    #[serde(default = "first_request")]
+    pub next_recorder_request: RequestSeq,
+}
+
+fn first_request() -> RequestSeq {
+    RequestSeq::FIRST
+}
+
+/// Whether `effect` is a request to the recorder.
+pub fn is_recording(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::StartRecording { .. }
+            | Effect::RecordTrack { .. }
+            | Effect::StopRecordingTrack { .. }
+            | Effect::StopRecording
+            | Effect::FinishRecording { .. }
+    )
 }
 
 impl OpenRoom {
     /// Runs one event through the core; returns the record to store and the effects to carry
-    /// out.
+    /// out. The recorder requests among the effects take the numbers from
+    /// [`OpenRoom::next_recorder_request`] on, in order; an open record counts on after them.
     pub fn step(self, now: Millis, event: Event) -> (Record, Vec<Effect>) {
         // A fired alarm is used up. The core sets it again after every `AlarmFired` if anything
         // is still due; keeping the old time would re-arm a time in the past, and the alarm
@@ -270,10 +295,12 @@ impl OpenRoom {
             _ => self.alarm,
         };
         let (room, effects) = step(self.room, now, event);
+        let requests = effects.iter().filter(|e| is_recording(e)).count();
         (
             Self {
                 room,
                 alarm,
+                next_recorder_request: self.next_recorder_request.after(requests),
                 ..self
             }
             .settle(&effects),
@@ -493,6 +520,32 @@ pub(crate) mod tests {
             open.alarm, None,
             "nothing is due in a room with a joined host"
         );
+    }
+
+    #[test]
+    fn each_step_numbers_its_recorder_requests_after_the_last_steps() {
+        let record = |on| Event::Client {
+            from: HOST,
+            msg: ClientMsg::SetRecording { on },
+            owner: true,
+            fresh_token: ResumeToken::from_random([9; 16]),
+        };
+        let open = room_with_host();
+        assert_eq!(open.next_recorder_request, RequestSeq::FIRST);
+        let (Record::Open(open), effects) = open.step(T0, record(true)) else {
+            panic!("still open")
+        };
+        assert_eq!(effects.iter().filter(|e| is_recording(e)).count(), 1);
+        assert_eq!(open.next_recorder_request, RequestSeq::FIRST.after(1));
+        // A step without recorder requests keeps the number.
+        let (Record::Open(open), _) = open.step(T0, Event::AlarmFired) else {
+            panic!("still open")
+        };
+        assert_eq!(open.next_recorder_request, RequestSeq::FIRST.after(1));
+        let (Record::Open(open), _) = open.step(T0, record(false)) else {
+            panic!("still open")
+        };
+        assert_eq!(open.next_recorder_request, RequestSeq::FIRST.after(2));
     }
 
     #[test]
