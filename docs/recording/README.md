@@ -169,6 +169,27 @@ unrecorded. Recording stays safe in both cases (a `/stop` still closes
 everything), but transcripts break. If the new code must be undone, deploy a
 fix forward instead.
 
+**No rollback across the deploy of audit wave 2 (2026-10-11) either.** The
+code before it (wave 1) cannot read two stored shapes the wave-2 code writes:
+
+- The owner's meeting index (KV key `index`) is stored in the versioned
+  envelope `{"version": 2, "record": [...]}`. Wave-1 code reads only the bare
+  array, so `GET /api/meetings` fails and new meetings are created but left
+  out of the list. It fails before writing, so the index itself survives.
+- An ended room's record no longer holds `recordingPolicy`, which wave-1 code
+  requires. For a meeting that ended within the hour before the rollback,
+  the lookup and a socket's upgrade fail instead of answering "ended", and
+  the ended room's alarm fails, so a pending `/end` is not sent again and
+  the room's storage is not deleted.
+
+Wave-1 code reads the other wave-2 shapes, with less effect: a recorder
+adapter whose creation failed (`failing`) looks like one still being
+created and is not called again, the stretches it left unrecorded
+(`unrecorded`) drop out of the transcript, and a transcript job waits up to
+seven days for Workers AI again. A room record loses `since` of connecting
+participants when wave-1 code rewrites it, so after a later deploy they
+time out at the room's next alarm.
+
 What the notice says (owner's decision, 2026-10-09): that the meeting is
 recorded, that voices become a transcript everyone in the meeting gets, and
 that video is not recorded. It does not list Cloudflare's subprocessors or

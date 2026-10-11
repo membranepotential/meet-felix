@@ -40,7 +40,10 @@ Research: [01 §2, §6 — Workers pricing, bandwidth per meeting-hour](../resea
 - Workers Free (the plan in use since 2026-10-09) caps the recorder instead of
   billing it: Workers AI 10,000 neurons a day, about 214 Whisper minutes at
   46.63 neurons per audio minute (the job waits for the 00:00 UTC reset
-  instead of failing); SQLite DOs 100,000 rows written a day (deletes count),
+  instead of failing, but no longer than 48 hours after the meeting ended,
+  when the audio is deleted; chunks still waiting then show as not
+  transcribed,
+  [D17](../recording/README.md#d17-transcribe-after-the-meeting-with-whisper-large-v3-turbo-behind-a-transcriber-trait-2026-10-09)); SQLite DOs 100,000 rows written a day (deletes count),
   of which the recorder spends two per speaker every 1.5 s (a spool row
   written, later deleted) plus a few per 30 s chunk, about 5,000 per
   speaker-hour, so some 20 recorded speaker-hours a day; 100,000 DO requests
