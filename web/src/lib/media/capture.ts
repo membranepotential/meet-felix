@@ -77,10 +77,7 @@ const AUDIO: MediaTrackConstraints = {
 };
 
 /** Pure: builds `getUserMedia` constraints from the user's choice. */
-export function userMediaConstraints(
-	choice: DeviceChoice,
-	wants: CaptureWants
-): MediaStreamConstraints {
+function userMediaConstraints(choice: DeviceChoice, wants: CaptureWants): MediaStreamConstraints {
 	const withDevice = (base: MediaTrackConstraints, id: string | null): MediaTrackConstraints =>
 		id === null ? base : { ...base, deviceId: { exact: id } };
 	return {
@@ -131,7 +128,7 @@ export interface DeviceTraits {
 	hover: boolean;
 }
 
-export function deviceTraits(): DeviceTraits {
+function deviceTraits(): DeviceTraits {
 	const matches = (query: string) => typeof matchMedia === 'function' && matchMedia(query).matches;
 	return {
 		displayMedia:

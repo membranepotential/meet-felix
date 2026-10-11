@@ -82,7 +82,7 @@ export function backoffDelay(attempt: number, random: () => number = Math.random
 	return Math.round(ceiling / 2 + random() * (ceiling / 2));
 }
 
-export function signalingUrl(meeting: MeetingId, location: Location = window.location): string {
+function signalingUrl(meeting: MeetingId, location: Location = window.location): string {
 	const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
 	return `${scheme}//${location.host}/ws/${encodeURIComponent(meeting)}`;
 }

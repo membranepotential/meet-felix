@@ -11,7 +11,7 @@ import type { ApiResult, IceConfig } from '../api.ts';
 export const FALLBACK_ICE: RTCIceServer[] = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
 /** Fetch again this long before the credentials expire, or after half their lifetime if sooner. */
-export const REFRESH_MARGIN_MS = 60 * 60 * 1000;
+const REFRESH_MARGIN_MS = 60 * 60 * 1000;
 /**
  * After TURN credentials of unknown lifetime: a Worker from before `ttl` gave 6 hours. A web app
  * served apart from the Worker may meet one for a while after a deploy.

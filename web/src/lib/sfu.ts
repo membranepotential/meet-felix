@@ -53,7 +53,7 @@ function watchFailure(pc: RTCPeerConnection, onFailed: () => void): void {
  * Camera simulcast: quarter, half and full resolution, named by the core's `Rid`s. Each
  * subscriber picks a layer per track (`ClientMsg::SetLayer`) to match its tile size.
  */
-export const CAMERA_SIMULCAST: readonly (RTCRtpEncodingParameters & { rid: Rid })[] = [
+const CAMERA_SIMULCAST: readonly (RTCRtpEncodingParameters & { rid: Rid })[] = [
 	{ rid: 'q', scaleResolutionDownBy: 4 },
 	{ rid: 'h', scaleResolutionDownBy: 2 },
 	{ rid: 'f', scaleResolutionDownBy: 1 }

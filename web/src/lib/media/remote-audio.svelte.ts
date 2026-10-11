@@ -14,7 +14,7 @@
 import type { ParticipantId } from '../protocol.ts';
 
 /** The rejection of `play()` that means "not without a tap". */
-export const isAutoplayRefusal = (error: unknown): boolean =>
+const isAutoplayRefusal = (error: unknown): boolean =>
 	error instanceof DOMException && error.name === 'NotAllowedError';
 
 /** Each participant's voice, or `null` while none is received (also during a reset). */

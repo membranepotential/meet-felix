@@ -6,15 +6,15 @@
 import { trackKey, type Rid, type TrackRef } from './protocol.ts';
 
 /** Tiles narrower than this (CSS pixels) get the quarter-resolution layer. */
-export const QUARTER_BELOW_PX = 240;
+const QUARTER_BELOW_PX = 240;
 /** Tiles narrower than this (CSS pixels) get the half-resolution layer; wider ones get full. */
-export const HALF_BELOW_PX = 640;
+const HALF_BELOW_PX = 640;
 export const LAYER_DEBOUNCE_MS = 400;
 /** How long to wait before asking again after the room refused a `SetLayer`. */
 export const LAYER_RETRY_MS = 1_000;
 
 /** The layer a new subscription starts at (D11). */
-export const DEFAULT_LAYER: Rid = 'f';
+const DEFAULT_LAYER: Rid = 'f';
 
 /** Pure: the layer for a tile `width` CSS pixels wide. */
 export const layerFor = (width: number): Rid =>

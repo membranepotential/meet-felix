@@ -10,7 +10,7 @@ const CEIL_DB = -15;
 /** How far a level may fall per poll (10 polls a second): about 0.6 s from full to silence. */
 const DECAY = 0.15;
 /** At or above this level a participant counts as speaking (about -45 dBFS). */
-export const SPEAKING = 0.25;
+const SPEAKING = 0.25;
 /** The shortest bar, as a fraction of the full height, so the bars never vanish. */
 const MIN_BAR = 0.25;
 
