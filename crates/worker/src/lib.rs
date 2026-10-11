@@ -18,7 +18,8 @@
 //!   meeting, or 404: STUN, plus TURN with fresh credentials if the secrets `TURN_KEY_ID` and
 //!   `TURN_KEY_API_TOKEN` are set. TURN traffic is billed, and anyone who knows an open
 //!   meeting's words gets credentials, so the route is rate-limited and they expire after hours.
-//! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410 once the meeting ended).
+//! - `GET /ws/:words` upgrades to the room's signalling WebSocket (410, `meetingEnded`, once the
+//!   meeting ended).
 //!   A socket opened with the owner's session cookie joins as host (D32 in `docs/architecture`).
 //! - `GET /rec/:recorder/:secret/:who/:n` upgrades an SFU adapter's WebSocket into the meeting's
 //!   `RecorderObject`, which checks the secret.
@@ -34,7 +35,10 @@
 //! Guards on every route:
 //! - Every refusal and failure the router answers is an `ErrorBody`, `{"error": code}`, with the
 //!   code's status; the detail goes to the log only. The router's own 404 and 405 are such
-//!   answers too, and so is an error a handler returns (500, `internal`).
+//!   answers too, and so is an error a handler returns (500, `internal`), and so are the
+//!   refusals of a room and a recorder that the router passes on for `/ws` and
+//!   `/api/transcript`. The exceptions are a recorder's 403 and 410 to an SFU adapter's upgrade
+//!   on `/rec`, which only the SFU sees: they are passed on as plain text.
 //! - Every `/api/*` response carries `Cache-Control: no-store`: many carry credentials, tokens
 //!   or the owner's data.
 //! - Per-client rate limits ([`limits`], D6 in `docs/links`) answer 429: `/api/meeting`,

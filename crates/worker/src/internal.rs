@@ -3,8 +3,8 @@
 
 use meeting_core::recording::{ConsentRecord, RosterEntry};
 use meeting_core::{
-    DisplayName, MeetingId, Millis, ParticipantId, Phase, RecordingPolicy, Role, SessionId,
-    TrackName, TranscriptRef,
+    DisplayName, MeetingId, Millis, ParticipantId, RecordingPolicy, Role, SessionId, TrackName,
+    TranscriptRef,
 };
 use serde::{Deserialize, Serialize};
 use worker::{Method, ObjectNamespace, Request, RequestInit, Response, Result, Stub};
@@ -15,7 +15,8 @@ use crate::recorder::{Ordered, RequestSeq, Stop};
 pub const ORIGIN: &str = "https://object";
 /// `POST`: create the room's state. Sent once, right after the router created the object.
 pub const INIT: &str = "/init";
-/// `GET`: [`RoomInfo`].
+/// `GET`: the room's `meeting_core::http::MeetingLookup`, which the router passes on and the
+/// owner's list reads the phase of.
 pub const INFO: &str = "/info";
 /// Header on a forwarded WebSocket upgrade: [`OWNER_YES`] if the router verified the owner's
 /// session cookie. The router removes it from every client request first, so only the router
@@ -31,24 +32,6 @@ pub struct InitRoom {
     pub meeting: MeetingId,
     pub transcript: TranscriptRef,
     pub recording_policy: RecordingPolicy,
-}
-
-/// Body of [`INFO`]'s response. The router answers `GET /api/meeting/:words` with it as a
-/// `meeting_core::http::MeetingLookup`, and the owner's list reads the phase.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RoomInfo {
-    pub recording_policy: RecordingPolicy,
-    pub phase: Phase,
-}
-
-impl RoomInfo {
-    pub fn new(recording_policy: RecordingPolicy, phase: Phase) -> Self {
-        Self {
-            recording_policy,
-            phase,
-        }
-    }
 }
 
 /// `POST` to the recorder: recording started (again) at `since`. Creates the recorder on the

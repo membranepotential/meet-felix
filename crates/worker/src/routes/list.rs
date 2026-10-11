@@ -6,7 +6,7 @@ use meeting_core::Phase;
 use worker::{KvStore, ObjectNamespace, Request, Response, Result, RouteContext, console_error};
 
 use crate::meetings::{self, Entry, SeenEnded};
-use crate::routes::join::room_info;
+use crate::routes::join::room_lookup;
 use crate::routes::owner::owner_proof;
 use crate::{Config, MEETINGS, ROOMS, now, transcript_key};
 
@@ -66,9 +66,9 @@ async fn look_at(
 ) -> Result<(Phase, Option<bool>)> {
     let phase = match entry.ended {
         Some(_) => Phase::Ended,
-        None => room_info(&entry.room.stub(rooms)?)
+        None => room_lookup(&entry.room.stub(rooms)?)
             .await?
-            .map_or(Phase::Ended, |info| info.phase),
+            .map_or(Phase::Ended, |lookup| lookup.phase()),
     };
     let linked = if meetings::wants_link_check(entry, phase) {
         let key = transcript_key(&entry.transcript);

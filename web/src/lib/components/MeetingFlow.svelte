@@ -95,7 +95,7 @@
 {#if session === null}
 	{#if gone?.kind === 'ended'}
 		<main class="message">
-			{@render ended('This meeting has ended', gone.transcript)}
+			{@render ended('This meeting has ended', null)}
 		</main>
 	{:else if gone?.kind === 'not-found'}
 		<main class="message">

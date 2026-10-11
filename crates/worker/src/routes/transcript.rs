@@ -14,17 +14,27 @@ use crate::{Config, MEETINGS, RECORDERS, reply, transcript_key};
 
 /// `GET /api/transcript/:token`.
 pub async fn status(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
-    reply::private(pass_on(&req, &ctx, RECORDER_STATUS).await?)
+    private(pass_on(&req, &ctx, RECORDER_STATUS).await)
 }
 
 /// `GET /api/transcript/:token/:file`, for `transcript.md` and `transcript.json`.
 pub async fn file(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     let response = match ctx.param("file").map(String::as_str) {
         Some(file @ (TRANSCRIPT_MD | TRANSCRIPT_JSON)) => {
-            pass_on(&req, &ctx, &format!("/{file}")).await?
+            pass_on(&req, &ctx, &format!("/{file}")).await
         }
-        _ => reply::error(ApiErrorCode::NotFound)?,
+        _ => reply::error(ApiErrorCode::NotFound),
     };
+    private(response)
+}
+
+/// The answer with the headers of [`reply::private`], also when the route failed: then it is
+/// `internal`, as the router would answer, and the error is logged here, without the token.
+fn private(response: Result<Response>) -> Result<Response> {
+    let response = response.or_else(|e| {
+        console_error!("a transcript request failed: {e}");
+        reply::error(ApiErrorCode::Internal)
+    })?;
     reply::private(response)
 }
 

@@ -31,9 +31,11 @@ test.describe('GET /api/meeting/{words}', () => {
 		);
 		const response = await api.meeting(meeting);
 		expect(response.status).toBe(200);
-		expect(await body<MeetingLookup>(response)).toEqual({
+		// `ended` is kept one release for apps cached before the lookup had its phase alone.
+		expect(await body<MeetingLookup & { ended: boolean }>(response)).toEqual({
 			recordingPolicy: 'fromStart',
-			phase: 'scheduled'
+			phase: 'scheduled',
+			ended: false
 		});
 		expect((await api.meeting(meeting.toUpperCase())).status, 'case-insensitive').toBe(200);
 	});

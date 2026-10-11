@@ -4,16 +4,17 @@
 //! ([`Limit::Public`]) bounds how fast one client guesses words or mints TURN credentials.
 
 use meeting_core::MeetingId;
-use meeting_core::http::{ApiErrorCode, MeetingLookup};
+use meeting_core::http::{ApiErrorCode, MeetingLookup, MeetingLookupBody};
 use worker::{KvStore, Request, Response, Result, RouteContext, Stub};
 
-use crate::internal::{self, INFO, OWNER_HEADER, OWNER_YES, RecorderId, RoomId, RoomInfo};
+use crate::internal::{self, INFO, OWNER_HEADER, OWNER_YES, RecorderId, RoomId};
 use crate::limits::{self, Limit};
 use crate::owner::Initiator;
 use crate::routes::owner::{initiator_of, is_owner_session, owner_auth};
 use crate::{Config, MEETINGS, RECORDERS, ROOMS, ice, is_websocket_upgrade, reply};
 
-/// `GET /api/meeting/:words`: the room's [`MeetingLookup`].
+/// `GET /api/meeting/:words`: the room's [`MeetingLookup`], with `ended` for old apps
+/// ([`MeetingLookupBody`]).
 pub async fn lookup(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     if !limits::allows(&ctx.env, Limit::Public, &req).await? {
         return limits::too_many_requests();
@@ -21,16 +22,16 @@ pub async fn lookup(req: Request, ctx: RouteContext<Config>) -> Result<Response>
     let Some(room) = room_stub(&ctx).await? else {
         return reply::error(ApiErrorCode::NotFound);
     };
-    match room_info(&room).await? {
-        Some(info) => Response::from_json(&MeetingLookup::new(info.phase, info.recording_policy)),
+    match room_lookup(&room).await? {
+        Some(lookup) => Response::from_json(&MeetingLookupBody::from(lookup)),
         // The room's storage is gone; the words still map to it until KV catches up.
         None => reply::error(ApiErrorCode::NotFound),
     }
 }
 
-/// The room's [`RoomInfo`], or `None` if it has no record: the router never initialised it, or
-/// the ended room deleted its storage.
-pub async fn room_info(room: &Stub) -> Result<Option<RoomInfo>> {
+/// The room's [`MeetingLookup`], or `None` if it has no record: the router never initialised
+/// it, or the ended room deleted its storage.
+pub async fn room_lookup(room: &Stub) -> Result<Option<MeetingLookup>> {
     let mut response = internal::get(room, INFO).await?;
     match response.status_code() {
         200 => Ok(Some(response.json().await?)),

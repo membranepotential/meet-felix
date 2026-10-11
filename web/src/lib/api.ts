@@ -32,12 +32,8 @@ export type OpenPhase = Exclude<Phase, 'ended'>;
 /** What the pre-join screen needs to know about a meeting. */
 export type MeetingInfo =
 	| { kind: 'open'; recordingPolicy: RecordingPolicy; phase: OpenPhase }
-	/**
-	 * `transcript` is always `null`: the lookup never gives out the link, which only the
-	 * participants get when the meeting ends (D19). It goes once `session.svelte.ts` and
-	 * `MeetingFlow.svelte` stop reading it.
-	 */
-	| { kind: 'ended'; transcript: null }
+	/** No transcript link: only the participants get it when the meeting ends (D19). */
+	| { kind: 'ended' }
 	| { kind: 'not-found' };
 
 /** A transcript link's status, or `not-found` for a token the Worker does not know. */
@@ -172,7 +168,7 @@ export function listMeetings(): Promise<ApiResult<PastMeeting[]>> {
 
 const meetingInfo = (lookup: MeetingLookup): MeetingInfo =>
 	lookup.phase === 'ended'
-		? { kind: 'ended', transcript: null }
+		? { kind: 'ended' }
 		: { kind: 'open', recordingPolicy: lookup.recordingPolicy, phase: lookup.phase };
 
 /** Looks a meeting up for the pre-join screen. */

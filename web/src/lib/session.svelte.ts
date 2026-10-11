@@ -440,10 +440,8 @@ export class Session {
 		const result = await getMeeting(this.#meeting);
 		this.#checkingMeeting = false;
 		if (!result.ok || result.value.kind === 'open') return;
-		this.#finish({
-			kind: 'ended',
-			transcript: result.value.kind === 'ended' ? result.value.transcript : null
-		});
+		// The lookup gives out no transcript link; the room's `ended` message carries it.
+		this.#finish({ kind: 'ended', transcript: null });
 	}
 
 	#finish(end: SessionEnd): void {

@@ -123,7 +123,7 @@ describe('getMeeting', () => {
 		serve(200, { phase: 'ended' });
 		expect(await getMeeting('abide-acid-acorn')).toEqual({
 			ok: true,
-			value: { kind: 'ended', transcript: null }
+			value: { kind: 'ended' }
 		});
 		serve(404, refusal('notFound'));
 		expect(await getMeeting('abide-acid-acorn')).toEqual({
@@ -151,7 +151,7 @@ describe('listMeetings', () => {
 		const meetings = [
 			{ meeting: 'abide-acid-acorn', createdAt: 3, phase: 'scheduled' },
 			{ meeting: 'abide-acid-acorn', createdAt: 2, phase: 'live' },
-			{ meeting: 'abide-acid-acorn', createdAt: 1, phase: 'ended', transcript: 't1' }
+			{ meeting: 'abide-acid-acorn', createdAt: 1, phase: 'ended', transcript: '1'.repeat(32) }
 		];
 		const fetch = serve(200, { meetings });
 		expect(await listMeetings()).toEqual({ ok: true, value: meetings });

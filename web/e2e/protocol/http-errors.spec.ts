@@ -5,6 +5,7 @@
  */
 import type { TranscriptRef } from '../../src/lib/protocol.ts';
 import { bearer, createMeeting, type ErrorBody } from '../fixtures/api.ts';
+import { putKv } from '../fixtures/stack.ts';
 import { expect, test } from '../fixtures/test.ts';
 
 test('every refusal is the error body alone, with its status', async ({ api, stack }) => {
@@ -45,4 +46,36 @@ test('every refusal is the error body alone, with its status', async ({ api, sta
 		expect.soft(response.headers.get('content-type'), name).toMatch(/^application\/json/);
 		expect.soft(await response.json(), name).toEqual({ error });
 	}
+});
+
+test('no cache keeps a refusal or a failure: the router’s 404 and 405, and a handler’s 500', async ({
+	api,
+	stack
+}) => {
+	const at = (path: string, init?: RequestInit) => fetch(`${stack.baseUrl}${path}`, init);
+	// KV entries no code of the Worker writes: listed words and a token that lead to no object.
+	const words = 'abide-acid-acorn';
+	const token: TranscriptRef = 'e'.repeat(32);
+	await putKv(stack, words, 'not-a-room-id');
+	await putKv(stack, `transcript:${token}`, 'not-a-recorder-id');
+	const cases: [string, Response, number, ErrorBody['error']][] = [
+		['an unknown route', await at('/api/no-such-route'), 404, 'notFound'],
+		[
+			'a known route with another method',
+			await at('/api/me', { method: 'DELETE' }),
+			405,
+			'methodNotAllowed'
+		],
+		['a lookup that failed', await api.meeting(words), 500, 'internal'],
+		['a transcript lookup that failed', await api.transcript(token), 500, 'internal']
+	];
+	for (const [name, response, status, error] of cases) {
+		expect.soft(response.status, name).toBe(status);
+		expect.soft(response.headers.get('cache-control'), name).toBe('no-store');
+		expect.soft(await response.json(), name).toEqual({ error });
+	}
+	// A failed transcript lookup still keeps out of referrers and search engines.
+	const failed = await api.transcript(token);
+	expect(failed.headers.get('referrer-policy')).toBe('no-referrer');
+	expect(failed.headers.get('x-robots-tag')).toBe('noindex');
 });

@@ -11,10 +11,8 @@
 
 use std::fmt;
 
-use meeting_core::{
-    Effect, Event, MAX_PRESENT, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, Target,
-    step,
-};
+use meeting_core::http::MeetingLookup;
+use meeting_core::{Effect, Event, MAX_PRESENT, Millis, ParticipantId, RoomState, Target, step};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -152,11 +150,12 @@ pub enum Record {
     Ended(EndedRoom),
 }
 
-/// What an ended room keeps until it deletes its storage. Holds no secrets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What an ended room keeps until it deletes its storage. Holds no secrets. Records stored
+/// before 2026-10-11 also hold the meeting's `recordingPolicy`, which no answer gives out once
+/// the meeting ended and the code no longer reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndedRoom {
-    pub recording_policy: RecordingPolicy,
     /// The recorder's `/end` that failed, which the room's alarm sends once more.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_finish: Option<PendingFinish>,
@@ -197,10 +196,7 @@ impl EndedRoom {
     pub fn alarm(self) -> EndedAlarm {
         match self.pending_finish {
             Some(pending) => EndedAlarm::FinishAgain {
-                record: Self {
-                    pending_finish: None,
-                    ..self
-                },
+                record: Self::default(),
                 pending,
             },
             None => EndedAlarm::Delete,
@@ -226,18 +222,15 @@ impl Record {
         .settle(effects)
     }
 
-    /// Where the meeting stands.
-    pub fn phase(&self) -> Phase {
+    /// What the room answers the router's [`crate::internal::INFO`]: where the meeting
+    /// stands and, while it can be joined, how it records.
+    pub fn lookup(&self) -> MeetingLookup {
         match self {
-            Self::Open(open) => open.room.view().phase,
-            Self::Ended(_) => Phase::Ended,
-        }
-    }
-
-    pub fn recording_policy(&self) -> RecordingPolicy {
-        match self {
-            Self::Open(open) => open.room.view().recording_policy,
-            Self::Ended(ended) => ended.recording_policy,
+            Self::Open(open) => {
+                let view = open.room.view();
+                MeetingLookup::new(view.phase, view.recording_policy)
+            }
+            Self::Ended(_) => MeetingLookup::Ended,
         }
     }
 
@@ -245,9 +238,8 @@ impl Record {
     #[must_use]
     pub fn with_pending_finish(self, pending: PendingFinish) -> Self {
         match self {
-            Self::Ended(ended) => Self::Ended(EndedRoom {
+            Self::Ended(_) => Self::Ended(EndedRoom {
                 pending_finish: Some(pending),
-                ..ended
             }),
             open @ Self::Open(_) => open,
         }
@@ -448,10 +440,7 @@ impl OpenRoom {
     /// there is none.
     fn settle(self, effects: &[Effect]) -> Record {
         if effects.contains(&Effect::EndMeeting) {
-            return Record::Ended(EndedRoom {
-                recording_policy: self.room.view().recording_policy,
-                pending_finish: None,
-            });
+            return Record::Ended(EndedRoom::default());
         }
         let alarm = effects
             .iter()
@@ -605,8 +594,8 @@ pub fn write_for(
 pub(crate) mod tests {
     use meeting_core::{
         ClientMsg, DisplayName, LEAVE_GRACE_MS, LocalTrack, MeetingId, Mid, NEGOTIATION_TIMEOUT_MS,
-        OfferedTrack, PROTOCOL_VERSION, ResumeToken, SCHEDULED_TTL_MS, Sdp, SessionEpoch,
-        SessionId, SessionKind, SfuReply, TrackKind, TrackName, TranscriptRef,
+        OfferedTrack, PROTOCOL_VERSION, Phase, RecordingPolicy, ResumeToken, SCHEDULED_TTL_MS, Sdp,
+        SessionEpoch, SessionId, SessionKind, SfuReply, TrackKind, TrackName, TranscriptRef,
     };
 
     use super::*;
@@ -637,7 +626,10 @@ pub(crate) mod tests {
     #[test]
     fn a_new_room_remembers_the_cores_alarm() {
         let open = open_room();
-        assert_eq!(Record::Open(open.clone()).phase(), Phase::Scheduled);
+        assert_eq!(
+            Record::Open(open.clone()).lookup().phase(),
+            Phase::Scheduled
+        );
         assert_eq!(open.alarm, Some(T0.after(SCHEDULED_TTL_MS)));
     }
 
@@ -685,7 +677,7 @@ pub(crate) mod tests {
             };
             open = next;
         }
-        assert_eq!(Record::Open(open.clone()).phase(), Phase::Live);
+        assert_eq!(Record::Open(open.clone()).lookup().phase(), Phase::Live);
         open
     }
 
@@ -868,7 +860,7 @@ pub(crate) mod tests {
     fn a_dropped_socket_arms_the_grace_alarm_and_keeps_the_room_open() {
         let dropped = T0.after(1_000);
         let (record, _) = run(room_with_host(), dropped, Event::SocketClosed { who: HOST });
-        assert_eq!(record.phase(), Phase::Live);
+        assert_eq!(record.lookup().phase(), Phase::Live);
         let Record::Open(open) = record else {
             panic!("a host in the grace period keeps the room open")
         };
@@ -885,11 +877,8 @@ pub(crate) mod tests {
         };
         let (record, effects) = run(room_with_host(), T0, end);
         assert_eq!(effects.last(), Some(&Effect::EndMeeting));
-        assert_eq!(record.phase(), Phase::Ended);
-        let ended = EndedRoom {
-            recording_policy: RecordingPolicy::HostDecides,
-            pending_finish: None,
-        };
+        assert_eq!(record.lookup().phase(), Phase::Ended);
+        let ended = EndedRoom::default();
         assert_eq!(record, Record::Ended(ended.clone()));
         // Nothing pends, so the retention alarm deletes the storage.
         assert_eq!(ended.alarm(), EndedAlarm::Delete);
@@ -907,10 +896,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_pending_finish_keeps_the_record_until_it_is_sent_again_then_the_storage_goes() {
-        let ended = EndedRoom {
-            recording_policy: RecordingPolicy::FromStart,
-            pending_finish: None,
-        };
+        let ended = EndedRoom::default();
         let Record::Ended(waiting) =
             Record::Ended(ended.clone()).with_pending_finish(pending_finish())
         else {
@@ -925,10 +911,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ended_records_survive_json_with_and_without_a_pending_finish() {
-        let ended = Record::Ended(EndedRoom {
-            recording_policy: RecordingPolicy::FromStart,
-            pending_finish: None,
-        });
+        let ended = Record::Ended(EndedRoom::default());
         let waiting = ended.clone().with_pending_finish(pending_finish());
         let json = encode(&waiting).unwrap();
         assert_eq!(decode(&json).unwrap(), Decoded::Current(waiting));
@@ -1045,11 +1028,7 @@ pub(crate) mod tests {
             roster: live.room.roster(),
             consents: live.room.consents(),
         };
-        let ended = Record::Ended(EndedRoom {
-            recording_policy: RecordingPolicy::HostDecides,
-            pending_finish: None,
-        })
-        .with_pending_finish(PendingFinish {
+        let ended = Record::Ended(EndedRoom::default()).with_pending_finish(PendingFinish {
             recorder: RECORDER_ID.into(),
             finish,
         });

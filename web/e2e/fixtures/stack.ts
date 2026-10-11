@@ -24,7 +24,7 @@ import {
 	WRANGLER_BIN,
 	WRANGLER_CONFIG
 } from './paths.ts';
-import { spawnLogged, waitForLog, waitUntil, type Child } from './processes.ts';
+import { run, spawnLogged, waitForLog, waitUntil, type Child } from './processes.ts';
 
 /**
  * - `mock`: the mock SFU, and no remote bindings, so no network and no Cloudflare login; the
@@ -276,4 +276,31 @@ export async function startStack(
 		await stop();
 		throw error;
 	}
+}
+
+/**
+ * Writes `value` under `key` in the `MEETINGS` KV namespace of a running `mock` stack, through
+ * its persisted local state, for a test of what the Worker does with an entry its own code
+ * never writes. Local only: it never reaches Cloudflare.
+ */
+export async function putKv(stack: Stack, key: string, value: string): Promise<void> {
+	if (stack.kind !== 'mock') throw new Error('putKv writes only the local state of a mock stack');
+	await run(
+		WRANGLER_BIN,
+		[
+			'kv',
+			'key',
+			'put',
+			key,
+			value,
+			'--binding',
+			'MEETINGS',
+			'--local',
+			'--config',
+			join(stack.dir, 'wrangler.toml'),
+			'--persist-to',
+			join(stack.dir, 'state')
+		],
+		{ cwd: stack.dir, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } }
+	);
 }

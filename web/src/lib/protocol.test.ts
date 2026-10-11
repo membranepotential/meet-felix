@@ -61,7 +61,7 @@ const SERVER_SAMPLES: Samples<ServerMsg> = {
 	consentRequired: { type: 'consentRequired' },
 	muted: { type: 'muted' },
 	kicked: { type: 'kicked' },
-	ended: { type: 'ended', transcript: 'abc' },
+	ended: { type: 'ended', transcript: '0123456789abcdef0123456789abcdef' },
 	error: { type: 'error', code: 'notPublished' }
 };
 

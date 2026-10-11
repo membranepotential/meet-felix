@@ -16,9 +16,10 @@
 
 use std::collections::VecDeque;
 
+use meeting_core::http::ApiErrorCode;
 use meeting_core::{
     ClientMsg, CloseCode, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
-    RecordingPolicy, RoomState, ServerMsg, SfuReply, Target, TranscriptRef,
+    RoomState, ServerMsg, SfuReply, Target, TranscriptRef,
 };
 use sfu_api::{Failure, failure_reply};
 use worker::js_sys::{Date as JsDate, Function, Reflect};
@@ -31,7 +32,7 @@ use worker::{
 
 use crate::internal::{
     self, FinishRecording, INFO, INIT, InitRoom, OWNER_HEADER, OWNER_YES, RecorderId,
-    RecorderRequest, RoomInfo, StartRecording, TrackRecording, UntrackRecording,
+    RecorderRequest, StartRecording, TrackRecording, UntrackRecording,
 };
 use crate::jurisdiction::{self, Jurisdiction};
 use crate::record::{
@@ -41,7 +42,8 @@ use crate::record::{
 };
 use crate::recorder::{Ordered, RequestSeq, Stop};
 use crate::{
-    MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu, transcript_key,
+    MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, reply, sfu,
+    transcript_key,
 };
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
@@ -269,7 +271,7 @@ impl RoomObject {
         let Some(record) = self.load().await? else {
             return Response::error("unknown meeting", 404);
         };
-        Response::from_json(&RoomInfo::new(record.recording_policy(), record.phase()))
+        Response::from_json(&record.lookup())
     }
 
     /// Accepts a socket for a scheduled or running meeting and gives it the next participant
@@ -279,8 +281,8 @@ impl RoomObject {
     /// alarm closes such a socket once [`crate::record::JOIN_TIMEOUT_MS`] passed without a `Join`.
     async fn accept(&self, owner: bool) -> Result<Response> {
         let open = match self.load().await? {
-            None => return Response::error("unknown meeting", 404),
-            Some(Record::Ended(_)) => return Response::error("meeting ended", 410),
+            None => return reply::error(ApiErrorCode::NotFound),
+            Some(Record::Ended(_)) => return reply::error(ApiErrorCode::MeetingEnded),
             Some(Record::Open(open)) => open,
         };
         let present = open.present();
@@ -677,10 +679,7 @@ impl RoomObject {
                     "room {}: its record has the old version {version}; the meeting counts as ended",
                     self.state.id()
                 );
-                let ended = Record::Ended(EndedRoom {
-                    recording_policy: RecordingPolicy::HostDecides,
-                    pending_finish: None,
-                });
+                let ended = Record::Ended(EndedRoom::default());
                 let json = crate::record::encode(&ended)?;
                 self.state.storage().put(Record::KEY, &json).await?;
                 self.delete_later().await?;

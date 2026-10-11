@@ -99,6 +99,35 @@ impl MeetingLookup {
             Phase::Ended => Self::Ended,
         }
     }
+
+    /// Where the meeting stands.
+    pub fn phase(&self) -> Phase {
+        match self {
+            Self::Scheduled(_) => Phase::Scheduled,
+            Self::Live(_) => Phase::Live,
+            Self::Ended => Phase::Ended,
+        }
+    }
+}
+
+/// What the Worker sends for `GET /api/meeting/:words`: the [`MeetingLookup`] plus `ended`.
+///
+/// `ended` is kept for old bundles: web apps built before the lookup became [`MeetingLookup`]
+/// refuse a body without a boolean `ended`, and browsers may run such a cached app for a while
+/// after a deploy. The current app reads only the [`MeetingLookup`] and ignores `ended`. Remove
+/// this type, and send the [`MeetingLookup`] itself, in the release after the one that added it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MeetingLookupBody {
+    #[serde(flatten)]
+    pub lookup: MeetingLookup,
+    pub ended: bool,
+}
+
+impl From<MeetingLookup> for MeetingLookupBody {
+    fn from(lookup: MeetingLookup) -> Self {
+        let ended = lookup == MeetingLookup::Ended;
+        Self { lookup, ended }
+    }
 }
 
 /// Body of `GET /api/meetings`.
@@ -204,6 +233,9 @@ pub enum ApiErrorCode {
     NotFound,
     /// 405: the route exists, for another method.
     MethodNotAllowed,
+    /// 410: a WebSocket upgrade for a meeting that ended; its room refuses sockets until it
+    /// deletes its storage, then the meeting is not found.
+    MeetingEnded,
     /// 415: a browser's `POST /api/new` that is not `application/json`.
     NotJson,
     /// 426: a route for WebSocket upgrades, requested without one.
@@ -228,6 +260,7 @@ impl ApiErrorCode {
             Self::CrossOrigin => 403,
             Self::NotFound => 404,
             Self::MethodNotAllowed => 405,
+            Self::MeetingEnded => 410,
             Self::NotJson => 415,
             Self::UpgradeRequired => 426,
             Self::RateLimited => 429,
@@ -321,6 +354,27 @@ mod tests {
         );
         let open: Result<MeetingLookup, _> = serde_json::from_value(json!({ "phase": "live" }));
         assert!(open.is_err(), "an open meeting without its policy");
+    }
+
+    #[test]
+    fn the_lookup_body_keeps_ended_for_old_apps_and_reads_as_the_lookup() {
+        for (lookup, ended) in [
+            (
+                MeetingLookup::new(Phase::Live, RecordingPolicy::FromStart),
+                false,
+            ),
+            (
+                MeetingLookup::new(Phase::Ended, RecordingPolicy::FromStart),
+                true,
+            ),
+        ] {
+            let body = wire(&MeetingLookupBody::from(lookup.clone()));
+            assert_eq!(body["ended"], json!(ended), "{body}");
+            assert_eq!(
+                serde_json::from_value::<MeetingLookup>(body).ok(),
+                Some(lookup)
+            );
+        }
     }
 
     #[test]
