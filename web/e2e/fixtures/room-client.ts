@@ -3,10 +3,11 @@
  * `ServerMsg` in. Every server message waits in an inbox until a test takes it, so a test can
  * wait for a message that arrived before it asked.
  */
+import { WebSocket as NodeWebSocket } from 'node:http';
 import type { ClientMsg, MeetingId, ServerMsg } from '../../src/lib/protocol.ts';
 import type { Auth } from './api.ts';
 
-export type ServerMsgType = ServerMsg['type'];
+type ServerMsgType = ServerMsg['type'];
 export type ServerMsgOf<T extends ServerMsgType> = Extract<ServerMsg, { type: T }>;
 
 /** The keepalive frame the room answers without waking up; not part of `ClientMsg`. */
@@ -18,12 +19,12 @@ export const DEFAULT_TIMEOUT_MS = 5_000;
 
 /**
  * Node's WebSocket (undici) takes request headers in a second argument, which the DOM typings
- * do not know; the owner's sockets need it for the session cookie.
+ * do not know; the owner's sockets need it for the session cookie. `node:http` exports it with
+ * those typings.
  */
-type NodeWebSocket = new (url: string, init: { headers: Auth }) => WebSocket;
-const NodeWebSocket = WebSocket as unknown as NodeWebSocket;
+type Socket = InstanceType<typeof NodeWebSocket>;
 
-export interface Close {
+interface Close {
 	code: number;
 	reason: string;
 }
@@ -32,20 +33,20 @@ export interface Close {
 type Inbound = ServerMsg | { type: 'pong' };
 
 export class RoomClient {
-	readonly #socket: WebSocket;
+	readonly #socket: Socket;
 	readonly #inbox: Inbound[] = [];
 	#waiters: (() => boolean)[] = [];
 	/** Resolves once the socket closed, by either side. */
 	readonly closed: Promise<Close>;
 
-	private constructor(socket: WebSocket) {
+	private constructor(socket: Socket) {
 		this.#socket = socket;
 		this.closed = new Promise((resolve) =>
 			socket.addEventListener('close', (e) => resolve({ code: e.code, reason: e.reason }), {
 				once: true
 			})
 		);
-		socket.addEventListener('message', (event: MessageEvent<string>) => {
+		socket.addEventListener('message', (event) => {
 			this.#inbox.push(
 				event.data === PONG ? { type: 'pong' } : (JSON.parse(event.data) as ServerMsg)
 			);
@@ -77,7 +78,7 @@ export class RoomClient {
 	}
 
 	get isOpen(): boolean {
-		return this.#socket.readyState === WebSocket.OPEN;
+		return this.#socket.readyState === NodeWebSocket.OPEN;
 	}
 
 	send(msg: ClientMsg): void {
@@ -144,6 +145,6 @@ export class RoomClient {
 	}
 
 	close(code = 1000, reason = 'bye'): void {
-		if (this.#socket.readyState <= WebSocket.OPEN) this.#socket.close(code, reason);
+		if (this.#socket.readyState <= NodeWebSocket.OPEN) this.#socket.close(code, reason);
 	}
 }

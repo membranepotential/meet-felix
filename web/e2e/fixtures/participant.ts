@@ -13,7 +13,7 @@ import {
 import type { ClientMsg, MeetingId, ServerMsg } from '../../src/lib/protocol.ts';
 import type { OwnerSession } from './api.ts';
 
-export type Frame =
+type Frame =
 	{ at: number; dir: 'sent'; msg: ClientMsg } | { at: number; dir: 'received'; msg: ServerMsg };
 
 type Sent<T extends ClientMsg['type']> = Extract<ClientMsg, { type: T }>;
@@ -29,7 +29,7 @@ declare global {
 }
 
 /** A peer connection that reached `connectionState` "connected". */
-export type Connected = {
+type Connected = {
 	/** `Date.now()` in the page; the browsers run on the test's machine, so it is the test's clock. */
 	at: number;
 	/** Whether it is a publish connection (one of its transceivers sends). */

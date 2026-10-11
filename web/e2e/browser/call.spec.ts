@@ -82,16 +82,17 @@ test('mute and camera: the buttons, the own tile, and the others’ view follow'
 
 	await host.control('Mute').click();
 	await expect(host.control('Unmute')).toHaveAttribute('aria-pressed', 'true');
-	await expect(host.tile(`${OWNER_NAME} (you)`).locator('.muted')).toBeVisible();
+	// The mic-off icon is the only icon in a tile's caption and has no accessible name.
+	await expect(host.tile(`${OWNER_NAME} (you)`).locator('figcaption svg')).toBeVisible();
 
 	await host.control('Stop video').click();
 	await expect(host.control('Start video')).toBeVisible();
-	await expect(host.tile(`${OWNER_NAME} (you)`).locator('.avatar')).toHaveText('RH');
+	await expect(host.tile(`${OWNER_NAME} (you)`).getByText('RH', { exact: true })).toBeVisible();
 	// The room's view drops the camera: the guest shows the host's initials instead.
 	await guest.waitForReceived('state', (m) =>
 		m.state.participants.some((p) => p.role === 'host' && !p.tracks.includes('video'))
 	);
-	await expect(hostOnGuest.locator('.avatar')).toHaveText('RH');
+	await expect(hostOnGuest.getByText('RH', { exact: true })).toBeVisible();
 
 	await host.control('Start video').click();
 	await expect(hostOnGuest.locator('video')).toBeAttached({ timeout: 15_000 });
@@ -131,8 +132,10 @@ test('screen share: a featured tile that expands, for the sharer and the others'
 	await expect(header).toHaveCount(0);
 	await expect(guest.control('Mute')).toBeVisible();
 	await expect
-		.poll(() => guest.page.evaluate(() => document.fullscreenElement?.className ?? ''))
-		.toContain('meeting');
+		.poll(() =>
+			guest.page.evaluate(() => document.fullscreenElement?.getAttribute('data-testid') ?? '')
+		)
+		.toBe('meeting');
 	await guest.control('Mute').click();
 	await expect(guest.control('Unmute')).toBeVisible();
 

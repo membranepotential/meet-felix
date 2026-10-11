@@ -22,7 +22,7 @@ export interface Rooms {
 }
 
 /** Opens participants; the fixture closes their contexts after the test. */
-export interface People {
+interface People {
 	open(label: string, options?: { owner?: boolean }): Promise<Participant>;
 }
 

@@ -4,6 +4,7 @@
  * refused, which the client retries with backoff.
  */
 import { liveMeeting, joinAs } from '../fixtures/meeting.ts';
+import { PING } from '../fixtures/room-client.ts';
 import { expect, test } from '../fixtures/test.ts';
 
 test('kick and end close with their final codes', async ({ api, owner, rooms }) => {
@@ -19,6 +20,22 @@ test('kick and end close with their final codes', async ({ api, owner, rooms }) 
 	host.client.send({ type: 'end' });
 	const closes = await Promise.all([host.client.closes(), guest.client.closes()]);
 	expect(closes.map((c) => c.code)).toEqual([4002, 4002]);
+});
+
+test('a socket that never joined is closed at the end with a code that reconnects', async ({
+	api,
+	owner,
+	rooms
+}) => {
+	const { meeting, host } = await liveMeeting({ api, owner, rooms });
+	// Bound to nobody: it heard no `ended` message, so a final code would show it a refusal. The
+	// ping makes local workerd deliver the close at once; on a socket that never sent anything it
+	// arrives only when the room's join timeout wakes the room.
+	const unjoined = await rooms.open(meeting);
+	unjoined.sendRaw(PING);
+	await unjoined.take('pong');
+	host.client.send({ type: 'end' });
+	expect(await unjoined.closes()).toEqual({ code: 1001, reason: 'The meeting has ended.' });
 });
 
 test('a page older than the room serves is told to reload', async ({ api, owner, rooms }) => {

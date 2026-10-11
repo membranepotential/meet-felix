@@ -114,7 +114,7 @@ export async function waitForLog(
 }
 
 /** A failure that `waitUntil` must not retry; other errors from `ready` count as "not yet". */
-export class FatalError extends Error {}
+class FatalError extends Error {}
 
 const fatal = (error: unknown): false => {
 	if (error instanceof FatalError) throw error;

@@ -106,7 +106,7 @@ export class MockSfu {
 	}
 }
 
-export interface WaitOptions {
+interface WaitOptions {
 	/** Only calls after this sequence number count; default: since the last `reset`. */
 	after?: number;
 	timeoutMs?: number;

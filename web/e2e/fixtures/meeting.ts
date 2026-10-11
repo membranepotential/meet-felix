@@ -4,7 +4,7 @@ import { createMeeting, type Api, type Auth, type OwnerSession } from './api.ts'
 import type { RoomClient, ServerMsgOf } from './room-client.ts';
 import type { Rooms } from './test.ts';
 
-export interface Joined {
+interface Joined {
 	client: RoomClient;
 	welcome: ServerMsgOf<'welcome'>;
 	id: ParticipantId;
@@ -23,7 +23,7 @@ export async function joinAs(
 	return { client, welcome, id: welcome.you };
 }
 
-export interface LiveMeeting {
+interface LiveMeeting {
 	meeting: MeetingId;
 	host: Joined;
 	guest: Joined;

@@ -30,11 +30,13 @@ test('the host sees who has not accepted the recording until they do', async ({
 	await expect(consentDialog(guest)).toBeVisible();
 	await consentDialog(host).getByRole('button', { name: 'Accept' }).click();
 	await expect(unconsentedNotice(host)).toHaveText('Guest has not accepted the recording yet');
-	await expect(host.tile('Guest').locator('.unrecorded')).toHaveText('Not recorded');
-	await expect(host.tile(`${OWNER_NAME} (you)`).locator('.unrecorded')).toHaveCount(0);
+	await expect(host.tile('Guest').getByText('Not recorded', { exact: true })).toBeVisible();
+	await expect(
+		host.tile(`${OWNER_NAME} (you)`).getByText('Not recorded', { exact: true })
+	).toHaveCount(0);
 	// Guests do not see it.
 	await expect(unconsentedNotice(guest)).toHaveCount(0);
-	await expect(guest.page.locator('.unrecorded')).toHaveCount(0);
+	await expect(guest.tiles.getByText('Not recorded', { exact: true })).toHaveCount(0);
 
 	// A guest arriving without consent waits outside, and the host sees them too.
 	const late = await people.open('late');
@@ -42,14 +44,14 @@ test('the host sees who has not accepted the recording until they do', async ({
 	await late.join();
 	await expect(consentDialog(late)).toBeVisible();
 	// Under the dialog, the lobby says what the guest waits for.
-	await expect(late.page.locator('main h1')).toHaveText('Recording consent');
+	await expect(late.page.getByRole('heading', { name: 'Recording consent' })).toBeVisible();
 	await expect(unconsentedNotice(host)).toHaveText(
 		'Guest and Late have not accepted the recording yet'
 	);
 
 	await consentDialog(guest).getByRole('button', { name: 'Accept' }).click();
 	await expect(unconsentedNotice(host)).toHaveText('Late has not accepted the recording yet');
-	await expect(host.tile('Guest').locator('.unrecorded')).toHaveCount(0);
+	await expect(host.tile('Guest').getByText('Not recorded', { exact: true })).toHaveCount(0);
 
 	await consentDialog(late).getByRole('button', { name: 'Accept' }).click();
 	await expect(late.meeting).toBeVisible();

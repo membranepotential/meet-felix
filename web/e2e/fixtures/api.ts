@@ -43,7 +43,7 @@ export interface OwnerSession {
 export type TranscriptStatusWire = TranscriptStatus & { progress: Progress };
 
 /** The downloads of a ready transcript. */
-export type TranscriptFile = 'transcript.md' | 'transcript.json';
+type TranscriptFile = 'transcript.md' | 'transcript.json';
 
 export interface IceWire {
 	iceServers: { urls: string[]; username?: string; credential?: string }[];

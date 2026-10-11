@@ -42,19 +42,18 @@ test('past meetings show each meeting’s phase and the transcript link once end
 	await startCall(meeting, host, [{ who: guest, name: 'Guest' }]);
 
 	const list = await host.context.newPage();
-	const item = (words: string) => list.locator('li.item', { hasText: words });
+	const item = (words: string) => list.getByRole('listitem').filter({ hasText: words });
+	const state = (words: string, label: string) => item(words).getByText(label, { exact: true });
 	await list.goto('/meetings');
-	await expect(item(scheduled).locator('.state')).toHaveText('Scheduled');
-	await expect(item(meeting).locator('.state')).toHaveText('Live');
+	await expect(state(scheduled, 'Scheduled')).toBeVisible();
+	await expect(state(meeting, 'Live')).toBeVisible();
 
 	await host.endForAll();
 	await expect(host.page.getByRole('heading', { name: 'The meeting has ended' })).toBeVisible();
-	await expect
-		.poll(async () => {
-			await list.reload();
-			return item(meeting).locator('.state').textContent();
-		})
-		.toBe('Ended');
+	await expect(async () => {
+		await list.reload();
+		await expect(state(meeting, 'Ended')).toBeVisible({ timeout: 1_000 });
+	}).toPass({ timeout: 10_000 });
 	await expect(item(meeting).getByRole('link', { name: 'Transcript' })).toHaveAttribute(
 		'href',
 		/^\/t\/[0-9a-f]{32}$/
