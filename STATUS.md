@@ -4,10 +4,10 @@
 Self-hosted, serverless Google-Meet replacement in Rust (functional core, imperative shell) on Cloudflare only: Realtime SFU + Rust Durable Objects, TS/Svelte shell over a Rust WASM core, three-word ephemeral links, announced per-speaker recording with a post-meeting Whisper transcript. Target < 10 €/month at real usage (Google baseline ≈16–17 €). Design: docs/README.md (decisions D1–D35), phases in docs/architecture/README.md.
 
 ## Now
-- publish — repo cleaned for publication; owner decides which audit findings to fix before going public, then history rewrite (filter-repo rules tested) into a new GitHub repo — waiting for owner
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-11 Published: this repo is public, with the history rewritten so no deployment details remain (the unrewritten history stays private). Deployed version e2bef2dd, commit 1dde930; production login and `/api/me` answer 200 with the owner's name and `no-store`.
 - 2026-10-11 Cleanup before publishing: deployment values in git-ignored .env (wrangler.toml placeholders, rendered to wrangler.local.toml), owner name from `/api/me`, PLAN.md deleted, README rewritten, MIT LICENSE; codebase audit 4 P1 / 29 P2 / 45 P3 (reports/reviews/2026-10-11-1341, git-ignored).
 - 2026-10-10 Deployed version b88fda55, commit 497ad78: polish batch (control bar stays on screen after a resize or rotation, lobby heading under the consent dialog, one capture per Start video, expected not-found pulls logged as info); web 144, e2e 66 passed 3 skipped.
 - 2026-10-10 Deployed version 8c934a70, commit b3c5287: first pull retried after 500 ms (5×, then 3 s) when the SFU does not know the track yet; slowest first pull 4.2 s → 1.9 s against the real SFU; core 72, sfu-api 16.
@@ -43,6 +43,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
+0. Work through the 2026-10-11 codebase audit (local, git-ignored report): owner picks the findings to fix, security ones first.
 In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"). The 2026-10-10 backlog is done except the last core item.
 1. Subscriber-side step-down on a weak link: since `priorityOrdering: none` the SFU no longer lowers the layer by itself; pick a lower layer when inbound loss is high or the bitrate low, if real use shows frozen video.
 2. Start the first pull from the publisher's first packets rather than its connection: the SFU still refuses pulls for 0.5–1 s after `connected` (measured 2026-10-10).
