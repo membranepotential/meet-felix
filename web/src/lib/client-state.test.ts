@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { awaitingConsent, INITIAL, reduce, syncMute, type ClientState } from './client-state.ts';
+import {
+	awaitingConsent,
+	describeError,
+	INITIAL,
+	reduce,
+	syncMute,
+	type ClientState
+} from './client-state.ts';
 import type { ParticipantView, RoomView, SessionEpochs } from './protocol.ts';
 
 const person = (
@@ -113,6 +120,17 @@ describe('reduce', () => {
 				notice: 'Some video or audio did not arrive. The meeting retries on its own.'
 			}
 		]);
+	});
+
+	it('ends the stay on a full room, with a final notice, and ignores what follows', () => {
+		const [state, commands] = reduce(INITIAL, { type: 'error', code: 'roomFull' });
+		expect(describeError('roomFull')).toBe('This meeting is full. Try again later.');
+		expect(state.stage).toEqual({
+			kind: 'over',
+			end: { kind: 'refused', reason: 'This meeting is full. Try again later.' }
+		});
+		expect(commands).toEqual([{ kind: 'teardown' }]);
+		expect(reduce(state, { type: 'error', code: 'roomFull' })).toEqual([state, []]);
 	});
 
 	it('passes SDP through to the media layer', () => {

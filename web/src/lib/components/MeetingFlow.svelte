@@ -136,7 +136,12 @@
 		{:else}
 			<h1>You are not in the meeting</h1>
 			<p>{end.reason}</p>
-			<div class="actions"><a class="button quiet" href="/">Start page</a></div>
+			<div class="actions">
+				<button class="button primary" type="button" onclick={() => window.location.reload()}>
+					Try again
+				</button>
+				<a class="button quiet" href="/">Start page</a>
+			</div>
 		{/if}
 	</main>
 {/if}

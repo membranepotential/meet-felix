@@ -110,6 +110,8 @@ export function describeError(code: ErrorCode): string | null {
 			return 'The media server is not reachable right now. The meeting keeps trying on its own.';
 		case 'subscribeFailed':
 			return 'Some video or audio did not arrive. The meeting retries on its own.';
+		case 'roomFull':
+			return 'This meeting is full. Try again later.';
 		case 'notPublished':
 		case 'unexpectedAnswer':
 		case 'notSubscribed':
@@ -204,6 +206,11 @@ export function reduce(state: ClientState, msg: ServerMsg): [ClientState, Comman
 			return over(state, { kind: 'ended', transcript: msg.transcript ?? null });
 		case 'error': {
 			const text = describeError(msg.code);
+			// The room took no place for us and will not take one on a retry of the same socket:
+			// the stay is over before it began, and the session stops reconnecting.
+			if (msg.code === 'roomFull') {
+				return over(state, { kind: 'refused', reason: text ?? 'This meeting is full.' });
+			}
 			const commands: Command[] = [];
 			if (PUBLISH_ERRORS.has(msg.code)) commands.push({ kind: 'publish-rejected' });
 			if (msg.code === 'notSubscribed') commands.push({ kind: 'layer-refused' });
