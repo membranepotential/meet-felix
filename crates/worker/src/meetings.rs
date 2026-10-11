@@ -1,5 +1,5 @@
 //! The owner's list of meetings behind `GET /api/meetings`: the [`Entry`]s, oldest first, in the
-//! `MEETINGS` KV namespace under [`KEY`]. `POST /api/new` appends to it. Where a meeting stands
+//! KV namespace of [`crate::kv`]. `POST /api/new` appends to it. Where a meeting stands
 //! (scheduled, live, ended) is asked of its `RoomObject` when the list is read, so the room stays
 //! the source of that fact; an end is final, so the listing writes it into the entry
 //! ([`settled`]) and never asks that room again.
@@ -21,10 +21,9 @@ use serde::{Deserialize, Serialize};
 use worker::{KvStore, Result};
 
 use crate::internal::RoomId;
+use crate::kv;
 use crate::record::{DecodeError, Stored, stored_record, stored_version};
 
-/// The KV key of the list. Meeting words always contain `-`, so they never collide with it.
-pub const KEY: &str = "index";
 /// How many meetings the list keeps; older ones drop out when new ones are added.
 pub const MAX_ENTRIES: usize = 200;
 /// The version of the stored list's shape. 1 was a bare JSON array (until 2026-10-11); 2 wraps
@@ -207,8 +206,8 @@ pub fn listing(entries: impl IntoIterator<Item = (Entry, Phase)>) -> Listing {
 }
 
 /// The stored list; empty if none was stored yet.
-pub async fn load(kv: &KvStore) -> Result<Vec<Entry>> {
-    match kv.get(KEY).text().await? {
+pub async fn load(store: &KvStore) -> Result<Vec<Entry>> {
+    match kv::read_index(store).await? {
         None => Ok(Vec::new()),
         Some(json) => Ok(decode(&json)?),
     }
@@ -216,11 +215,11 @@ pub async fn load(kv: &KvStore) -> Result<Vec<Entry>> {
 
 /// Reads the list, applies `change` and stores the result if it differs. Not atomic; see the
 /// module docs.
-pub async fn update(kv: &KvStore, change: impl FnOnce(Vec<Entry>) -> Vec<Entry>) -> Result<()> {
-    let index = load(kv).await?;
+pub async fn update(store: &KvStore, change: impl FnOnce(Vec<Entry>) -> Vec<Entry>) -> Result<()> {
+    let index = load(store).await?;
     let changed = change(index.clone());
     if changed != index {
-        kv.put(KEY, encode(&changed)?)?.execute().await?;
+        kv::write_index(store, &encode(&changed)?).await?;
     }
     Ok(())
 }

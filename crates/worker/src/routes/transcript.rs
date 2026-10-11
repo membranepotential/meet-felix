@@ -8,9 +8,9 @@ use meeting_core::TranscriptRef;
 use meeting_core::http::ApiErrorCode;
 use worker::{Request, Response, Result, RouteContext, console_error};
 
-use crate::internal::{self, RECORDER_STATUS, RecorderId, TRANSCRIPT_JSON, TRANSCRIPT_MD};
+use crate::internal::{self, RECORDER_STATUS, TRANSCRIPT_JSON, TRANSCRIPT_MD};
 use crate::limits::{self, Limit};
-use crate::{Config, MEETINGS, RECORDERS, reply, transcript_key};
+use crate::{Config, RECORDERS, kv, reply};
 
 /// `GET /api/transcript/:token`.
 pub async fn status(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
@@ -48,15 +48,10 @@ async fn pass_on(req: &Request, ctx: &RouteContext<Config>, path: &str) -> Resul
     let Some(Ok(token)) = ctx.param("token").map(|token| TranscriptRef::parse(token)) else {
         return reply::error(ApiErrorCode::NotFound);
     };
-    let Some(recorder) = ctx
-        .kv(MEETINGS)?
-        .get(&transcript_key(&token))
-        .text()
-        .await?
-    else {
+    let Some(recorder) = kv::recorder_of(&kv::open(&ctx.env)?, &token).await? else {
         return reply::error(ApiErrorCode::NotFound);
     };
-    let recorder = RecorderId::new(recorder).stub(&ctx.durable_object(RECORDERS)?)?;
+    let recorder = recorder.stub(&ctx.durable_object(RECORDERS)?)?;
     let response = internal::get(&recorder, path).await?;
     match response.status_code() {
         200..300 => Ok(response),

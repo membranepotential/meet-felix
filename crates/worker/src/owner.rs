@@ -12,6 +12,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use meeting_core::Millis;
 use sha2::Sha256;
 
+use crate::constant_time;
 use crate::random::hex;
 
 /// The cookie's name.
@@ -44,7 +45,7 @@ impl CreateSecret {
 
     /// Whether `given` is the secret. Takes the same time wherever `given` differs.
     pub fn matches(&self, given: &str) -> bool {
-        constant_time_eq(given.as_bytes(), self.0.as_bytes())
+        constant_time::eq(given.as_bytes(), self.0.as_bytes())
     }
 }
 
@@ -103,7 +104,7 @@ impl OwnerSession {
         let Some((expiry, tag)) = value.split_once('.') else {
             return false;
         };
-        constant_time_eq(tag.as_bytes(), self.tag(expiry).as_bytes())
+        constant_time::eq(tag.as_bytes(), self.tag(expiry).as_bytes())
             && expiry.parse().is_ok_and(|expiry: u64| now.0 < expiry)
     }
 
@@ -188,11 +189,6 @@ pub fn is_json(content_type: Option<&str>) -> bool {
     content_type
         .and_then(|value| value.split(';').next())
         .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
-}
-
-/// Whether `a` equals `b`, in time independent of where they differ (the length still shows).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 #[cfg(test)]

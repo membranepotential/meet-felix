@@ -4,7 +4,7 @@
 use meeting_core::transcript::Transcript;
 use worker::{Response, Result};
 
-use super::state::{Job, RecorderPhase, transcript_key};
+use super::state::{Job, RecorderPhase, transcript_file_key};
 use super::{Inner, not_found};
 use crate::internal::{TRANSCRIPT_JSON, TRANSCRIPT_MD};
 
@@ -65,7 +65,7 @@ impl Inner {
     async fn read(&self, file: &str) -> Result<Option<String>> {
         let Some(object) = self
             .bucket()?
-            .get(transcript_key(&self.id(), file))
+            .get(transcript_file_key(&self.id(), file))
             .execute()
             .await?
         else {

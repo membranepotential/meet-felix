@@ -12,7 +12,7 @@ use worker::{KvStore, Request, Response, Result, RouteContext, console_error};
 use crate::internal::{self, INIT, InitRoom, RoomId};
 use crate::owner::{self as credentials, Initiator};
 use crate::routes::owner::{OwnerProof, initiator_of, owner_proof};
-use crate::{Config, MEETINGS, ROOMS, jurisdiction, meetings, now, random, reply};
+use crate::{Config, ROOMS, jurisdiction, kv, meetings, now, random, reply};
 
 /// Upper bound for a meeting link's life (90 days); the room releases it when it ends. Longer
 /// than the core's `SCHEDULED_TTL_MS` (60 days), so a scheduled link works until the room
@@ -45,8 +45,8 @@ pub async fn create(mut req: Request, ctx: RouteContext<Config>) -> Result<Respo
         return reply::error(ApiErrorCode::BadRequest);
     };
 
-    let kv = ctx.kv(MEETINGS)?;
-    let Some(meeting) = unused_words(&kv).await? else {
+    let store = kv::open(&ctx.env)?;
+    let Some(meeting) = unused_words(&store).await? else {
         return reply::error(ApiErrorCode::NoFreeWords);
     };
     let rooms = ctx.durable_object(ROOMS)?;
@@ -62,10 +62,7 @@ pub async fn create(mut req: Request, ctx: RouteContext<Config>) -> Result<Respo
     // Check-then-write: KV has no atomic insert, so two creations that draw the same words at
     // the same moment could both pass `unused_words`. Accepted, because only the holder of
     // CREATE_SECRET creates meetings, and rarely.
-    kv.put(meeting.as_str(), room.as_str())?
-        .expiration_ttl(MEETING_TTL_SECS)
-        .execute()
-        .await?;
+    kv::map_words(&store, &meeting, &room, MEETING_TTL_SECS).await?;
     // Logged, not returned: the meeting exists and works without its list entry.
     let entry = meetings::Entry {
         meeting: meeting.clone(),
@@ -74,7 +71,7 @@ pub async fn create(mut req: Request, ctx: RouteContext<Config>) -> Result<Respo
         transcript,
         ended: None,
     };
-    if let Err(e) = meetings::update(&kv, |index| meetings::added(index, entry)).await {
+    if let Err(e) = meetings::update(&store, |index| meetings::added(index, entry)).await {
         console_error!("adding {meeting:?} to the meeting list failed: {e}");
     }
     Ok(Response::from_json(&NewMeeting { meeting })?.with_status(201))
@@ -90,10 +87,10 @@ fn parse_request(body: &str) -> Option<NewMeetingRequest> {
 }
 
 /// Draws words until a combination is not mapped in KV.
-async fn unused_words(kv: &KvStore) -> Result<Option<MeetingId>> {
+async fn unused_words(store: &KvStore) -> Result<Option<MeetingId>> {
     for _ in 0..WORD_DRAWS {
         let words = random::meeting_id()?;
-        if kv.get(words.as_str()).text().await?.is_none() {
+        if kv::room_of(store, &words).await?.is_none() {
             return Ok(Some(words));
         }
     }

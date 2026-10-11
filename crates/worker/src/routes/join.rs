@@ -5,13 +5,13 @@
 
 use meeting_core::MeetingId;
 use meeting_core::http::{ApiErrorCode, MeetingLookup, MeetingLookupBody};
-use worker::{KvStore, Request, Response, Result, RouteContext, Stub};
+use worker::{Env, Request, Response, Result, RouteContext, Stub};
 
 use crate::internal::{self, INFO, OWNER_HEADER, OWNER_YES, RecorderId, RoomId};
 use crate::limits::{self, Limit};
 use crate::owner::Initiator;
 use crate::routes::owner::{initiator_of, is_owner_session, owner_auth};
-use crate::{Config, MEETINGS, RECORDERS, ROOMS, ice, is_websocket_upgrade, reply};
+use crate::{Config, RECORDERS, ROOMS, ice, is_websocket_upgrade, kv, reply};
 
 /// `GET /api/meeting/:words`: the room's [`MeetingLookup`], with `ended` for old apps
 /// ([`MeetingLookupBody`]).
@@ -52,7 +52,7 @@ pub async fn ice_servers(req: Request, ctx: RouteContext<Config>) -> Result<Resp
         .query_pairs()
         .find_map(|(key, value)| (key == "meeting").then_some(value));
     let known = match meeting {
-        Some(words) => room_of(&ctx.kv(MEETINGS)?, &words).await?.is_some(),
+        Some(words) => room_of(&ctx.env, &words).await?.is_some(),
         None => false,
     };
     if !known {
@@ -113,16 +113,16 @@ async fn room_stub(ctx: &RouteContext<Config>) -> Result<Option<Stub>> {
     let Some(words) = ctx.param("words") else {
         return Ok(None);
     };
-    let Some(room) = room_of(&ctx.kv(MEETINGS)?, words).await? else {
+    let Some(room) = room_of(&ctx.env, words).await? else {
         return Ok(None);
     };
     room.stub(&ctx.durable_object(ROOMS)?).map(Some)
 }
 
 /// The room `words` map to, matched case-insensitively; `None` for malformed or unknown words.
-async fn room_of(kv: &KvStore, words: &str) -> Result<Option<RoomId>> {
+async fn room_of(env: &Env, words: &str) -> Result<Option<RoomId>> {
     let Ok(words) = MeetingId::parse(&words.to_ascii_lowercase()) else {
         return Ok(None);
     };
-    Ok(kv.get(words.as_str()).text().await?.map(RoomId::new))
+    kv::room_of(&kv::open(env)?, &words).await
 }

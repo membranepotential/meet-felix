@@ -14,7 +14,7 @@ use worker::{Bucket, Data, HttpMetadata, Result, console_error, console_log, con
 use super::Inner;
 use super::state::{
     self, AUDIO_RETENTION_MS, Job, JobStep, MAX_STEP_FAILURES, Recorder, RecorderPhase, Refusal,
-    SegmentCursor, audio_prefix, backoff, chunk_key, gaps, on_refusal, transcript_key,
+    SegmentCursor, audio_prefix, backoff, chunk_key, gaps, on_refusal, transcript_file_key,
 };
 use super::store::{ChunkRow, ChunkState};
 use super::whisper::{TranscribeError, Transcriber, WhisperTurbo};
@@ -283,7 +283,7 @@ impl Inner {
             ),
         ] {
             bucket
-                .put(transcript_key(&id, file), Data::Text(body))
+                .put(transcript_file_key(&id, file), Data::Text(body))
                 .http_metadata(HttpMetadata {
                     content_type: Some(content_type.into()),
                     ..HttpMetadata::default()

@@ -32,7 +32,7 @@ use worker::{
 
 use crate::internal::{
     self, FinishRecording, INFO, INIT, InitRoom, OWNER_HEADER, OWNER_YES, RecorderId,
-    RecorderRequest, StartRecording, TrackRecording, UntrackRecording,
+    RecorderRequest, RoomId, StartRecording, TrackRecording, UntrackRecording,
 };
 use crate::jurisdiction::{self, Jurisdiction};
 use crate::record::{
@@ -41,10 +41,7 @@ use crate::record::{
     is_stale, is_unbound, join_overdue, write_for,
 };
 use crate::recorder::{Ordered, RequestSeq, Stop};
-use crate::{
-    MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, reply, sfu,
-    transcript_key,
-};
+use crate::{RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, kv, now, random, reply, sfu};
 
 /// The exact frame the runtime answers with [`PONG`] without waking the room
 /// (`setWebSocketAutoResponse` matches the raw string). Clients send it at least every
@@ -562,12 +559,8 @@ impl RoomObject {
         transcript: &TranscriptRef,
     ) {
         let linked = async {
-            self.env
-                .kv(MEETINGS)?
-                .put(&transcript_key(transcript), recorder)?
-                .execute()
-                .await?;
-            Ok::<(), worker::Error>(())
+            let kv = kv::open(&self.env)?;
+            kv::link_transcript(&kv, transcript, &RecorderId::new(recorder)).await
         };
         if let Err(e) = linked.await {
             console_error!("linking the transcript of {meeting:?} failed: {e}");
@@ -608,12 +601,8 @@ impl RoomObject {
     /// Deletes the words' KV entry if it still points at this room; after the TTL the words
     /// may already belong to another meeting.
     async fn release(&self, meeting: &MeetingId) -> Result<()> {
-        let kv = self.env.kv(MEETINGS)?;
-        let this = self.state.id().to_string();
-        if kv.get(meeting.as_str()).text().await?.as_deref() == Some(this.as_str()) {
-            kv.delete(meeting.as_str()).await?;
-        }
-        Ok(())
+        let this = RoomId::new(self.state.id().to_string());
+        kv::release_words(&kv::open(&self.env)?, meeting, &this).await
     }
 
     /// Sets the object's alarm of an open room to [`OpenRoom::alarm_time`] over the stored

@@ -158,6 +158,11 @@ macro_rules! object_id {
                 Self(id.into())
             }
 
+            /// The id as KV stores it.
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
             /// The object behind the id in `namespace`; an error if it is no id there.
             pub fn stub(&self, namespace: &ObjectNamespace) -> Result<Stub> {
                 namespace.id_from_string(&self.0)?.get_stub()
@@ -168,13 +173,6 @@ macro_rules! object_id {
 
 object_id!(RoomId);
 object_id!(RecorderId);
-
-impl RoomId {
-    /// The id as KV stores it.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 /// `GET path` to the object behind `stub`; the caller reads the status.
 pub async fn get(stub: &Stub, path: &str) -> Result<Response> {

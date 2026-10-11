@@ -8,7 +8,7 @@ use worker::{KvStore, ObjectNamespace, Request, Response, Result, RouteContext, 
 use crate::meetings::{self, Entry, SeenEnded};
 use crate::routes::join::room_lookup;
 use crate::routes::owner::owner_proof;
-use crate::{Config, MEETINGS, ROOMS, now, transcript_key};
+use crate::{Config, ROOMS, kv, now};
 
 /// Lists the meetings in the owner's list (see [`crate::meetings`]). Entries not yet marked
 /// ended get the phase their room reports right now. For a meeting found ended, the listing
@@ -20,10 +20,10 @@ pub async fn list(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     if let Err(refusal) = owner_proof(&req, &ctx).await? {
         return Ok(refusal);
     }
-    let kv = ctx.kv(MEETINGS)?;
+    let store = kv::open(&ctx.env)?;
     let rooms = ctx.durable_object(ROOMS)?;
-    let entries = meetings::newest(meetings::load(&kv).await?);
-    let answers = join_all(entries.iter().map(|entry| look_at(&kv, &rooms, entry))).await;
+    let entries = meetings::newest(meetings::load(&store).await?);
+    let answers = join_all(entries.iter().map(|entry| look_at(&store, &rooms, entry))).await;
     let mut listed = Vec::with_capacity(entries.len());
     let mut seen = Vec::new();
     for (entry, answer) in entries.into_iter().zip(answers) {
@@ -46,7 +46,7 @@ pub async fn list(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
     }
     let now = now();
     if !seen.is_empty()
-        && let Err(e) = meetings::update(&kv, |index| meetings::settled(index, &seen, now)).await
+        && let Err(e) = meetings::update(&store, |index| meetings::settled(index, &seen, now)).await
     {
         // Logged, not returned: the next listing learns the same again.
         console_error!("marking ended meetings in the meeting list failed: {e}");
@@ -60,7 +60,7 @@ pub async fn list(req: Request, ctx: RouteContext<Config>) -> Result<Response> {
 /// transcript link exists. A room without a record counts as ended: the entry is written only
 /// after the room was initialised, so no record means its storage was removed.
 async fn look_at(
-    kv: &KvStore,
+    store: &KvStore,
     rooms: &ObjectNamespace,
     entry: &Entry,
 ) -> Result<(Phase, Option<bool>)> {
@@ -71,8 +71,7 @@ async fn look_at(
             .map_or(Phase::Ended, |lookup| lookup.phase()),
     };
     let linked = if meetings::wants_link_check(entry, phase) {
-        let key = transcript_key(&entry.transcript);
-        Some(kv.get(&key).text().await?.is_some())
+        Some(kv::recorder_of(store, &entry.transcript).await?.is_some())
     } else {
         None
     };

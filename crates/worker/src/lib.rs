@@ -50,9 +50,11 @@
 //!   which an HTML form cannot send. Bearer-token callers and other non-browser clients are not
 //!   checked: they cannot act with someone else's cookie.
 
+mod constant_time;
 mod ice;
 mod internal;
 mod jurisdiction;
+mod kv;
 mod limits;
 mod meetings;
 mod owner;
@@ -64,17 +66,13 @@ mod room;
 mod routes;
 mod sfu;
 
+use meeting_core::Millis;
 use meeting_core::http::ApiErrorCode;
-use meeting_core::{Millis, TranscriptRef};
 use worker::{Context, Date, Env, Request, Response, Result, Router, console_error, event};
 
 use crate::jurisdiction::Jurisdiction;
 use crate::routes::{create, join, list, owner as owner_routes, transcript};
 
-/// KV namespace mapping meeting words to the Room Durable Object id (hex) and transcript tokens
-/// to the recorder's ([`transcript_key`]); also holds the owner's meeting list under
-/// [`meetings::KEY`].
-const MEETINGS: &str = "MEETINGS";
 /// Durable Object namespace of `RoomObject`.
 const ROOMS: &str = "ROOMS";
 /// Durable Object namespace of `RecorderObject`.
@@ -135,12 +133,6 @@ async fn route(req: Request, env: Env) -> Result<Response> {
         .or_else_any_method("/*path", |_, _| reply::error(ApiErrorCode::NotFound))
         .run(req, env)
         .await
-}
-
-/// The KV key that maps a transcript token to its `RecorderObject`'s id. Meeting words never
-/// contain `:`, so it cannot collide with them.
-fn transcript_key(token: &TranscriptRef) -> String {
-    format!("transcript:{}", token.as_str())
 }
 
 /// The Worker's clock.

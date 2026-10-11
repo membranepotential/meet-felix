@@ -8,6 +8,7 @@ use meeting_core::{MeetingId, Millis, ParticipantId, SessionId, TrackName};
 use serde::{Deserialize, Serialize};
 use sfu_api::wire::AdapterId;
 
+use crate::constant_time;
 use crate::internal::{FinishRecording, TrackRecording, UntrackRecording};
 use crate::record::{DecodeError, Stored, stored_record, stored_version};
 
@@ -908,12 +909,7 @@ pub fn backoff(failures: u32) -> u64 {
 
 /// Whether `given` is `secret`, comparing in constant time.
 pub fn secret_matches(secret: &str, given: &str) -> bool {
-    secret.len() == given.len()
-        && secret
-            .bytes()
-            .zip(given.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
+    constant_time::eq(secret.as_bytes(), given.as_bytes())
 }
 
 /// The R2 key of a chunk. Audio and transcripts live under separate prefixes, so an R2
@@ -932,7 +928,7 @@ pub fn audio_prefix(recorder: &str) -> String {
 }
 
 /// The R2 key of a transcript file ([`crate::internal::TRANSCRIPT_MD`] or `..._JSON`).
-pub fn transcript_key(recorder: &str, file: &str) -> String {
+pub fn transcript_file_key(recorder: &str, file: &str) -> String {
     format!("transcripts/{recorder}/{file}")
 }
 
@@ -1089,7 +1085,7 @@ mod tests {
         assert_eq!(key, "audio/r1/3/1-12.ogg");
         assert!(key.starts_with(&audio_prefix("r1")));
         assert_eq!(
-            transcript_key("r1", "transcript.md"),
+            transcript_file_key("r1", "transcript.md"),
             "transcripts/r1/transcript.md"
         );
     }
