@@ -113,28 +113,52 @@ final `/end` (`Effect::FinishRecording`, the whole roster and consent record)
 never arrives; a failed `/end` is kept in the room's ended record and sent
 once more by the room's alarm 30 s later.
 
-The recorder ends up as if the room's requests had arrived in order
-(2026-10-11, audit finding P1-002). The room carries out a step's effects
-after storing the step, and each request to the recorder awaits a fetch while
-other events run, so a later step's `/stop` or `/untrack` (a stop, a consent
-withdrawal, a speaker leaving) could reach the recorder before an earlier
-step's `/track`, which then recorded audio that `RoomState` says is not
-recorded. Now the room numbers every recorder request in the order its steps
-produce them (`next_recorder_request` in the room record, `seq` in the
-request body), and the recorder keeps the newest number it applied per
-speaker and for `/stop`. It drops a `/track` older than the speaker's last
-request or the last `/stop`, and an `/untrack` older than the speaker's last
-request; a `/stop` closes only the adapters of speakers whose last request is
-not newer, and an applied `/untrack` closes all of the speaker's adapters.
-An `/untrack` or `/stop` that overtakes the first `/start` finds no record
-yet; the recorder keeps its number under a separate key, and `/start` takes
-it into the new record.
-The pure rule is `Recorder::begin_track`, `untrack` and `stop` in
-`crates/worker/src/recorder/state.rs`; a test applies a seven-request history
-in all 5,040 arrival orders and gets the in-order result every time. Why
-numbers and not one queue of recorder calls per room: the rule holds whatever
-order the requests arrive in, survives the room being evicted, and is tested
-without a Durable Object.
+The recorder never records more than in-order delivery of the room's
+requests would (2026-10-11, audit finding P1-002). The room carries out a
+step's effects after storing the step, and each request to the recorder
+awaits a fetch while other events run, so a later step's `/stop` or
+`/untrack` (a stop, a consent withdrawal, a speaker leaving) could reach the
+recorder before an earlier step's `/track`, which then recorded audio that
+`RoomState` says is not recorded. Now:
+
+- The room numbers every recorder request in the order its steps produce
+  them (`next_recorder_request` in the room record, `seq` in the request
+  body). A room starts counting from its clock (milliseconds × 1,000) when
+  its record holds no number, so numbers keep rising even if older code
+  dropped the counter from the record.
+- The recorder keeps the newest number it applied per speaker and for
+  `/stop`. It drops a `/track` older than the speaker's last request or the
+  last `/stop`, and an `/untrack` older than the speaker's last request; an
+  applied `/untrack` closes all of the speaker's adapters.
+- A `/stop` closes every adapter, whatever its number. Every open adapter
+  came from a `/track` the room sent while it recorded, and after a stop the
+  room records nothing until it starts again and sends new `/track`s. So a
+  wrong or reordered number can at worst leave a speaker unrecorded until
+  their next track (logged as a warning), never record them after a stop.
+- A request that overtakes the first `/start` finds no record yet: the
+  recorder keeps an `/untrack`'s or `/stop`'s number, and a `/track` itself,
+  under a separate key; `/start` takes the numbers into the new record and
+  applies the kept `/track`s newest first, so one a later request superseded
+  is dropped.
+
+The pure rule is `Recorder::begin_track`, `untrack` and `stop` and
+`BeforeStart` in `crates/worker/src/recorder/state.rs`. A test applies a
+seven-request history in all 5,040 arrival orders: none records anything the
+in-order delivery does not, and every order in which no later request
+overtakes the `/stop` gives the in-order result. Why numbers and not one
+queue of recorder calls per room: the rule holds whatever order the requests
+arrive in, survives the room being evicted, and is tested without a Durable
+Object.
+
+**No rollback across the deploy of 2026-10-11** (the recorder record v2 and
+the request numbers). Code from before it reads a recorder record only as the
+bare version 1, so after `wrangler rollback` every recorder that the new code
+touched fails all requests, its transcript job included. Old code also
+rewrites room records without `nextRecorderRequest` and sends unnumbered
+requests, which a recorder that saw numbers drops as stale, so speakers go
+unrecorded. Recording stays safe in both cases (a `/stop` still closes
+everything), but transcripts break. If the new code must be undone, deploy a
+fix forward instead.
 
 What the notice says (owner's decision, 2026-10-09): that the meeting is
 recorded, that voices become a transcript everyone in the meeting gets, and

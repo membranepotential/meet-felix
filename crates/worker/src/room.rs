@@ -17,8 +17,8 @@ use std::collections::VecDeque;
 
 use meeting_core::recording::{ConsentRecord, RosterEntry};
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, FailureCause, MAX_PRESENT, MeetingId, Millis,
-    ParticipantId, RecordingPolicy, RoomState, ServerMsg, SfuReply, TranscriptRef,
+    ClientMsg, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
+    RecordingPolicy, RoomState, ServerMsg, SfuReply, TranscriptRef,
 };
 use serde::Serialize;
 use sfu_api::{Failure, failure_reply};
@@ -37,7 +37,8 @@ use crate::internal::{
 };
 use crate::record::{
     Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS,
-    MessageBudget, OpenSocket, PendingFinish, Record, alarm_time, is_recording, is_stale,
+    JOIN_TIMEOUT_MS, MessageBudget, OpenRoom, OpenSocket, PendingFinish, Record, Write, alarm_time,
+    crowded_out, is_recording, is_stale, is_unbound, join_overdue, write_for,
 };
 use crate::recorder::{Ordered, RequestSeq, Stop};
 use crate::{
@@ -54,11 +55,6 @@ const PONG: &str = r#"{"type":"pong"}"#;
 /// Upper bound on SFU effects one handler carries out, including those that follow from SFU
 /// replies. The core never chains more than a few; this only stops a runaway loop.
 const MAX_SFU_CALLS: usize = 64;
-
-/// How many sockets a room keeps open besides the owner's: two per participant the core takes
-/// at once ([`MAX_PRESENT`]), for a client that resumes on a new socket before the room noticed
-/// that its old one is gone.
-const MAX_OPEN_SOCKETS: usize = 2 * MAX_PRESENT;
 
 /// Close code for sockets the room closes: normal closure.
 const CLOSE_NORMAL: u16 = 1000;
@@ -167,7 +163,7 @@ impl DurableObject for RoomObject {
     /// the storage ([`RoomObject::ended_alarm`]).
     async fn alarm(&self) -> Result<Response> {
         match self.load().await? {
-            Some(Record::Open(_)) => self.open_alarm().await?,
+            Some(Record::Open(open)) => self.open_alarm(&open).await?,
             Some(Record::Ended(ended)) => self.ended_alarm(ended).await?,
             None => {}
         }
@@ -178,13 +174,22 @@ impl DurableObject for RoomObject {
 impl RoomObject {
     /// The alarm of an open room, for the core's alarm or the keepalive check, whichever is
     /// earlier. Lets the core handle whatever is due (a spurious `AlarmFired` is harmless),
-    /// reports and closes sockets whose client stopped pinging, and arms the next alarm. If the
-    /// meeting ends meanwhile, `EndMeeting` armed the ended room's alarm already.
+    /// reports and closes sockets whose client stopped pinging, closes sockets that are bound to
+    /// nobody in the room after [`JOIN_TIMEOUT_MS`], and arms the next alarm. If the meeting
+    /// ends meanwhile, `EndMeeting` armed the ended room's alarm already.
     ///
     /// A stale socket is closed only once the step that reports it is stored: if storing fails,
-    /// the runtime retries the alarm, which must still find the socket open and stale.
-    async fn open_alarm(&self) -> Result<()> {
+    /// the runtime retries the alarm, which must still find the socket open and stale. An
+    /// unbound socket is closed at once: the core knows no participant of it to report.
+    async fn open_alarm(&self, open: &OpenRoom) -> Result<()> {
         let now = now();
+        let present = open.present();
+        for (ws, _) in self
+            .open_sockets()
+            .filter(|(_, socket)| is_unbound(socket, &present) && join_overdue(now, socket.since))
+        {
+            close(&ws, Closing::NoJoin.code(), Closing::NoJoin.reason());
+        }
         let stale = self
             .open_sockets()
             .filter(|(ws, socket)| is_stale(now, socket.since, last_ping(&self.state, ws)))
@@ -256,30 +261,40 @@ impl RoomObject {
     }
 
     /// Accepts a socket for a scheduled or running meeting and gives it the next participant
-    /// id; `owner` says whether the router verified the owner's session on it. Refuses a socket
-    /// that is not the owner's while [`MAX_OPEN_SOCKETS`] are open, so nobody can hold more
-    /// sockets than the core takes participants.
+    /// id; `owner` says whether the router verified the owner's session on it. Never refuses
+    /// one, as it may be a client resuming its place (D35): to keep the sockets bounded, it
+    /// closes the oldest sockets bound to nobody in the room instead ([`crowded_out`]), and the
+    /// alarm closes such a socket once [`JOIN_TIMEOUT_MS`] passed without a `Join`.
     async fn accept(&self, owner: bool) -> Result<Response> {
         let open = match self.load().await? {
             None => return Response::error("unknown meeting", 404),
             Some(Record::Ended(_)) => return Response::error("meeting ended", 410),
             Some(Record::Open(open)) => open,
         };
-        if !owner && self.open_sockets().count() >= MAX_OPEN_SOCKETS {
-            return Response::error("the meeting is full", 429);
+        let present = open.present();
+        let unbound = self
+            .open_sockets()
+            .filter(|(_, socket)| is_unbound(socket, &present))
+            .collect();
+        for ws in crowded_out(unbound) {
+            close(&ws, Closing::Crowded.code(), Closing::Crowded.reason());
         }
-        let alarm = open.alarm;
+        let now = now();
+        let join_deadline = now.after(JOIN_TIMEOUT_MS + 1);
+        let alarm = open.alarm.map_or(join_deadline, |at| at.min(join_deadline));
         let (record, participant) = open.connect();
         self.store(&record).await?;
         let WebSocketPair { client, server } = WebSocketPair::new()?;
         self.state.accept_web_socket(&server);
         server.serialize_attachment(Attachment::Open(OpenSocket {
             participant,
-            since: now(),
+            since: now,
             owner,
             budget: MessageBudget::default(),
         }))?;
-        self.arm(alarm).await?;
+        // Wakes the room when the socket's time to join is over; a spurious `AlarmFired` is
+        // harmless to the core.
+        self.arm(Some(alarm)).await?;
         Response::from_websocket(client)
     }
 
@@ -329,7 +344,7 @@ impl RoomObject {
                 recorder: open.recorder.clone(),
                 meeting: open.room.meeting().clone(),
                 transcript: open.room.transcript().clone(),
-                next_request: open.next_recorder_request,
+                next_request: open.first_recorder_request(now),
             };
             let writer = match &event {
                 Event::Client { from, .. } => Some(*from),
@@ -337,26 +352,23 @@ impl RoomObject {
             };
             let (mut record, effects) = open.step(now, event);
             let recorder = self.recorder_link(before, &mut record, &effects);
-            let mut json = crate::record::encode(&record)?;
-            if json != stored {
-                if let (Some(who), Record::Open(open)) = (writer, &mut record) {
-                    if !open.charge_write(who, now) {
-                        // Dropped as if never received; the client resumes and catches up
-                        // from its welcome, its budget still spent.
-                        console_warn!("{who:?} used up its write budget; closing its sockets");
-                        queue.extend(
-                            self.open_sockets()
-                                .filter(|(_, s)| s.participant == who)
-                                .map(|(ws, _)| Input {
-                                    event: Event::SocketClosed { who },
-                                    close: Some((ws, Closing::OverBudget)),
-                                }),
-                        );
-                        continue;
-                    }
-                    json = crate::record::encode(&record)?;
+            match write_for(&stored, &mut record, writer, now)? {
+                Write::Skip => {}
+                Write::Store(json) => self.state.storage().put(Record::KEY, json).await?,
+                Write::Refuse(who) => {
+                    // Dropped as if never received; the client resumes and catches up from its
+                    // welcome, its budget still spent.
+                    console_warn!("{who:?} used up its write budget; closing its sockets");
+                    queue.extend(
+                        self.open_sockets()
+                            .filter(|(_, s)| s.participant == who)
+                            .map(|(ws, _)| Input {
+                                event: Event::SocketClosed { who },
+                                close: Some((ws, Closing::OverBudget)),
+                            }),
+                    );
+                    continue;
                 }
-                self.state.storage().put(Record::KEY, json).await?;
             }
             if let Some((ws, why)) = close {
                 self::close(&ws, why.code(), why.reason());
@@ -793,6 +805,10 @@ enum Closing {
     Stale,
     /// The client sent more than its message budget.
     OverBudget,
+    /// The socket is bound to nobody in the room after [`JOIN_TIMEOUT_MS`].
+    NoJoin,
+    /// The socket is the oldest of too many bound to nobody in the room ([`crowded_out`]).
+    Crowded,
 }
 
 impl Closing {
@@ -801,7 +817,7 @@ impl Closing {
             // Going away.
             Self::Stale => 1001,
             // Policy violation.
-            Self::OverBudget => 1008,
+            Self::OverBudget | Self::NoJoin | Self::Crowded => 1008,
         }
     }
 
@@ -809,6 +825,8 @@ impl Closing {
         match self {
             Self::Stale => "no ping",
             Self::OverBudget => "too many messages",
+            Self::NoJoin => "no join",
+            Self::Crowded => "too many sockets",
         }
     }
 }
@@ -860,7 +878,6 @@ fn is_remote_call(effect: &Effect) -> bool {
         | Effect::EndMeeting => false,
     }
 }
-
 
 /// Names the SFU call an effect makes, its participant and its session, for the log, e.g.
 /// `SFU Subscribe for ParticipantId(0) on session 2a45…`.

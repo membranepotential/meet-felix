@@ -207,8 +207,15 @@ From the module comment in [`lib.rs`](../../crates/meeting-core/src/lib.rs):
   and leave in a loop until the record outgrows the storage limit or the CPU
   limit per event, and stuff a room with knocking strangers. The numbers are
   a judgement for a personal meeting app, not measured limits. The
-  `RoomObject` also refuses a WebSocket upgrade that is not the owner's while
-  `2 × MAX_PRESENT` sockets are open (HTTP 429).
+  `RoomObject` never refuses a WebSocket upgrade, because any new socket may
+  be a client resuming its place (D35). It bounds sockets instead: a socket
+  bound to no participant in the room (it has not joined, or its `Join` was
+  refused) is closed after `JOIN_TIMEOUT_MS` (10 s; the room arms its alarm
+  for that), and when more than `2 × MAX_PRESENT` such sockets are open, a new
+  one closes the oldest (code 1008). The owner's sockets never count. Changed
+  on 2026-10-11 from refusing upgrades above `2 × MAX_PRESENT` open sockets
+  (HTTP 429), which let 40 silent sockets that only pinged lock out every
+  resume and every new guest (review of the audit fixes).
 - Every participant's microphone switch is part of the room state
   (`ParticipantView::muted`), so every client shows who is muted
   (2026-10-10). A client reports its own switch with `SetMuted`. A host's

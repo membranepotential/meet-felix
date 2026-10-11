@@ -14,11 +14,36 @@ use crate::record::{DecodeError, Stored, stored_record, stored_version};
 /// The recorder's storage key.
 pub const KEY: &str = "recorder";
 
-/// The storage key of the [`Applied`] requests that reached the recorder before its `/start`
-/// created [`KEY`]: the room posts each step's requests in their own fetches, so a later
-/// step's `/untrack` or `/stop` can overtake the first `/start`. `/start` takes them into the
-/// new record ([`Recorder::applied`]) and deletes the key.
-pub const APPLIED_BEFORE_START_KEY: &str = "appliedBeforeStart";
+/// The storage key of the [`BeforeStart`] requests: those that reached the recorder before its
+/// `/start` created [`KEY`]. The room posts each step's requests in their own fetches, so a
+/// later step's request can overtake the first `/start`.
+pub const BEFORE_START_KEY: &str = "beforeStart";
+
+/// The requests that overtook the first `/start`. `/start` takes `applied` into the new record
+/// ([`Recorder::applied`]), then applies `tracks` newest first ([`BeforeStart::tracks`]), so
+/// a `/track` that a later `/untrack` or `/stop` superseded is dropped as stale, and deletes the
+/// key.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeforeStart {
+    pub applied: Applied,
+    tracks: Vec<Ordered<TrackRecording>>,
+}
+
+impl BeforeStart {
+    /// Keeps a `/track` to apply once the record exists.
+    pub fn track(&mut self, track: Ordered<TrackRecording>) {
+        self.tracks.push(track);
+    }
+
+    /// The kept `/track`s, newest first: of a speaker's tracks the newest is applied and the
+    /// older ones are stale.
+    pub fn tracks(self) -> (Applied, Vec<Ordered<TrackRecording>>) {
+        let mut tracks = self.tracks;
+        tracks.sort_by_key(|track| std::cmp::Reverse(track.seq));
+        (self.applied, tracks)
+    }
+}
 
 /// The version of the stored recorder's shape. 1 is the bare [`Recorder`] stored before
 /// 2026-10-11; 2 wraps it in the [`Stored`] envelope the room uses.
@@ -78,16 +103,22 @@ pub struct Recorder {
 }
 
 /// The place of a request from the room among all the requests the room sends its recorder,
-/// counted from [`RequestSeq::FIRST`] in the order the room's steps produced them.
+/// in the order the room's steps produced them.
 ///
 /// The room carries out a step's effects after storing the step, and each request to the
 /// recorder awaits a fetch with the input gate open, so a later step's `/stop` or `/untrack`
 /// can reach the recorder before an earlier step's `/track`. Applied as it arrives, that
 /// `/track` would record audio that `RoomState` says is not recorded (D15). The recorder
 /// instead drops a request older than one it applied for the same speaker, and a `/track` older
-/// than the last `/stop` ([`Recorder::begin_track`], [`Recorder::untrack`], [`Recorder::stop`]),
-/// so it ends up as if every request had arrived in order. A request without a number (from a
-/// room that ran older code) counts as [`RequestSeq::UNORDERED`], older than every numbered one.
+/// than the last `/stop` ([`Recorder::begin_track`], [`Recorder::untrack`]). A request without
+/// a number (from a room that ran older code) counts as [`RequestSeq::UNORDERED`], older than
+/// every numbered one.
+///
+/// D15 does not rest on the numbers alone: a `/stop` closes every adapter, whatever its number
+/// ([`Recorder::stop`]), so a wrong number can at worst leave a speaker unrecorded, never
+/// recorded after a stop. A room's numbers start from its clock ([`RequestSeq::starting_at`])
+/// whenever its record has none, so even a counter lost to older code (a rollback rewrites the
+/// record without it) restarts above every number handed out before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RequestSeq(pub u64);
@@ -95,8 +126,13 @@ pub struct RequestSeq(pub u64);
 impl RequestSeq {
     /// What a request from a room that numbered none carries.
     pub const UNORDERED: Self = Self(0);
-    /// The number of a room's first request.
-    pub const FIRST: Self = Self(1);
+
+    /// The first number of a room that starts counting at `now`: the time in milliseconds,
+    /// times 1,000. A room sends far fewer than 1,000 requests per millisecond, so a counter
+    /// started later is above any started earlier, however many requests that one numbered.
+    pub fn starting_at(now: Millis) -> Self {
+        Self(now.0.saturating_mul(1_000))
+    }
 
     /// The number `n` requests after this one.
     #[must_use]
@@ -160,8 +196,8 @@ impl Applied {
         true
     }
 
-    /// Notes a `/stop` numbered `seq`; returns the speakers whose last applied request is newer,
-    /// whose adapters the stop leaves open.
+    /// Notes a `/stop` numbered `seq`; returns the speakers whose last applied request is
+    /// newer, for whom the stop came late.
     pub fn stop(&mut self, seq: RequestSeq) -> Vec<ParticipantId> {
         self.stop = self.stop.max(seq);
         self.speakers
@@ -353,11 +389,18 @@ impl Recorder {
         Some(closed)
     }
 
-    /// Applies the room's `/stop` numbered `seq`: closes the adapters of every speaker whose
-    /// last applied request is not newer. Returns the adapters it closed.
-    pub fn stop(&mut self, seq: RequestSeq) -> Vec<Adapter> {
-        let newer = self.applied.stop(seq);
-        self.close_adapters(|a| !newer.contains(&a.who))
+    /// Applies the room's `/stop` numbered `seq`: closes every adapter, and from now on drops
+    /// a `/track` numbered before it. Returns the adapters it closed and the speakers whose last
+    /// applied request is numbered after the stop: for them the stop came late, or the numbers
+    /// are wrong, and closing their adapter leaves them unrecorded until their next `/track`.
+    ///
+    /// It closes even those: whatever the numbers say, every adapter open now was created by a
+    /// `/track` the room sent while it recorded, and after a stop the room records nothing
+    /// until it starts again and sends new `/track`s. Leaving a speaker unrecorded is the safe
+    /// mistake; recording one after a stop is the one D15 forbids.
+    pub fn stop(&mut self, seq: RequestSeq) -> (Vec<Adapter>, Vec<ParticipantId>) {
+        let late = self.applied.stop(seq);
+        (self.close_adapters(|_| true), late)
     }
 }
 
@@ -820,17 +863,21 @@ mod tests {
         let Request::Untrack(withdrawn) = untrack(0, "p0", "a0") else {
             unreachable!()
         };
-        assert_eq!(recorder.untrack(&withdrawn, RequestSeq(4)), Some(Vec::new()));
+        assert_eq!(
+            recorder.untrack(&withdrawn, RequestSeq(4)),
+            Some(Vec::new())
+        );
         assert_eq!(recorder.begin_track(&late, RequestSeq(3)), TrackPlan::Stale);
         assert!(recorded(&recorder).is_empty());
         assert_eq!(recorder.consents, [consent(ParticipantId(0), true)]);
     }
 
     #[test]
-    fn the_recorder_ends_as_if_the_rooms_requests_had_arrived_in_order() {
+    fn the_recorder_never_records_more_than_in_order_and_as_much_unless_a_stop_is_overtaken() {
         // What a room sends: speakers 0 and 1 are recorded; 0 withdraws consent; recording
         // stops and starts again with 0, who consented again, and 1, who republished; then 1
         // unpublishes.
+        let first = RequestSeq::starting_at(Millis(1_791_583_200_000));
         let history: Vec<(RequestSeq, Request)> = [
             track(0, "p0", "a0"),
             track(1, "p1", "a1"),
@@ -842,21 +889,90 @@ mod tests {
         ]
         .into_iter()
         .enumerate()
-        .map(|(i, request)| (RequestSeq::FIRST.after(i), request))
+        .map(|(i, request)| (first.after(i), request))
         .collect();
+        let stop = history
+            .iter()
+            .position(|(_, r)| matches!(r, Request::Stop))
+            .expect("a stop");
         let mut in_order = empty_recorder();
         for request in &history {
             apply(&mut in_order, request);
         }
-        assert_eq!(recorded(&in_order), [(ParticipantId(0), "a0".to_owned())]);
+        let expected = recorded(&in_order);
+        assert_eq!(expected, [(ParticipantId(0), "a0".to_owned())]);
         let indices: Vec<usize> = (0..history.len()).collect();
+        let mut equal = 0;
         for arrival in permutations(&indices) {
             let mut recorder = empty_recorder();
             for &i in &arrival {
                 apply(&mut recorder, &history[i]);
             }
-            assert_eq!(recorded(&recorder), recorded(&in_order), "arrival {arrival:?}");
+            let got = recorded(&recorder);
+            // D15: nothing is recorded that in-order delivery would not record.
+            assert!(
+                got.iter().all(|track| expected.contains(track)),
+                "arrival {arrival:?} records {got:?}"
+            );
+            // A request numbered after the stop that arrives before it is closed by it: the
+            // safe mistake. Otherwise the result is the in-order one.
+            let at = |i| arrival.iter().position(|&j| j == i).expect("in arrival");
+            let overtaken = (stop + 1..history.len()).any(|later| at(later) < at(stop));
+            if !overtaken {
+                assert_eq!(got, expected, "arrival {arrival:?}");
+                equal += 1;
+            }
         }
+        assert!(equal > 0);
+    }
+
+    #[test]
+    fn a_stop_closes_every_adapter_whatever_its_number() {
+        // A room whose counter restarted below the recorder's (older code dropped it): its
+        // stop still closes what the newer numbers opened.
+        let Request::Track(track) = track(0, "p0", "a0") else {
+            unreachable!()
+        };
+        let mut recorder = empty_recorder();
+        assert!(matches!(
+            recorder.begin_track(&track, RequestSeq(9_000)),
+            TrackPlan::New { .. }
+        ));
+        let (closed, late) = recorder.stop(RequestSeq(5));
+        assert_eq!(closed.len(), 1);
+        assert_eq!(late, [ParticipantId(0)]);
+        assert!(recorded(&recorder).is_empty());
+    }
+
+    #[test]
+    fn a_track_that_overtook_the_start_is_applied_unless_a_later_request_superseded_it() {
+        let ordered = |seq, request| match request {
+            Request::Track(request) => Ordered {
+                seq: RequestSeq(seq),
+                request,
+            },
+            _ => unreachable!(),
+        };
+        // Two tracks of speaker 0 and one of speaker 1 overtook the start; 1 then withdrew.
+        let mut before = BeforeStart::default();
+        before.track(ordered(2, track(0, "p0", "a0")));
+        before.track(ordered(4, track(0, "p0", "a0b")));
+        before.track(ordered(3, track(1, "p1", "a1")));
+        assert!(before.applied.untrack(ParticipantId(1), RequestSeq(5)));
+        let (applied, tracks) = before.tracks();
+        assert_eq!(
+            tracks.iter().map(|t| t.seq.0).collect::<Vec<_>>(),
+            [4, 3, 2],
+            "newest first"
+        );
+        let mut recorder = Recorder {
+            applied,
+            ..empty_recorder()
+        };
+        for track in &tracks {
+            recorder.begin_track(&track.request, track.seq);
+        }
+        assert_eq!(recorded(&recorder), [(ParticipantId(0), "a0b".to_owned())]);
     }
 
     #[test]
@@ -895,9 +1011,9 @@ mod tests {
             recorder.begin_track(&track, RequestSeq::UNORDERED),
             TrackPlan::New { .. }
         ));
-        assert_eq!(recorder.stop(RequestSeq::UNORDERED).len(), 1);
+        assert_eq!(recorder.stop(RequestSeq::UNORDERED).0.len(), 1);
         // Once a numbered request was applied, an unnumbered one is stale.
-        recorder.stop(RequestSeq::FIRST);
+        recorder.stop(RequestSeq(1));
         assert_eq!(
             recorder.begin_track(&track, RequestSeq::UNORDERED),
             TrackPlan::Stale
@@ -1030,7 +1146,12 @@ mod tests {
                     audio_deleted_at: Some(at.after(AUDIO_RETENTION_MS + 60_000)),
                 }),
             ),
-            ("failed", ended(Job::Failed { at: at.after(HOUR_MS) })),
+            (
+                "failed",
+                ended(Job::Failed {
+                    at: at.after(HOUR_MS),
+                }),
+            ),
         ]
     }
 
@@ -1040,7 +1161,11 @@ mod tests {
     #[ignore = "writes the fixtures of the current shape; run it only after a shape change"]
     fn capture_recorder_fixtures() {
         for (name, recorder) in fixture_recorders() {
-            fixtures::capture("recorder", &format!("{name}.json"), &encode(&recorder).unwrap());
+            fixtures::capture(
+                "recorder",
+                &format!("{name}.json"),
+                &encode(&recorder).unwrap(),
+            );
         }
     }
 
@@ -1069,9 +1194,7 @@ mod tests {
             let recorder = decode(&json).unwrap_or_else(|e| panic!("{name}: {e}"));
             // The unversioned records were captured from these scenarios, before the recorder
             // kept the requests it applied.
-            if let Some((_, expected)) = built
-                .iter()
-                .find(|(n, _)| format!("v1-{n}.json") == name)
+            if let Some((_, expected)) = built.iter().find(|(n, _)| format!("v1-{n}.json") == name)
             {
                 let before_applied = Recorder {
                     applied: Applied::default(),

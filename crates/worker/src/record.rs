@@ -11,7 +11,9 @@
 
 use std::fmt;
 
-use meeting_core::{Effect, Event, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, step};
+use meeting_core::{
+    Effect, Event, MAX_PRESENT, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, step,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +102,11 @@ pub fn stored_record<R: DeserializeOwned>(json: &str) -> Result<R, DecodeError> 
 
 /// What [`decode`] found in storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "made once per load and taken apart at once; a box would only add an allocation. \
+              `allow`, not `expect`: the lint fires on 64-bit targets only"
+)]
 pub enum Decoded {
     /// A record of the current version.
     Current(Record),
@@ -212,7 +219,7 @@ impl Record {
             alarm: None,
             next_participant: 0,
             recorder: None,
-            next_recorder_request: RequestSeq::FIRST,
+            next_recorder_request: None,
             write_budgets: Vec::new(),
         }
         .settle(effects)
@@ -261,19 +268,17 @@ pub struct OpenRoom {
     pub recorder: Option<String>,
     /// The number the next request to the recorder gets. A step's recorder requests are
     /// numbered from here in effect order, so the recorder can drop one that arrives after a
-    /// newer one (`RequestSeq` in `crate::recorder`). Records stored before it existed start
-    /// at [`RequestSeq::FIRST`].
-    #[serde(default = "first_request")]
-    pub next_recorder_request: RequestSeq,
+    /// newer one (`RequestSeq` in `crate::recorder`). `None` until the first request, and in a
+    /// record that older code stored, which may have dropped the number: the next step then
+    /// starts counting from its clock ([`OpenRoom::first_recorder_request`]), above every number
+    /// handed out before.
+    #[serde(default)]
+    pub next_recorder_request: Option<RequestSeq>,
     /// Each participant's budget of writes their messages cause ([`OpenRoom::charge_write`]).
     /// Unlike a socket's message budget it survives a resume on a new socket and hibernation.
     /// Records stored before it existed load with every budget full.
     #[serde(default)]
     pub write_budgets: Vec<(ParticipantId, MessageBudget)>,
-}
-
-fn first_request() -> RequestSeq {
-    RequestSeq::FIRST
 }
 
 /// Whether `effect` is a request to the recorder.
@@ -291,7 +296,7 @@ pub fn is_recording(effect: &Effect) -> bool {
 impl OpenRoom {
     /// Runs one event through the core; returns the record to store and the effects to carry
     /// out. The recorder requests among the effects take the numbers from
-    /// [`OpenRoom::next_recorder_request`] on, in order; an open record counts on after them.
+    /// [`OpenRoom::first_recorder_request`] on, in order; an open record counts on after them.
     pub fn step(self, now: Millis, event: Event) -> (Record, Vec<Effect>) {
         // A fired alarm is used up. The core sets it again after every `AlarmFired` if anything
         // is still due; keeping the old time would re-arm a time in the past, and the alarm
@@ -300,18 +305,34 @@ impl OpenRoom {
             Event::AlarmFired => None,
             _ => self.alarm,
         };
+        let first = self.first_recorder_request(now);
         let (room, effects) = step(self.room, now, event);
         let requests = effects.iter().filter(|e| is_recording(e)).count();
+        let next_recorder_request = match requests {
+            0 => self.next_recorder_request,
+            n => Some(first.after(n)),
+        };
         (
             Self {
                 room,
                 alarm,
-                next_recorder_request: self.next_recorder_request.after(requests),
+                next_recorder_request,
                 ..self
             }
             .settle(&effects),
             effects,
         )
+    }
+
+    /// The number a step at `now` gives its first recorder request.
+    pub fn first_recorder_request(&self, now: Millis) -> RequestSeq {
+        self.next_recorder_request
+            .unwrap_or_else(|| RequestSeq::starting_at(now))
+    }
+
+    /// The participants in the room, waiting ones included.
+    pub fn present(&self) -> Vec<ParticipantId> {
+        self.room.view().participants.iter().map(|p| p.id).collect()
     }
 
     /// Charges participant `who` at `now` for one write of the record that their message
@@ -458,6 +479,68 @@ pub fn is_stale(now: Millis, since: Millis, last_ping: Option<Millis>) -> bool {
     now.0.saturating_sub(last.0) > KEEPALIVE_MS
 }
 
+/// How long a socket may stay open without a participant in the room: time for its client's
+/// `Join`, which the web client sends as soon as the socket opens. A socket that never joins,
+/// or whose `Join` the room refused, is closed after it ([`join_overdue`]).
+pub const JOIN_TIMEOUT_MS: u64 = 10 * 1000;
+
+/// How many unbound sockets ([`is_unbound`]) the room keeps open. When one more connects, the
+/// oldest are closed ([`crowded_out`]); the new socket, perhaps a client resuming its place, is
+/// never refused.
+pub const MAX_UNBOUND_SOCKETS: usize = 2 * MAX_PRESENT;
+
+/// Whether `socket` is bound to no participant in the room: it has not joined (yet), or its
+/// participant left or was refused. The owner's sockets never count, as only the owner opens
+/// them.
+pub fn is_unbound(socket: &OpenSocket, present: &[ParticipantId]) -> bool {
+    !socket.owner && !present.contains(&socket.participant)
+}
+
+/// Whether an unbound socket that connected at `since` has had its time to join.
+pub fn join_overdue(now: Millis, since: Millis) -> bool {
+    now.0.saturating_sub(since.0) > JOIN_TIMEOUT_MS
+}
+
+/// Of the unbound sockets, the oldest ones to close so that one more fits within
+/// [`MAX_UNBOUND_SOCKETS`].
+pub fn crowded_out<T>(mut unbound: Vec<(T, OpenSocket)>) -> Vec<T> {
+    unbound.sort_by_key(|(_, socket)| socket.since);
+    let excess = (unbound.len() + 1).saturating_sub(MAX_UNBOUND_SOCKETS);
+    unbound.into_iter().take(excess).map(|(t, _)| t).collect()
+}
+
+/// What the room does with the record a step produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Write {
+    /// The step changed nothing: store nothing, so it costs no row.
+    Skip,
+    /// Store this JSON.
+    Store(String),
+    /// A message from this participant would change the record, but they used up their write
+    /// budget ([`OpenRoom::charge_write`]): drop the step as if the message never came, and
+    /// close their sockets.
+    Refuse(ParticipantId),
+}
+
+/// The write for a step that turned the record stored as `stored` into `record`. `writer` is
+/// the participant whose message the step ran, if it ran one; they pay for the write.
+pub fn write_for(
+    stored: &str,
+    record: &mut Record,
+    writer: Option<ParticipantId>,
+    now: Millis,
+) -> serde_json::Result<Write> {
+    if encode(record)? == stored {
+        return Ok(Write::Skip);
+    }
+    if let (Some(who), Record::Open(open)) = (writer, &mut *record)
+        && !open.charge_write(who, now)
+    {
+        return Ok(Write::Refuse(who));
+    }
+    Ok(Write::Store(encode(record)?))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use meeting_core::{
@@ -566,21 +649,137 @@ pub(crate) mod tests {
             fresh_token: ResumeToken::from_random([9; 16]),
         };
         let open = room_with_host();
-        assert_eq!(open.next_recorder_request, RequestSeq::FIRST);
+        // A room counts from its clock once it sends its first request.
+        assert_eq!(open.next_recorder_request, None);
+        let first = RequestSeq::starting_at(T0);
+        assert_eq!(open.first_recorder_request(T0), first);
         let (Record::Open(open), effects) = open.step(T0, record(true)) else {
             panic!("still open")
         };
         assert_eq!(effects.iter().filter(|e| is_recording(e)).count(), 1);
-        assert_eq!(open.next_recorder_request, RequestSeq::FIRST.after(1));
-        // A step without recorder requests keeps the number.
-        let (Record::Open(open), _) = open.step(T0, Event::AlarmFired) else {
+        assert_eq!(open.next_recorder_request, Some(first.after(1)));
+        // A step without recorder requests keeps the number, even at a later time.
+        let later = T0.after(60_000);
+        let (Record::Open(open), _) = open.step(later, Event::AlarmFired) else {
             panic!("still open")
         };
-        assert_eq!(open.next_recorder_request, RequestSeq::FIRST.after(1));
-        let (Record::Open(open), _) = open.step(T0, record(false)) else {
+        assert_eq!(open.next_recorder_request, Some(first.after(1)));
+        let (Record::Open(open), _) = open.step(later, record(false)) else {
             panic!("still open")
         };
-        assert_eq!(open.next_recorder_request, RequestSeq::FIRST.after(2));
+        assert_eq!(open.next_recorder_request, Some(first.after(2)));
+    }
+
+    #[test]
+    fn a_room_that_lost_its_counter_numbers_above_everything_it_numbered_before() {
+        // The rooms production holds were stored before the counter existed; older code also
+        // drops it when it rewrites a record, as after a rollback.
+        for (name, json) in fixtures::read("room", "older") {
+            if let Ok(Decoded::Current(Record::Open(open))) = decode(&json) {
+                assert_eq!(open.next_recorder_request, None, "{name}");
+            }
+        }
+        // Before: 10,000 requests a millisecond after counting began at T0. After losing the
+        // counter, the next step a millisecond later still numbers above them.
+        let mut open = room_with_host();
+        open.next_recorder_request = Some(RequestSeq::starting_at(T0).after(10_000));
+        let before = open.first_recorder_request(T0);
+        open.next_recorder_request = None;
+        assert!(open.first_recorder_request(T0.after(11)) > before);
+    }
+
+    fn socket(participant: u32, since: Millis, owner: bool) -> OpenSocket {
+        OpenSocket {
+            participant: ParticipantId(participant),
+            since,
+            owner,
+            budget: MessageBudget::default(),
+        }
+    }
+
+    #[test]
+    fn sockets_bound_to_nobody_are_closed_oldest_first_and_after_their_time_to_join() {
+        let present = [ParticipantId(0), ParticipantId(1)];
+        assert!(!is_unbound(&socket(1, T0, false), &present));
+        assert!(is_unbound(&socket(7, T0, false), &present));
+        assert!(
+            !is_unbound(&socket(7, T0, true), &present),
+            "the owner's sockets never count"
+        );
+        // Below the limit nothing is crowded out; at it, the oldest make room for one more.
+        let unbound = |n: u32| -> Vec<(u32, OpenSocket)> {
+            (0..n)
+                .map(|i| (i, socket(100 + i, T0.after(u64::from(i)), false)))
+                .rev()
+                .collect()
+        };
+        let limit = u32::try_from(MAX_UNBOUND_SOCKETS).unwrap();
+        assert!(crowded_out(unbound(limit - 1)).is_empty());
+        assert_eq!(crowded_out(unbound(limit)), [0]);
+        assert_eq!(crowded_out(unbound(limit + 2)), [0, 1, 2]);
+        assert!(!join_overdue(T0.after(JOIN_TIMEOUT_MS), T0));
+        assert!(join_overdue(T0.after(JOIN_TIMEOUT_MS + 1), T0));
+    }
+
+    #[test]
+    fn a_step_that_changed_nothing_writes_nothing_and_a_writer_pays_for_a_write() {
+        let open = room_with_host();
+        let stored = encode(&Record::Open(open.clone())).unwrap();
+        let muted = |muted| Event::Client {
+            from: HOST,
+            msg: ClientMsg::SetMuted { muted },
+            owner: true,
+            fresh_token: ResumeToken::from_random([9; 16]),
+        };
+        // Unmuted already: nothing changes, nothing is written or charged.
+        let (mut record, _) = open.clone().step(T0, muted(false));
+        assert_eq!(
+            write_for(&stored, &mut record, Some(HOST), T0).unwrap(),
+            Write::Skip
+        );
+        // A change is written, with the writer's budget charged in the same record.
+        let (mut record, _) = open.step(T0, muted(true));
+        let Write::Store(json) = write_for(&stored, &mut record, Some(HOST), T0).unwrap() else {
+            panic!("a change is stored")
+        };
+        let Decoded::Current(Record::Open(written)) = decode(&json).unwrap() else {
+            panic!("an open room")
+        };
+        assert_eq!(written.write_budgets.len(), 1);
+        // A step no participant caused (an SFU reply, an alarm) charges nobody.
+        let (mut record, _) = written.clone().step(T0, Event::AlarmFired);
+        let stored = encode(&Record::Open(written.clone())).unwrap();
+        if let Write::Store(json) = write_for(&stored, &mut record, None, T0).unwrap() {
+            let Decoded::Current(Record::Open(after)) = decode(&json).unwrap() else {
+                panic!("an open room")
+            };
+            assert_eq!(after.write_budgets, written.write_budgets);
+        }
+    }
+
+    #[test]
+    fn a_writer_without_budget_has_the_step_dropped() {
+        let mut open = room_with_host();
+        while open.charge_write(HOST, T0) {}
+        let stored = encode(&Record::Open(open.clone())).unwrap();
+        let mute = Event::Client {
+            from: HOST,
+            msg: ClientMsg::SetMuted { muted: true },
+            owner: true,
+            fresh_token: ResumeToken::from_random([9; 16]),
+        };
+        let (mut record, _) = open.clone().step(T0, mute.clone());
+        assert_eq!(
+            write_for(&stored, &mut record, Some(HOST), T0).unwrap(),
+            Write::Refuse(HOST)
+        );
+        // A second later the budget allows one more write.
+        let later = T0.after(MESSAGE_INTERVAL_MS);
+        let (mut record, _) = open.step(later, mute);
+        assert!(matches!(
+            write_for(&stored, &mut record, Some(HOST), later).unwrap(),
+            Write::Store(_)
+        ));
     }
 
     #[test]
@@ -683,10 +882,7 @@ pub(crate) mod tests {
                 supported: RECORD_VERSION
             })
         ));
-        assert!(matches!(
-            decode("not json"),
-            Err(DecodeError::Malformed(_))
-        ));
+        assert!(matches!(decode("not json"), Err(DecodeError::Malformed(_))));
         assert!(matches!(
             decode(r#"{"version":2,"record":{"open":{}}}"#),
             Err(DecodeError::Malformed(_))
@@ -725,7 +921,10 @@ pub(crate) mod tests {
                 .map(|entry| {
                     let path = entry.expect("a readable entry").path();
                     let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                    (name, std::fs::read_to_string(&path).expect("a readable file"))
+                    (
+                        name,
+                        std::fs::read_to_string(&path).expect("a readable file"),
+                    )
                 })
                 .collect();
             files.sort();

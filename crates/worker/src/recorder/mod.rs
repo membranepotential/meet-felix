@@ -49,12 +49,12 @@ use worker::{
 use self::capture::{Capture, Note};
 use self::opus::{ogg_opus, spooled_packets};
 use self::packet::Packet;
-pub(crate) use self::state::{Ordered, RequestSeq, Stop};
 use self::state::{
-    AUDIO_RETENTION_MS, Adapter, Applied, Job, MAX_QUOTA_WAIT_MS, MAX_STEP_FAILURES, Phase, Recorder,
-    SegmentCursor, Status, TrackPlan, audio_prefix, backoff, chunk_key, gaps, quota_retry,
-    secret_matches, transcript_key,
+    AUDIO_RETENTION_MS, Adapter, BeforeStart, Job, MAX_QUOTA_WAIT_MS, MAX_STEP_FAILURES, Phase,
+    Recorder, SegmentCursor, Status, TrackPlan, audio_prefix, backoff, chunk_key, gaps,
+    quota_retry, secret_matches, transcript_key,
 };
+pub(crate) use self::state::{Ordered, RequestSeq, Stop};
 use self::store::{ChunkId, ChunkRow, ChunkState, Store};
 use self::whisper::{TranscribeError, Transcriber, WhisperTurbo};
 use crate::internal::{
@@ -250,8 +250,11 @@ impl Inner {
 
     // --- Requests from the room -------------------------------------------------------------
 
-    async fn start(&self, start: StartRecording) -> Result<Response> {
+    /// Creates the record on the first `/start`, with the requests that overtook it
+    /// ([`state::BeforeStart`]); later calls change nothing.
+    async fn start(self: &Rc<Self>, start: StartRecording) -> Result<Response> {
         if self.load().await?.is_none() {
+            let (applied, tracks) = self.before_start().await?.tracks();
             let recorder = Recorder {
                 meeting: start.meeting,
                 started_at: start.since,
@@ -260,15 +263,19 @@ impl Inner {
                 consents: Vec::new(),
                 adapters: Vec::new(),
                 phase: Phase::Recording,
-                applied: self.applied_before_start().await?,
+                applied,
             };
             self.save(&recorder).await?;
-            self.state
-                .storage()
-                .delete(state::APPLIED_BEFORE_START_KEY)
-                .await?;
+            self.state.storage().delete(state::BEFORE_START_KEY).await?;
             self.arm(now().after(HOUSEKEEPING_MS)).await?;
             console_log!("recorder {}: recording started", self.id());
+            // Logged, not returned: the start itself succeeded.
+            for track in tracks {
+                let who = track.request.who;
+                if let Err(e) = self.track(track).await {
+                    console_error!("recorder: a /track for {who:?} kept before /start failed: {e}");
+                }
+            }
         }
         Response::empty().map(|r| r.with_status(204))
     }
@@ -277,10 +284,13 @@ impl Inner {
     /// previous one if the track changed (a republish or a replaced session). A `/track` older
     /// than a `/stop` or `/untrack` already applied changes nothing ([`Recorder::begin_track`]).
     async fn track(self: &Rc<Self>, track: Ordered<TrackRecording>) -> Result<Response> {
-        let Ordered { seq, request: track } = track;
         let Some(mut recorder) = self.load().await? else {
-            return Response::error("unknown recorder", 404);
+            return self.note_before_start(|before| before.track(track)).await;
         };
+        let Ordered {
+            seq,
+            request: track,
+        } = track;
         if recorder.phase != Phase::Recording {
             return Response::error("the meeting ended", 409);
         }
@@ -384,39 +394,32 @@ impl Inner {
         ))
     }
 
-    /// The requests noted before `/start` created the record ([`state::APPLIED_BEFORE_START_KEY`]).
-    async fn applied_before_start(&self) -> Result<Applied> {
-        let json: Option<String> = self
-            .state
-            .storage()
-            .get(state::APPLIED_BEFORE_START_KEY)
-            .await?;
+    /// The requests noted before `/start` created the record ([`state::BEFORE_START_KEY`]).
+    async fn before_start(&self) -> Result<BeforeStart> {
+        let json: Option<String> = self.state.storage().get(state::BEFORE_START_KEY).await?;
         Ok(json
             .map(|json| serde_json::from_str(&json))
             .transpose()?
             .unwrap_or_default())
     }
 
-    /// Notes an `/untrack` or `/stop` that overtook the first `/start`, so the `/track` it
-    /// overtook is dropped when it arrives ([`state::APPLIED_BEFORE_START_KEY`]).
-    async fn note_before_start(&self, note: impl FnOnce(&mut Applied)) -> Result<Response> {
-        let mut applied = self.applied_before_start().await?;
-        note(&mut applied);
+    /// Notes a request that overtook the first `/start`, for `/start` to apply
+    /// ([`state::BeforeStart`]).
+    async fn note_before_start(&self, note: impl FnOnce(&mut BeforeStart)) -> Result<Response> {
+        let mut before = self.before_start().await?;
+        note(&mut before);
         self.state
             .storage()
-            .put(
-                state::APPLIED_BEFORE_START_KEY,
-                serde_json::to_string(&applied)?,
-            )
+            .put(state::BEFORE_START_KEY, serde_json::to_string(&before)?)
             .await?;
-        Response::empty().map(|r| r.with_status(204))
+        Response::empty().map(|r| r.with_status(202))
     }
 
     async fn untrack(self: &Rc<Self>, untrack: Ordered<UntrackRecording>) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
             return self
-                .note_before_start(|applied| {
-                    applied.untrack(untrack.request.who, untrack.seq);
+                .note_before_start(|before| {
+                    before.applied.untrack(untrack.request.who, untrack.seq);
                 })
                 .await;
         };
@@ -436,12 +439,18 @@ impl Inner {
     async fn stop(self: &Rc<Self>, seq: RequestSeq) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
             return self
-                .note_before_start(|applied| {
-                    applied.stop(seq);
+                .note_before_start(|before| {
+                    before.applied.stop(seq);
                 })
                 .await;
         };
-        let closed = recorder.stop(seq);
+        let (closed, late) = recorder.stop(seq);
+        if !late.is_empty() {
+            console_warn!(
+                "recorder: /stop {seq:?} arrived after newer requests of {late:?}; \
+                 their adapters are closed too and stay closed until their next /track"
+            );
+        }
         self.save(&recorder).await?;
         self.end_streams(&closed);
         self.close_sfu_adapters(&closed).await;
