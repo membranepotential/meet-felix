@@ -89,4 +89,22 @@ describe('IceServers', () => {
 		expect(fetch).toHaveBeenCalledTimes(2);
 		ice.dispose();
 	});
+
+	it('does not fetch on recovery before the rate limit lets it', async () => {
+		const answers: ApiResult<IceConfig>[] = [rateLimited(20_000), ok(turn('back'))];
+		const fetch = vi.fn(async () => answers.shift() ?? ok(turn('later')));
+		const ice = new IceServers(fetch, () => {});
+		await ice.latest;
+		// Welcomes before the `Retry-After` has passed ask nothing.
+		ice.recover();
+		await vi.advanceTimersByTimeAsync(10_000);
+		ice.recover();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		// The scheduled retry fetches once the window is over.
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(await ice.latest).toEqual(turn('back'));
+		ice.dispose();
+	});
 });

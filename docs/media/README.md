@@ -67,7 +67,9 @@ Facts checked on 2026-10-09 ([01 §1](../research/01-hosting-and-media-platforms
   is sooner, and after 5 hours from a Worker that sends no `ttl`), 5 minutes
   after a set without TURN, after the `Retry-After` of a rate-limit refusal
   (60 seconds without one), 30 seconds after any other failure, and at
-  once when the signaling socket is welcomed back after a failure. Every
+  once when the signaling socket is welcomed back after a failure, except
+  while a rate-limit refusal's wait runs (before 2026-10-11 each welcome
+  fetched again at once, `Retry-After` or not). Every
   peer connection opened later uses the latest set, and the open ones get it
   with `setConfiguration`, which a browser applies from the connection's next
   ICE gathering on, not to the candidates it has

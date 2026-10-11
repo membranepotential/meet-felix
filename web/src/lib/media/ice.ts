@@ -3,7 +3,7 @@
  * lifetime (`ttl` from `crates/worker/src/ice.rs`), and every peer connection opened later,
  * after a session reset or a failed connection, needs credentials that still work. So the
  * servers are fetched again before they expire, sooner after a failure, and at once when the
- * signaling socket is back after a failure.
+ * signaling socket is back after a failure, unless the rate limit asked us to wait longer.
  */
 import type { ApiResult, IceConfig } from '../api.ts';
 
@@ -44,8 +44,12 @@ export class IceServers {
 	readonly #fetch: () => Promise<ApiResult<IceConfig>>;
 	readonly #onChange: (servers: RTCIceServer[]) => void;
 	#latest: Promise<RTCIceServer[]>;
-	/** The last fetch failed, so the next reconnect fetches at once. */
-	#failed = false;
+	/**
+	 * The last fetch failed: from this time on (`Date.now()`), a reconnect fetches at once. After
+	 * a 429 it is the end of the rate limit's wait (`refreshDelay`), after any other failure the
+	 * time of the failure; `null` after a success.
+	 */
+	#retryAt: number | null = null;
 	#timer: ReturnType<typeof setTimeout> | undefined;
 	#disposed = false;
 
@@ -67,10 +71,11 @@ export class IceServers {
 		return this.#latest;
 	}
 
-	/** The connection is back: if the last fetch failed, fetch again now. */
+	/** The connection is back: if the last fetch failed and may be retried by now, fetch again. */
 	recover(): void {
-		if (!this.#failed || this.#disposed) return;
-		this.#failed = false;
+		if (this.#retryAt === null || Date.now() < this.#retryAt || this.#disposed) return;
+		this.#retryAt = null;
+		clearTimeout(this.#timer);
 		void this.#refresh();
 	}
 
@@ -90,9 +95,12 @@ export class IceServers {
 	async #load(): Promise<RTCIceServer[] | null> {
 		const result = await this.#fetch();
 		if (this.#disposed) return null;
-		this.#failed = !result.ok;
+		const delay = refreshDelay(result);
+		this.#retryAt = result.ok
+			? null
+			: Date.now() + (result.error.kind === 'rate-limited' ? delay : 0);
 		clearTimeout(this.#timer);
-		this.#timer = setTimeout(() => void this.#refresh(), refreshDelay(result));
+		this.#timer = setTimeout(() => void this.#refresh(), delay);
 		if (result.ok) return result.value.servers;
 		console.warn('ICE servers unavailable, keeping the last ones', result.error);
 		return null;

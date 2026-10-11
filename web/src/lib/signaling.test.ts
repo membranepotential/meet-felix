@@ -123,6 +123,17 @@ describe('SignalingClient', () => {
 		expect(last?.kind === 'waiting' && last.retryInMs).toBeLessThanOrEqual(500);
 	});
 
+	it('keeps backing off when the room asks a host for consent before the SFU refuses the join', async () => {
+		for (let i = 0; i < 3; i++) {
+			latest().open();
+			latest().receive('{"type":"consentRequired"}');
+			latest().receive('{"type":"error","code":"sfuUnavailable"}');
+			latest().closedBy(1013, 'the media server is not reachable');
+			await vi.runOnlyPendingTimersAsync();
+		}
+		expect(waits()).toEqual([1, 2, 3]);
+	});
+
 	it('stops for good on a final close code, and asks for a reload on an outdated one', () => {
 		latest().open();
 		latest().closedBy(4002, 'The meeting has ended.');

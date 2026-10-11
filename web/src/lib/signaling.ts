@@ -5,8 +5,8 @@
  * once when the page becomes visible or the network returns (iOS drops sockets of
  * backgrounded tabs). After every (re)connect `onOpen` runs, where the caller sends `Join`;
  * the server answers with `Welcome` and a full state, so no message replay is needed. The
- * backoff starts over only once the room answered a `Join` with something other than an
- * error, so a room that refuses the join and closes the socket (the SFU is down) is asked
+ * backoff starts over only once the room placed us, in the meeting (`Welcome`) or outside it
+ * (`Waiting`), so a room that refuses the join and closes the socket (the SFU is down) is asked
  * less and less often. The room's close code says whether to come back at all (`afterClose`).
  *
  * While open, the client sends `{"type":"ping"}` every 30 s: the room closes a socket with code
@@ -183,8 +183,10 @@ export class SignalingClient {
 			this.#closeReplaced();
 			const msg = decodeFrame(event.data);
 			if (msg === null) return;
-			// The room took our `Join`: the next lost connection starts the backoff over.
-			if (msg.type !== 'error') this.#attempt = 0;
+			// The room placed us: the next lost connection starts the backoff over. Not on
+			// `ConsentRequired`: a host gets it before the room asks the SFU for sessions, so it
+			// does not mean the join holds.
+			if (msg.type === 'welcome' || msg.type === 'waiting') this.#attempt = 0;
 			this.#handlers.onMessage(msg);
 		});
 		socket.addEventListener('close', (event) => {
