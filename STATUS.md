@@ -7,6 +7,7 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - iphone-check — owner tries Mute feedback and Expand on the iPhone with the new version — waiting
 
 ## Done
+- 2026-10-11 Deployed version 15b6a031: audit wave 3 (MediaLink split, mute bookkeeping, no unmute without consent, awaitingConsent flag, KV key module, e2e locators); the 2026-10-11 audit is resolved; worker 105, core 95, sfu-api 16, web 172, e2e 97 passed 3 skipped.
 - 2026-10-11 Deployed version 4e1f4a76: audit wave 2 (protocol version and close codes D36, orphan sweep, recorder retries and 48 h job deadline, HTTP types from Rust, one error body, versioned meeting index); no rollback across it; worker 98, core 92, sfu-api 16, web 158, e2e 94 passed 3 skipped.
 - 2026-10-11 Deployed version f8cb9611: audit wave 1 (all P1s and security findings; see DEVLOG); `SESSION_KEY` set; production checked (CSP, login, origin rule, rate limit through the custom domain); worker 83, core 77, sfu-api 16, web 152, e2e 88 passed 3 skipped.
 - 2026-10-11 Published: this repo is public, with the history rewritten so no deployment details remain (the unrewritten history stays private). Deployed version e2bef2dd, commit 1dde930; production login and `/api/me` answer 200 with the owner's name and `no-store`.
@@ -45,7 +46,6 @@ Self-hosted, serverless Google-Meet replacement in Rust (functional core, impera
 - 2026-10-09 crates/sfu-api: placeholder manifest so the workspace builds.
 
 ## Next
-0. Audit fixes, wave 3 (owner, 2026-10-11: fix them); triage in the local report folder.
 In this order, one at a time (owner, 2026-10-10: "step by step, at your discretion"). The 2026-10-10 backlog is done except the last core item.
 1. Subscriber-side step-down on a weak link: since `priorityOrdering: none` the SFU no longer lowers the layer by itself; pick a lower layer when inbound loss is high or the bitrate low, if real use shows frozen video.
 2. Start the first pull from the publisher's first packets rather than its connection: the SFU still refuses pulls for 0.5–1 s after `connected` (measured 2026-10-10).
@@ -54,7 +54,7 @@ In this order, one at a time (owner, 2026-10-10: "step by step, at your discreti
 - Owner, manual: try on the iPhone the Devices dialog (front/back camera), "Reconnecting…" tiles after a drop, "Join as host" from inside a meeting; observe hibernation, egress and neurons on the dashboard; device checklist on real phones; per-speaker audio and a delete button for past meetings are unscheduled wishes from the DEVLOG.
 
 ## Open questions
-- RecorderObject cold starts used 15 ms CPU on 2026-10-11 (Free plan nominal 10 ms, answered fine): watch Workers Logs for `exceededCpu`.
+- Cold starts used up to 32 ms CPU right after the deploys of 2026-10-11 (Free plan nominal 10 ms; all answered): watch Workers Logs for `exceededCpu`.
 - Workers Free is the plan for now (owner, 2026-10-09): Workers AI gives 10,000 neurons/day ≈ 214 speaker-minutes of Whisper, calls beyond that fail; the transcript job retries after the daily reset. Realtime SFU/TURN bill separately (1,000 GB free). 10 ms CPU per invocation applies.
 - Max audio size per Workers AI speech request? (undocumented; Cloudflare's tutorial uses 1 MB chunks)
 - What does an adapter do when its source track ends? (undocumented)

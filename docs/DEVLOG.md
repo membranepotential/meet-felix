@@ -3,6 +3,41 @@
 Newest entries first. Each entry: what happened, what was decided, what's
 next.
 
+## 2026-10-11 — Audit fixes, wave 3: web session and sweep
+
+The last wave of the 2026-10-11 audit; every finding is now fixed, kept with
+a reason, or rejected (two style findings), each branch reviewed
+independently.
+
+- **Web session.** `Session` is split: `MediaLink` owns both SFU peer
+  connections, their epochs and resets, the ICE servers, the layers and the
+  received tracks, and is the only store for them; a closed `Publisher` or
+  `Subscriber` stays silent, which replaces the stale-connection guards. Mute
+  has one send path; `MuteReport` (`mute.ts`) keeps the flag the room holds
+  for us, so an unmute made while offline is reported, never undone. The
+  session ends a stay through the core's `over`. The reconnect backoff starts
+  over on `Welcome` or `Waiting`, or once a socket held 5 s without an error
+  (D36), and `IceServers` waits out `Retry-After`.
+- **Core.** A participant who must stay muted for lack of consent while a
+  recording runs can no longer unmute (`SetMuted { muted: false }` is
+  refused with `ConsentRequired` and `Muted`; muting is always allowed), with
+  a property invariant. `ParticipantView.awaitingConsent` replaces the rule
+  the web client re-derived. Sockets bound to nobody when a meeting ends
+  close with `EndedUnseen` (1001), so the client re-checks and shows the
+  ended screen.
+- **Sweep.** One module owns the Worker's KV keys (`kv.rs`; stored strings
+  unchanged) and one constant-time compare; narrower Rust and TS
+  visibility; named ms literals; e2e specs locate by role, text and test id;
+  the tile's mute icon has a hidden "(muted)" label; the property test
+  harness bug and several test gaps are closed.
+- Deployed version 15b6a031 (no meeting was live). Production check: error
+  bodies, login, four transcripts, no exceptions; CPU up to 32 ms on the
+  first requests after the deploy (cold starts), all answered.
+- Checks: worker 105, core 95, sfu-api 16, web 172, e2e 97 passed 3 skipped.
+- Open from the reviews: an SFU adapter created behind a lost response pulls
+  the track for up to 15 s (D16); an adapter whose first call an eviction
+  cut off is never retried.
+
 ## 2026-10-11 — Audit fixes, wave 2: protocol, recorder, HTTP contract
 
 Three branches with disjoint files (core protocol and room; recorder; router

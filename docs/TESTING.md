@@ -113,6 +113,19 @@ wire and declaration tests in `meeting-core/src/http.rs`; web
 `protocol/http-errors.spec.ts` (error bodies and `no-store` on the 404
 fallback, 405 and 500s, the 500s planted with `wrangler kv key put --local`).
 
+Wave 3 added: `media-link.test.ts` (the epoch rule of the two peer
+connections, the reset after a failed connection, `remote` emptied on a
+subscribe reset), `mute.test.ts` (the mute bookkeeping across welcomes and
+offline switches), `signaling.test.ts` backoff cases (a host without consent
+while the SFU is down; a guest at the consent question), `sfu.test.ts` (a
+closed Publisher/Subscriber reports nothing); core rules and property tests
+for the refused unmute without consent and the `awaitingConsent` flag;
+worker tests for the KV key spellings (`kv.rs`), the constant-time compare,
+owner-name reading, `alarm_inputs` ordering and an old room fixture stepped
+through `AlarmFired`. New e2e: `browser/owner-name.spec.ts` (pre-join with no
+owner name) and a protocol test that a never-joined socket gets 1001 at the
+end. Browser specs locate by role, text and test id, not CSS class.
+
 ## End-to-end tests (Playwright)
 
 The end-to-end tests live in [`web/e2e/`](../web/e2e/) and run with
