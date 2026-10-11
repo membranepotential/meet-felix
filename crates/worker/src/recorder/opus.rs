@@ -12,19 +12,19 @@ use ogg::{PacketWriteEndInfo, PacketWriter};
 use opus_rs::{Application, OpusEncoder};
 
 /// The encoder's sample rate.
-pub const RATE: u32 = 16_000;
+const RATE: u32 = 16_000;
 /// Samples in one 20 ms frame at [`RATE`].
 pub const FRAME_SAMPLES: usize = 320;
 /// Ogg/Opus granule positions count 48 kHz samples whatever the input rate (RFC 7845 §4), so a
 /// 20 ms packet advances the granule by 960.
-pub const GRANULE_PER_FRAME: u64 = 960;
+const GRANULE_PER_FRAME: u64 = 960;
 /// The encoder's lookahead in 48 kHz samples, written as the pre-skip: libopus reports
 /// `Fs/400 + Fs/250` for the VoIP application (2.5 ms plus the 4 ms delay compensation),
 /// 104 samples at 16 kHz. `opus-rs` has no lookahead query; the test
 /// `pre_skip_matches_the_encoders_delay` measures it with an impulse.
-pub const PRE_SKIP: u16 = 312;
+const PRE_SKIP: u16 = 312;
 /// Target bitrate (D16: 16–24 kbps).
-pub const BITRATE_BPS: i32 = 20_000;
+const BITRATE_BPS: i32 = 20_000;
 /// The packet size limit handed to the encoder: 61 bytes per 20 ms, at most 24 kbps.
 /// `opus-rs` 0.1.37 derives the SILK bitrate in VBR mode from the output buffer's length
 /// instead of `bitrate_bps` (libopus uses `bitrate_bps`), so a full 1,276-byte buffer gave
@@ -64,7 +64,7 @@ impl FrameEncoder {
 }
 
 /// Appends a packet in the spool format: a little-endian `u16` length, then the bytes.
-pub fn append_packet(spool: &mut Vec<u8>, packet: &[u8]) {
+fn append_packet(spool: &mut Vec<u8>, packet: &[u8]) {
     let len = u16::try_from(packet.len()).expect("Opus packets are at most 1276 bytes");
     spool.extend_from_slice(&len.to_le_bytes());
     spool.extend_from_slice(packet);

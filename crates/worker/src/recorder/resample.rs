@@ -6,7 +6,7 @@
 use std::f32::consts::PI;
 
 /// Input samples per output sample.
-pub const FACTOR: usize = 3;
+const FACTOR: usize = 3;
 /// Filter length: odd and symmetric, so the delay is a whole number of samples.
 const TAPS: usize = 63;
 /// The pass band ends here, below the 8 kHz Nyquist frequency of the output.

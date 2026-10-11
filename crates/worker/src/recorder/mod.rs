@@ -59,7 +59,8 @@ use crate::{is_websocket_upgrade, now, reply};
 
 /// R2 bucket of audio chunks and transcripts (EU jurisdiction).
 const RECORDINGS: &str = "RECORDINGS";
-/// Close code for streams the recorder ends.
+/// Close code for the adapter streams the recorder ends. The SFU reads it, not a client, so it
+/// is no `CloseCode` of the room protocol.
 const CLOSE_NORMAL: u16 = 1000;
 /// How long the alarm waits after a step failed before it tries again.
 const ALARM_RETRY_MS: u64 = 60_000;

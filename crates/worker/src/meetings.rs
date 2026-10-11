@@ -28,13 +28,13 @@ use crate::record::{DecodeError, Stored, stored_record, stored_version};
 pub const MAX_ENTRIES: usize = 200;
 /// The version of the stored list's shape. 1 was a bare JSON array (until 2026-10-11); 2 wraps
 /// it in the envelope and records whether an ended meeting's transcript link exists.
-pub const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 2;
 /// How long after a listing first saw a meeting ended a missing transcript link counts as never
 /// made. The room links the token in KV when recording starts, which is before the end; a KV
 /// write can take 60 seconds or more to reach other locations, and a lookup of a missing key is
 /// cached as well (research 11, "KV's cache fights recycled words"), so a miss soon after the
 /// end proves nothing yet.
-pub const LINK_SETTLE_MS: u64 = 5 * 60 * 1000;
+const LINK_SETTLE_MS: u64 = 5 * 60 * 1000;
 
 /// One meeting in the list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

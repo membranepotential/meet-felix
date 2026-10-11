@@ -98,10 +98,10 @@ pub const HARD_CHUNK_FRAMES: u32 = 1_500;
 /// A chunk with fewer loud frames than this (300 ms) is silent; the transcript job skips it.
 pub const MIN_VOICED_FRAMES: u32 = 15;
 /// More time than this between two adapter messages is a hole in the stream.
-pub const MAX_ARRIVAL_GAP_MS: u64 = 1_000;
+const MAX_ARRIVAL_GAP_MS: u64 = 1_000;
 /// A sequence number at most this far behind the last one is a late duplicate; further back,
 /// the counter restarted.
-pub const MAX_REORDER: i32 = 1_000;
+const MAX_REORDER: i32 = 1_000;
 
 /// The silence gate, with hysteresis: a loud frame opens it at once, and it closes only after
 /// [`SILENCE_FRAMES`] quiet frames in a row. It starts closed.

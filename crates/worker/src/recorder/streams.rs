@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
+use meeting_core::recording::FRAME_MS;
 use meeting_core::{Millis, ParticipantId};
 use serde::{Deserialize, Serialize};
 use worker::{
@@ -279,7 +280,7 @@ impl Inner {
                     .iter()
                     .map(|batch| spooled_packets(batch).count())
                     .sum();
-                self.store.close_orphan(id, frames as u64 * 20)?;
+                self.store.close_orphan(id, frames as u64 * FRAME_MS)?;
             }
             for row in self.store.chunks_in(ChunkState::Closed, u32::MAX)? {
                 if row.upload_after <= now.0 {

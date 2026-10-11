@@ -21,7 +21,7 @@ use crate::recorder::RequestSeq;
 
 /// The version of the stored record's shape. 1 was the unversioned record before 2026-10-09;
 /// 2 added the consent record to the core's participants and the recorder id.
-pub const RECORD_VERSION: u32 = 2;
+const RECORD_VERSION: u32 = 2;
 
 /// A stored record with its version: the JSON a Durable Object keeps under its storage key.
 #[derive(Serialize, Deserialize)]
@@ -351,7 +351,7 @@ impl OpenRoom {
     }
 
     /// The number a step at `now` gives its first recorder request.
-    pub fn first_recorder_request(&self, now: Millis) -> RequestSeq {
+    fn first_recorder_request(&self, now: Millis) -> RequestSeq {
         self.next_recorder_request
             .unwrap_or_else(|| RequestSeq::starting_at(now))
     }
@@ -401,7 +401,7 @@ impl OpenRoom {
     /// A socket's [`MessageBudget`] alone does not protect the daily write allowance: a client
     /// that overspends resumes on a new socket with a full one. This budget belongs to the
     /// participant and is stored with the record, in the write it charges for.
-    pub fn charge_write(&mut self, who: ParticipantId, now: Millis) -> bool {
+    fn charge_write(&mut self, who: ParticipantId, now: Millis) -> bool {
         let roster = self.room.roster();
         let on_roster = |id: &ParticipantId| roster.iter().any(|entry| entry.id == *id);
         // A participant who left before they joined is off the roster: their budget goes too.
@@ -483,12 +483,12 @@ pub struct OpenSocket {
 }
 
 /// The sustained rate of messages a socket may send: one per this many milliseconds.
-pub const MESSAGE_INTERVAL_MS: u64 = 1_000;
+const MESSAGE_INTERVAL_MS: u64 = 1_000;
 
 /// How many messages a socket may send at once above the sustained rate. A client sends a few
 /// dozen at most in a burst (a window resize changes the layer of every remote track, at most
 /// once per track per 400 ms), and about one a minute otherwise.
-pub const MESSAGE_BURST: u64 = 120;
+const MESSAGE_BURST: u64 = 120;
 
 /// A budget of messages, so that no client can make the room step, and store its record, as
 /// often as it likes: the daily allowance of rows written is shared by every room and recorder
@@ -536,7 +536,7 @@ pub const JOIN_TIMEOUT_MS: u64 = 10 * 1000;
 /// How many unbound sockets ([`is_unbound`]) the room keeps open. When one more connects, the
 /// oldest are closed ([`crowded_out`]); the new socket, perhaps a client resuming its place, is
 /// never refused.
-pub const MAX_UNBOUND_SOCKETS: usize = 2 * MAX_PRESENT;
+const MAX_UNBOUND_SOCKETS: usize = 2 * MAX_PRESENT;
 
 /// Whether `socket` is bound to no participant in the room: it has not joined (yet), or its
 /// participant left or was refused. The owner's sockets never count, as only the owner opens

@@ -47,7 +47,7 @@ static LOGGED_NO_CLIENT: AtomicBool = AtomicBool::new(false);
 /// The client a request is counted for: its IPv4 address, or the /64 network of its IPv6
 /// address, because one IPv6 subscriber usually holds a whole /64. `None` without a usable
 /// address.
-pub fn client_key(connecting_ip: Option<&str>) -> Option<String> {
+fn client_key(connecting_ip: Option<&str>) -> Option<String> {
     Some(match connecting_ip?.trim().parse::<IpAddr>().ok()? {
         IpAddr::V4(ip) => ip.to_string(),
         IpAddr::V6(ip) => match ip.to_ipv4_mapped() {

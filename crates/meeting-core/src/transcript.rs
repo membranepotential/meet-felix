@@ -14,7 +14,7 @@ use crate::recording::{ConsentRecord, Speaker};
 
 /// Consecutive segments of one speaker form one paragraph while the pause between them is
 /// shorter than this.
-pub const PARAGRAPH_PAUSE_MS: u64 = 2_000;
+const PARAGRAPH_PAUSE_MS: u64 = 2_000;
 
 /// The version of the `transcript.json` shape.
 pub const TRANSCRIPT_VERSION: u32 = 1;

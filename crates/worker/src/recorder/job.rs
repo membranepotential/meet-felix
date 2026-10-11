@@ -24,6 +24,8 @@ use crate::internal::{TRANSCRIPT_JSON, TRANSCRIPT_MD};
 const AI: &str = "AI";
 /// Chunks transcribed per alarm invocation.
 const TRANSCRIBE_BATCH: u32 = 4;
+/// How long before the next look while uploads run in the background.
+const UPLOAD_POLL_MS: u64 = 2_000;
 /// Segments merged per alarm invocation.
 const MERGE_BATCH: u32 = 300;
 
@@ -81,7 +83,7 @@ impl Inner {
         if !closed.is_empty() {
             // Uploads run in the background; look again when the next one is due.
             let due = closed.iter().map(|c| c.upload_after).min().unwrap_or(0);
-            return Ok(Some(Millis(due).max(now.after(2_000))));
+            return Ok(Some(Millis(due).max(now.after(UPLOAD_POLL_MS))));
         }
         self.store.skip_silent()?;
         if now >= audio_until {

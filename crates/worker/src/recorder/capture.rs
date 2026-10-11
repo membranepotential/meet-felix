@@ -14,7 +14,7 @@ use super::resample::{Downsampler, level_dbfs};
 
 /// The longest the encoded packets of an open chunk wait in memory before they are spooled to
 /// storage; an eviction loses at most this much audio (plus one message).
-pub const SPOOL_INTERVAL_MS: u64 = 1_500;
+const SPOOL_INTERVAL_MS: u64 = 1_500;
 
 /// What the shell must store.
 #[derive(Debug, Clone, PartialEq, Eq)]

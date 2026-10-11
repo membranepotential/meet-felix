@@ -48,7 +48,7 @@ impl BeforeStart {
 
 /// The version of the stored recorder's shape. 1 is the bare [`Recorder`] stored before
 /// 2026-10-11; 2 wraps it in the [`Stored`] envelope the room uses.
-pub const RECORDER_VERSION: u32 = 2;
+const RECORDER_VERSION: u32 = 2;
 
 /// The stored JSON of `recorder`.
 pub fn encode(recorder: &Recorder) -> serde_json::Result<String> {
@@ -371,13 +371,13 @@ pub struct Unrecorded {
 
 /// Calls to create an adapter before the recorder gives up on it, about five minutes after the
 /// first ([`adapter_retry`]).
-pub const MAX_ADAPTER_CALLS: u32 = 10;
+const MAX_ADAPTER_CALLS: u32 = 10;
 
 /// The wait before the next call to create an adapter after the `failures`-th failed one, or
 /// `None` once [`MAX_ADAPTER_CALLS`] failed: 1 s, 2 s, 5 s, 10 s, 30 s, then a minute. The first
 /// wait outlasts the 0.5–1 s after a publish in which the SFU refuses to pull the new track
 /// (measured for subscriber pulls on 2026-10-10; an adapter pulls the track too).
-pub fn adapter_retry(failures: u32) -> Option<u64> {
+fn adapter_retry(failures: u32) -> Option<u64> {
     (failures < MAX_ADAPTER_CALLS).then_some(match failures {
         0 | 1 => 1_000,
         2 => 2_000,
@@ -498,12 +498,12 @@ pub struct SegmentCursor {
 
 impl Recorder {
     /// The speaker's open adapter, if any.
-    pub fn open_adapter(&self, who: ParticipantId) -> Option<&Adapter> {
+    fn open_adapter(&self, who: ParticipantId) -> Option<&Adapter> {
         self.adapters.iter().find(|a| a.who == who && a.open)
     }
 
     /// The generation `who`'s next adapter gets.
-    pub fn next_generation(&self, who: ParticipantId) -> u32 {
+    fn next_generation(&self, who: ParticipantId) -> u32 {
         self.adapters
             .iter()
             .filter(|a| a.who == who)
@@ -809,7 +809,7 @@ impl Recorder {
 
 impl RecorderPhase {
     /// Whether the job got past writing the transcript: it is ready, or the job gave up.
-    pub fn transcript_written(&self) -> bool {
+    fn transcript_written(&self) -> bool {
         matches!(
             self,
             Self::Ended {
@@ -855,12 +855,14 @@ pub fn classify_ai_error(text: &str) -> AiFailure {
 
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const DAY_MS: u64 = 24 * HOUR_MS;
+/// How long after the daily quota reset the quota is tried again.
+const QUOTA_RESET_GRACE_MS: u64 = 5 * 60 * 1000;
 
 /// When to try again after `failure` at `now`: five minutes after the next daily reset at
 /// 00:00 UTC for the quota, an hour later for a rate limit.
-pub fn quota_retry(failure: AiFailure, now: Millis) -> Option<Millis> {
+fn quota_retry(failure: AiFailure, now: Millis) -> Option<Millis> {
     match failure {
-        AiFailure::Quota => Some(Millis((now.0 / DAY_MS + 1) * DAY_MS + 5 * 60 * 1000)),
+        AiFailure::Quota => Some(Millis((now.0 / DAY_MS + 1) * DAY_MS + QUOTA_RESET_GRACE_MS)),
         AiFailure::RateLimited => Some(now.after(HOUR_MS)),
         AiFailure::Other => None,
     }
@@ -945,7 +947,7 @@ pub struct ChunkSpan {
 }
 
 /// A hole between two chunks of one adapter stream shorter than this is not reported.
-pub const MIN_GAP_MS: u64 = 1_000;
+const MIN_GAP_MS: u64 = 1_000;
 
 /// The audio the transcript lacks: holes of at least [`MIN_GAP_MS`] between consecutive chunks
 /// of one adapter stream, chunks that never reached R2 or the speech model failed on, and

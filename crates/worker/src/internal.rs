@@ -12,7 +12,7 @@ use worker::{Method, ObjectNamespace, Request, RequestInit, Response, Result, St
 use crate::recorder::{Ordered, RequestSeq, Stop};
 
 /// Origin of internal requests to a Durable Object; the object reads only the path.
-pub const ORIGIN: &str = "https://object";
+const ORIGIN: &str = "https://object";
 /// `POST`: create the room's state. Sent once, right after the router created the object.
 pub const INIT: &str = "/init";
 /// `GET`: the room's `meeting_core::http::MeetingLookup`, which the router passes on and the
@@ -36,15 +36,15 @@ pub struct InitRoom {
 
 /// `POST` to the recorder: recording started (again) at `since`. Creates the recorder on the
 /// first call; later calls change nothing.
-pub const RECORDER_START: &str = "/start";
+const RECORDER_START: &str = "/start";
 /// `POST` [`TrackRecording`]: record this audio track.
-pub const RECORDER_TRACK: &str = "/track";
+const RECORDER_TRACK: &str = "/track";
 /// `POST` [`UntrackRecording`]: stop recording this audio track.
-pub const RECORDER_UNTRACK: &str = "/untrack";
+const RECORDER_UNTRACK: &str = "/untrack";
 /// `POST`: stop recording all tracks; the meeting goes on.
-pub const RECORDER_STOP: &str = "/stop";
+const RECORDER_STOP: &str = "/stop";
 /// `POST` [`FinishRecording`]: the meeting ended; start the transcript job.
-pub const RECORDER_END: &str = "/end";
+const RECORDER_END: &str = "/end";
 /// `GET`: the transcript's status, which the router passes on as `GET /api/transcript/:token`.
 pub const RECORDER_STATUS: &str = "/transcript";
 /// `GET`: the transcript files, passed on as `GET /api/transcript/:token/<file>`.

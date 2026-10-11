@@ -40,7 +40,7 @@ const STUN_URL: &str = "stun:stun.cloudflare.com:3478";
 /// and of the `GET /api/ice` answer ([`IceServersBody`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IceServers {
+struct IceServers {
     ice_servers: Vec<IceServer>,
 }
 

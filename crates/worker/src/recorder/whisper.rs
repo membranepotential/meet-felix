@@ -41,7 +41,7 @@ pub trait Transcriber {
 pub struct WhisperTurbo(pub Ai);
 
 /// The model's id on Workers AI.
-pub const WHISPER_TURBO: &str = "@cf/openai/whisper-large-v3-turbo";
+const WHISPER_TURBO: &str = "@cf/openai/whisper-large-v3-turbo";
 
 #[derive(Serialize)]
 struct WhisperInput {
