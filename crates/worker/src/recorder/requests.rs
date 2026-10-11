@@ -9,7 +9,7 @@ use meeting_core::Millis;
 use worker::{Response, Result, console_error, console_log, console_warn};
 
 use super::state::{
-    self, BeforeStart, Job, Ordered, Recorder, RecorderPhase, RequestSeq, TrackPlan,
+    self, BeforeStart, Job, Learned, Ordered, Recorder, RecorderPhase, RequestSeq, TrackPlan,
 };
 use super::streams::StreamKey;
 use super::{Inner, no_content, not_found};
@@ -192,20 +192,24 @@ impl Inner {
         no_content()
     }
 
-    /// The meeting is over: closes every stream, keeps the roster's names and the consent
-    /// record, and starts the transcript job.
+    /// The meeting is over: closes every stream, takes in the room's roster and consent record,
+    /// and starts the transcript job. If the recorder ended the meeting itself, because it
+    /// heard nothing for hours, the record still counts until the transcript is written.
     pub(super) async fn end(self: &Rc<Self>, finish: FinishRecording) -> Result<Response> {
         let Some(mut recorder) = self.load().await? else {
             return not_found();
         };
         if recorder.phase == RecorderPhase::Recording {
             self.finish(&mut recorder, Some(finish), now()).await?;
+        } else if recorder.learn(Learned::Everyone(finish)) {
+            self.save(&recorder).await?;
         }
         no_content()
     }
 
-    /// Ends the recording. `finish` is the room's roster and consent record, which replace what
-    /// the `/track`s carried; without it (the room's `/end` never came) those stay.
+    /// Ends the recording. `finish` is the room's roster and consent record
+    /// ([`Learned::Everyone`]); without it (the room's `/end` never came) the recorder keeps
+    /// what the `/track`s and `/untrack`s said.
     async fn finish(
         self: &Rc<Self>,
         recorder: &mut Recorder,
@@ -214,10 +218,7 @@ impl Inner {
     ) -> Result<()> {
         let closed = recorder.close_adapters(|_| true);
         if let Some(finish) = finish {
-            for entry in finish.roster {
-                recorder.name_speaker(entry);
-            }
-            recorder.consents = finish.consents;
+            recorder.learn(Learned::Everyone(finish));
         }
         recorder.phase = RecorderPhase::Ended {
             at: now,

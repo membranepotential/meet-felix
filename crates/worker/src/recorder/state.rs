@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sfu_api::wire::AdapterId;
 
-use crate::internal::{TrackRecording, UntrackRecording};
+use crate::internal::{FinishRecording, TrackRecording, UntrackRecording};
 use crate::record::{DecodeError, Stored, stored_record, stored_version};
 
 /// The recorder's storage key.
@@ -86,11 +86,11 @@ pub struct Recorder {
     pub started_at: Millis,
     /// The token in the adapters' endpoint URLs (128 bits, hex). Never logged.
     pub secret: String,
-    /// The latest name and role of everyone whose audio was recorded, and at the end everyone
-    /// on the roster.
+    /// Names and roles: of the speakers the room asked to record, and from the room's `/end` of
+    /// everyone on its roster. Written only by [`Recorder::learn`].
     pub speakers: Vec<RosterEntry>,
-    /// The consent record: the speakers' consents as `/track` and `/untrack` carried them,
-    /// replaced at the end by the room's whole record.
+    /// The consent record: of the speakers the room asked to record, and from the room's `/end`
+    /// the whole record. Written only by [`Recorder::learn`].
     #[serde(default)]
     pub consents: Vec<ConsentRecord>,
     pub adapters: Vec<Adapter>,
@@ -224,6 +224,31 @@ pub enum TrackPlan {
     },
 }
 
+/// What a request from the room says about the meeting's people. The room owns names and
+/// consents (the core's roster and consent record); the recorder keeps a copy so that a
+/// transcript can name its speakers and list the consents even if the room's `/end` never
+/// arrives, and takes it in only through [`Recorder::learn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Learned {
+    /// From a `/track`: the speaker's name, role and consent.
+    Speaker {
+        entry: RosterEntry,
+        consent: ConsentRecord,
+    },
+    /// From an `/untrack`: the speaker's consent, which shows a withdrawal.
+    Consent(ConsentRecord),
+    /// From `/end`: the whole roster and consent record, the room's last word.
+    Everyone(FinishRecording),
+}
+
+/// Replaces the item of `items` that `same` picks, or adds `item`.
+fn upsert<T>(items: &mut Vec<T>, item: T, same: impl Fn(&T, &T) -> bool) {
+    match items.iter_mut().find(|known| same(known, &item)) {
+        Some(known) => *known = item,
+        None => items.push(item),
+    }
+}
+
 /// One WebSocket adapter: one speaker's audio track, streamed to
 /// `/rec/{recorder}/{secret}/{who}/{generation}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,20 +333,39 @@ impl Recorder {
             .unwrap_or(0)
     }
 
-    /// Records `consent` as the speaker's current consent.
-    pub fn record_consent(&mut self, consent: ConsentRecord) {
-        match self.consents.iter_mut().find(|c| c.who == consent.who) {
-            Some(known) => *known = consent,
-            None => self.consents.push(consent),
+    /// Takes in what the room said about its people; returns whether anything changed. One
+    /// rule decides, whatever order the requests arrive in:
+    ///
+    /// - While recording, a `/track` or `/untrack` that the numbering let through
+    ///   ([`Recorder::begin_track`], [`Recorder::untrack`]) is the newest the room said about
+    ///   that speaker, so it replaces their entry and consent.
+    /// - `/end` is the room's last request, and the core's roster and consent record hold
+    ///   everyone who ever joined or consented, so it replaces both lists whole, whenever it
+    ///   arrives before the transcript is written, also after the recorder ended a meeting
+    ///   nobody ended.
+    /// - Once the meeting ended, a per-speaker request is older than `/end` and changes
+    ///   nothing.
+    pub fn learn(&mut self, learned: Learned) -> bool {
+        let recording = self.phase == RecorderPhase::Recording;
+        match learned {
+            Learned::Speaker { entry, consent } if recording => {
+                upsert(&mut self.speakers, entry, |a, b| a.id == b.id);
+                upsert(&mut self.consents, consent, |a, b| a.who == b.who);
+            }
+            Learned::Consent(consent) if recording => {
+                upsert(&mut self.consents, consent, |a, b| a.who == b.who);
+            }
+            Learned::Everyone(FinishRecording { roster, consents })
+                if !self.phase.transcript_written() =>
+            {
+                self.speakers = roster;
+                self.consents = consents;
+            }
+            Learned::Speaker { .. } | Learned::Consent(_) | Learned::Everyone(_) => {
+                return false;
+            }
         }
-    }
-
-    /// Records `entry`'s current name and role.
-    pub fn name_speaker(&mut self, entry: RosterEntry) {
-        match self.speakers.iter_mut().find(|s| s.id == entry.id) {
-            Some(known) => *known = entry,
-            None => self.speakers.push(entry),
-        }
+        true
     }
 
     /// Marks the adapters that `which` selects closed; returns those that were open.
@@ -343,12 +387,14 @@ impl Recorder {
             return TrackPlan::Stale;
         }
         self.applied.set_speaker(who, seq);
-        self.name_speaker(RosterEntry {
-            id: who,
-            name: track.name.clone(),
-            role: track.role,
+        self.learn(Learned::Speaker {
+            entry: RosterEntry {
+                id: who,
+                name: track.name.clone(),
+                role: track.role,
+            },
+            consent: track.consent.clone(),
         });
-        self.record_consent(track.consent.clone());
         if self
             .open_adapter(who)
             .is_some_and(|a| a.session == track.session && a.track_name == track.track_name)
@@ -386,7 +432,7 @@ impl Recorder {
         }
         let closed = self.close_adapters(|a| a.who == who);
         if let Some(consent) = &untrack.consent {
-            self.record_consent(consent.clone());
+            self.learn(Learned::Consent(consent.clone()));
         }
         Some(closed)
     }
@@ -447,6 +493,17 @@ pub struct Progress {
 }
 
 impl RecorderPhase {
+    /// Whether the job got past writing the transcript: it is ready, or the job gave up.
+    pub fn transcript_written(&self) -> bool {
+        matches!(
+            self,
+            Self::Ended {
+                job: Job::Ready { .. } | Job::Failed { .. },
+                ..
+            }
+        )
+    }
+
     pub fn status(&self) -> (StatusKind, Option<Millis>, Option<Millis>) {
         match self {
             Self::Recording => (StatusKind::Recording, None, None),
@@ -715,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn adapters_count_generations_per_speaker_and_names_update() {
+    fn adapters_count_generations_per_speaker() {
         let mut recorder = Recorder {
             meeting: MeetingId::from_random([0, 0, 0]),
             started_at: Millis(0),
@@ -738,15 +795,58 @@ mod tests {
         });
         assert_eq!(recorder.next_generation(who), 1);
         assert_eq!(recorder.open_adapter(who), None);
-        let entry = |name: &str| RosterEntry {
-            id: who,
+    }
+
+    fn entry(who: u32, name: &str) -> RosterEntry {
+        RosterEntry {
+            id: ParticipantId(who),
             name: DisplayName::parse(name).unwrap(),
             role: Role::Guest,
+        }
+    }
+
+    #[test]
+    fn the_room_s_end_replaces_the_names_and_consents_and_is_its_last_word() {
+        let mut recorder = empty_recorder();
+        let speaker = |name, withdrawn| Learned::Speaker {
+            entry: entry(0, name),
+            consent: consent(ParticipantId(0), withdrawn),
         };
-        recorder.name_speaker(entry("Ana"));
-        recorder.name_speaker(entry("Anna"));
-        assert_eq!(recorder.speakers.len(), 1);
-        assert_eq!(recorder.speakers[0].name.as_str(), "Anna");
+        // While recording, each request replaces the speaker's entry and consent.
+        assert!(recorder.learn(speaker("Ana", false)));
+        assert!(recorder.learn(speaker("Anna", false)));
+        assert!(recorder.learn(Learned::Consent(consent(ParticipantId(0), true))));
+        assert_eq!(recorder.speakers, [entry(0, "Anna")]);
+        assert_eq!(recorder.consents, [consent(ParticipantId(0), true)]);
+        // The recorder ended a meeting nobody ended; the room's `/end` still arrives.
+        recorder.phase = RecorderPhase::Ended {
+            at: Millis(5),
+            job: Job::Transcribing {
+                retry_at: None,
+                waiting_since: None,
+            },
+        };
+        let end = FinishRecording {
+            roster: vec![entry(0, "Anna"), entry(1, "Bo")],
+            consents: vec![consent(ParticipantId(0), false)],
+        };
+        assert!(recorder.learn(Learned::Everyone(end.clone())));
+        assert_eq!(recorder.speakers, end.roster);
+        assert_eq!(recorder.consents, end.consents);
+        // A per-speaker request that arrives after the end is older than it.
+        assert!(!recorder.learn(Learned::Consent(consent(ParticipantId(0), true))));
+        assert!(!recorder.learn(speaker("Ann", true)));
+        assert_eq!(recorder.consents, end.consents);
+        // Once the transcript is written, nothing changes it.
+        recorder.phase = RecorderPhase::Ended {
+            at: Millis(5),
+            job: Job::Failed { at: Millis(6) },
+        };
+        assert!(!recorder.learn(Learned::Everyone(FinishRecording {
+            roster: Vec::new(),
+            consents: Vec::new(),
+        })));
+        assert_eq!(recorder.speakers, end.roster);
     }
 
     /// A request from the room, as the recorder receives it.

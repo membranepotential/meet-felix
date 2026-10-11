@@ -111,7 +111,16 @@ room sends each speaker's name and consent with every `/track` and the
 current consent with every `/untrack`, so the recorder holds them even if the
 final `/end` (`Effect::FinishRecording`, the whole roster and consent record)
 never arrives; a failed `/end` is kept in the room's ended record and sent
-once more by the room's alarm 30 s later.
+once more by the room's alarm 30 s later. The recorder takes all three in
+through one rule, `Recorder::learn` (2026-10-11, audit finding P2-009):
+while recording, a `/track` or `/untrack` that the request numbers let
+through replaces that speaker's name and consent; `/end` replaces both lists
+whole, whenever it arrives before the transcript is written (also after the
+recorder ended a meeting nobody ended); and once the meeting ended, a
+per-speaker request is older than `/end` and changes nothing. Until then,
+`/end` was merged into the names, overwrote the consents, and was dropped if
+the recorder had ended the meeting itself, and a late `/untrack` could
+overwrite a consent `/end` had set.
 
 The recorder never records more than in-order delivery of the room's
 requests would (2026-10-11, audit finding P1-002). The room carries out a
