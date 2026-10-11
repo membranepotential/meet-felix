@@ -1222,6 +1222,16 @@ impl Sim {
             }
         }
 
+        // The view flags exactly those a running recording leaves out for lack of consent: the
+        // ones it asked for consent (above), admitted or waiting for it.
+        for view in after.view().participants {
+            let p = &after.participants[&view.id];
+            let expected = recording
+                && !p.consents()
+                && (p.connection.is_admitted() || p.connection == Connection::AwaitingConsent);
+            prop_assert_eq!(view.awaiting_consent, expected, "{:?}", view.id);
+        }
+
         self.check_grace(before, event, effects)?;
 
         // No negotiation older than the timeout, and no due request for a replacement session,

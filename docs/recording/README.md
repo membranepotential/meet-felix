@@ -75,9 +75,12 @@ Research: [09 — post-meeting transcription and recording](../research/09-post-
   consent, so they can stop the recording; they are muted and not recorded
   like everyone else without consent.
 - Hosts see who has not accepted the running recording (as built
-  2026-10-10). The web app derives the list from the room view: every other
-  participant with `consentRecording` false who is joined, connecting, or
-  waiting in `AwaitingConsent`; knocking guests keep their knock request. A
+  2026-10-10). The list comes from the room view: every other participant
+  with `consentRecording` false who is joined, connecting, or waiting in
+  `AwaitingConsent`; knocking guests keep their knock request. The core
+  computes that rule into the view's `awaitingConsent` flag on each
+  participant (2026-10-11); the web app first derived it itself and is to
+  read the flag. A
   host sees one notice in the pills above the control bar, "Anna and Bo have
   not accepted the recording yet", without a button, because only they can
   accept; it goes away when they accept, leave, or recording stops. The

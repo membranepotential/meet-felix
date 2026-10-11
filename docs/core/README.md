@@ -445,6 +445,15 @@ muted it while the socket was down, or the room records without its
 consent), it switches the microphone off; if its microphone is off and the
 room shows it on (switched off before joining or while the socket was down),
 it sends `SetMuted` (`syncMute` in `web/src/lib/client-state.ts`, 2026-10-10).
+A mute switch made while the socket was down is reported instead (the client
+remembers the flag that last reached the room).
+
+The room view marks whom a running recording leaves out: `awaitingConsent` on
+a participant is true while a recording runs, they have not consented, and
+they are admitted or waiting for their consent (a knocking guest or one
+waiting for the host is not marked). The core computes it from its own
+consent rule (`RoomState::lacks_consent`), so a client lists those people
+without re-deriving the rule (2026-10-11).
 
 A `Join` from a participant still in the room changes nothing and gets the
 same answer again (`Welcome`, `Waiting`, or `ConsentRequired`), unless it
@@ -643,9 +652,11 @@ already treated as final: such a client stops on `Outdated` and shows its
 reason, "This page is out of date. Reload it to join the meeting." A current
 client reloads the page itself, at most once in five minutes per tab, so a
 cached old app cannot make it loop; otherwise the end screen asks the user.
-The web client starts its reconnect backoff over only when the room answered
-a `Join` with something other than an error, so a join the room keeps
-refusing is retried less and less often, up to every 10 seconds.
+The web client starts its reconnect backoff over only once the room placed
+the participant (`Welcome` or `Waiting`), so a join the room keeps refusing
+is retried less and less often, up to every 10 seconds; `ConsentRequired`
+does not count, because a host gets it before the room asks the SFU for
+sessions (2026-10-11).
 
 Why: the client keyed "do not come back" on 4000–4099, but the room closed
 every socket with 1000 or 1001, so the rule never applied, and a join the SFU

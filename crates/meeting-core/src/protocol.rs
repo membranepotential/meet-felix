@@ -206,6 +206,14 @@ pub struct ParticipantView {
     /// client to come back. They stay joined meanwhile, and their tracks stay listed, but what
     /// others receive from them may be frozen or silent.
     pub reconnecting: bool,
+    /// Whether a running recording leaves them out because they have not consented (D15): they
+    /// are admitted (muted and not recorded) or let in but waiting for their consent. A host's
+    /// client lists them. Always false while nothing records, for a participant who consents,
+    /// and for one still waiting for the host or knocking. Absent in views sent before the
+    /// field existed, which read as false.
+    #[serde(default)]
+    #[cfg_attr(feature = "wasm", tsify(optional))]
+    pub awaiting_consent: bool,
 }
 
 /// The public snapshot of a room: no secrets, no SDP, no SFU sessions.

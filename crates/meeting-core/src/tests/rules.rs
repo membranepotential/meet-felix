@@ -738,6 +738,49 @@ fn ending_closes_every_participants_socket_before_the_meeting_ends_so_the_shell_
 }
 
 #[test]
+fn the_view_flags_whoever_a_running_recording_leaves_out_for_lack_of_consent() {
+    let flagged = |room: &Room| -> Vec<ParticipantId> {
+        room.state
+            .view()
+            .participants
+            .iter()
+            .filter(|p| p.awaiting_consent)
+            .map(|p| p.id)
+            .collect()
+    };
+    let mut room = meeting_room();
+    // A guest who joined without consent, before anything records.
+    room.join(OTHER, false, false);
+    room.connect(OTHER);
+    assert_eq!(flagged(&room), [], "nothing records yet");
+
+    // The recording starts: those without consent are left out, the consenting are not.
+    room.client(HOST, ClientMsg::SetRecording { on: true });
+    assert_eq!(flagged(&room), [OTHER]);
+    assert!(
+        room.state
+            .view()
+            .participants
+            .iter()
+            .all(|p| p.consent_recording != p.awaiting_consent)
+    );
+
+    // A guest knocking at a locked room is not left out by the recording yet.
+    room.client(HOST, ClientMsg::Lock { on: true });
+    room.join(ParticipantId(4), false, false);
+    assert_eq!(presence(&room, ParticipantId(4)), Some(Presence::Knocking));
+    assert_eq!(flagged(&room), [OTHER]);
+
+    // Consent takes the guest off the list; so does the recording stopping.
+    room.client(OTHER, ClientMsg::SetConsent { consent: true });
+    assert_eq!(flagged(&room), []);
+    room.client(OTHER, ClientMsg::SetConsent { consent: false });
+    assert_eq!(flagged(&room), [OTHER]);
+    room.client(HOST, ClientMsg::SetRecording { on: false });
+    assert_eq!(flagged(&room), []);
+}
+
+#[test]
 fn a_full_room_refuses_new_guests_but_never_the_owner_or_a_resume() {
     let mut room = meeting_room();
     let guest_token = room

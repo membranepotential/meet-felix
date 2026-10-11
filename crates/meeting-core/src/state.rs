@@ -427,6 +427,9 @@ impl RoomState {
                     tracks,
                     muted: p.muted,
                     reconnecting: p.connection.socket_lost().is_some(),
+                    awaiting_consent: self.lacks_consent(id)
+                        && (p.connection.is_admitted()
+                            || p.connection == Connection::AwaitingConsent),
                 })
             })
             .collect();
