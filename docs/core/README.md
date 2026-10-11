@@ -449,7 +449,7 @@ A mute switch made while the socket was down is reported instead (the client
 remembers the flag that last reached the room).
 
 The room view marks whom a running recording leaves out: `awaitingConsent` on
-a participant is true while a recording runs, they have not consented, and
+a participant (left out of the JSON while false) is true while a recording runs, they have not consented, and
 they are admitted or waiting for their consent (a knocking guest or one
 waiting for the host is not marked). The core computes it from its own
 consent rule (`RoomState::lacks_consent`), so a client lists those people

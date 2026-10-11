@@ -209,9 +209,9 @@ pub struct ParticipantView {
     /// Whether a running recording leaves them out because they have not consented (D15): they
     /// are admitted (muted and not recorded) or let in but waiting for their consent. A host's
     /// client lists them. Always false while nothing records, for a participant who consents,
-    /// and for one still waiting for the host or knocking. Absent in views sent before the
-    /// field existed, which read as false.
-    #[serde(default)]
+    /// and for one still waiting for the host or knocking. Left out of the JSON while false,
+    /// as views sent before the field existed leave it out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "wasm", tsify(optional))]
     pub awaiting_consent: bool,
 }

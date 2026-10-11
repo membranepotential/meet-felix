@@ -156,6 +156,26 @@ fn json_uses_camel_case_tags_and_omits_absent_options() {
     assert!(
         serde_json::from_str::<ClientMsg>(r#"{"type":"join","name":"","consent":true}"#).is_err()
     );
+    // `awaitingConsent` is left out while false, and an older view without it reads as false.
+    let view = |awaiting_consent| crate::ParticipantView {
+        id: crate::ParticipantId(1),
+        name: super::support::name("Ada"),
+        role: crate::Role::Guest,
+        consent_recording: false,
+        presence: crate::Presence::Joined,
+        tracks: Vec::new(),
+        muted: false,
+        reconnecting: false,
+        awaiting_consent,
+    };
+    let json = |v| serde_json::to_string(&v).expect("serializable");
+    assert!(!json(view(false)).contains("awaitingConsent"));
+    assert!(json(view(true)).contains(r#""awaitingConsent":true"#));
+    let old = json(view(false));
+    assert_eq!(
+        serde_json::from_str::<crate::ParticipantView>(&old).expect("valid"),
+        view(false)
+    );
     let ended =
         serde_json::to_string(&ServerMsg::Ended { transcript: None }).expect("serializable");
     assert_eq!(ended, r#"{"type":"ended"}"#);
