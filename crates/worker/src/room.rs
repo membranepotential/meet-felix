@@ -11,14 +11,14 @@
 //!
 //! The recording effects go to the meeting's `RecorderObject` (`crate::recorder`), which the
 //! room creates at the first `StartRecording` and remembers in its record; they are carried out
-//! with the SFU calls, after the socket effects.
+//! with the SFU calls, after the socket effects. They carry everything the recorder needs, so
+//! the room only adds the recorder's id and each request's number.
 
 use std::collections::VecDeque;
 
-use meeting_core::recording::{ConsentRecord, RosterEntry};
 use meeting_core::{
-    ClientMsg, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
-    RecordingPolicy, RoomState, ServerMsg, SfuReply, TranscriptRef,
+    ClientMsg, CloseCode, Effect, ErrorCode, Event, FailureCause, MeetingId, Millis, ParticipantId,
+    RecordingPolicy, RoomState, ServerMsg, SfuReply, Target, TranscriptRef,
 };
 use serde::Serialize;
 use sfu_api::{Failure, failure_reply};
@@ -36,11 +36,11 @@ use crate::internal::{
     TrackRecording, UntrackRecording,
 };
 use crate::record::{
-    Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS,
-    JOIN_TIMEOUT_MS, MessageBudget, OpenRoom, OpenSocket, PendingFinish, Record, Write, alarm_time,
-    crowded_out, is_recording, is_stale, is_unbound, join_overdue, write_for,
+    Attachment, Decoded, ENDED_RETENTION_MS, EndedAlarm, EndedRoom, FINISH_RETRY_MS, MessageBudget,
+    OpenRoom, OpenSocket, PendingFinish, Record, RecorderLink, Stepped, Write, crowded_out,
+    is_stale, is_unbound, join_overdue, write_for,
 };
-use crate::recorder::{Ordered, RequestSeq, Stop};
+use crate::recorder::{Ordered, Stop};
 use crate::{
     Jurisdiction, MEETINGS, RECORDERS, ROOM_JURISDICTION, is_websocket_upgrade, now, random, sfu,
     transcript_key,
@@ -56,8 +56,9 @@ const PONG: &str = r#"{"type":"pong"}"#;
 /// replies. The core never chains more than a few; this only stops a runaway loop.
 const MAX_SFU_CALLS: usize = 64;
 
-/// Close code for sockets the room closes: normal closure.
-const CLOSE_NORMAL: u16 = 1000;
+/// How much of a frame's parse error the log quotes: enough for the field and the problem,
+/// too little for the SDP a malformed offer may carry.
+const LOGGED_ERROR_CHARS: usize = 160;
 
 #[durable_object]
 pub struct RoomObject {
@@ -104,22 +105,29 @@ impl DurableObject for RoomObject {
                 event: Event::SocketClosed {
                     who: socket.participant,
                 },
-                close: Some((ws, Closing::OverBudget)),
+                close: Some((ws, CloseCode::OverBudget)),
             };
             return self.run(VecDeque::from([input])).await;
         };
         ws.serialize_attachment(Attachment::Open(OpenSocket { budget, ..socket }))?;
-        let msg = match message {
-            WebSocketIncomingMessage::String(text) => serde_json::from_str::<ClientMsg>(&text).ok(),
-            WebSocketIncomingMessage::Binary(_) => None,
+        let parsed = match message {
+            WebSocketIncomingMessage::String(text) => {
+                serde_json::from_str::<ClientMsg>(&text).map_err(|e| e.to_string())
+            }
+            WebSocketIncomingMessage::Binary(_) => Err("a binary frame".to_owned()),
         };
-        let Some(msg) = msg else {
-            return send(
-                &ws,
-                &ServerMsg::Error {
-                    code: ErrorCode::MalformedMessage,
-                },
-            );
+        let msg = match parsed {
+            Ok(msg) => msg,
+            Err(error) => {
+                let error: String = error.chars().take(LOGGED_ERROR_CHARS).collect();
+                console_warn!("{:?} sent a malformed message: {error}", socket.participant);
+                return send(
+                    &ws,
+                    &ServerMsg::Error {
+                        code: ErrorCode::MalformedMessage,
+                    },
+                );
+            }
         };
         self.handle([Event::Client {
             from: socket.participant,
@@ -147,7 +155,9 @@ impl DurableObject for RoomObject {
     ) -> Result<()> {
         console_log!("websocket_close: code {code}, clean {was_clean}");
         let gone = self.socket_gone(&ws).await;
-        if let Err(e) = ws.close(Some(CLOSE_NORMAL), Some("bye")) {
+        // The answer to the client's close: a normal closure.
+        let normal = CloseCode::Left;
+        if let Err(e) = ws.close(Some(normal.code()), Some(normal.reason())) {
             console_warn!("websocket_close: close failed: {e}");
         }
         gone
@@ -172,11 +182,13 @@ impl DurableObject for RoomObject {
 }
 
 impl RoomObject {
-    /// The alarm of an open room, for the core's alarm or the keepalive check, whichever is
-    /// earlier. Lets the core handle whatever is due (a spurious `AlarmFired` is harmless),
-    /// reports and closes sockets whose client stopped pinging, closes sockets that are bound to
-    /// nobody in the room after [`JOIN_TIMEOUT_MS`], and arms the next alarm. If the meeting
-    /// ends meanwhile, `EndMeeting` armed the ended room's alarm already.
+    /// The alarm of an open room, for whichever is earliest of the core's alarm, a socket that
+    /// may have gone stale, and a socket whose time to join is over. Lets the core handle
+    /// whatever is due (a spurious `AlarmFired` is harmless), reports and closes sockets whose
+    /// client stopped pinging, closes sockets that are bound to nobody in the room after
+    /// [`crate::record::JOIN_TIMEOUT_MS`], reports participants who have no socket at all
+    /// ([`OpenRoom::orphans`]), and arms the next alarm. If the meeting ends meanwhile,
+    /// `EndMeeting` armed the ended room's alarm already.
     ///
     /// A stale socket is closed only once the step that reports it is stored: if storing fails,
     /// the runtime retries the alarm, which must still find the socket open and stale. An
@@ -188,28 +200,32 @@ impl RoomObject {
             .open_sockets()
             .filter(|(_, socket)| is_unbound(socket, &present) && join_overdue(now, socket.since))
         {
-            close(&ws, Closing::NoJoin.code(), Closing::NoJoin.reason());
+            close(&ws, CloseCode::NoJoin);
         }
-        let stale = self
-            .open_sockets()
+        let sockets: Vec<_> = self.open_sockets().collect();
+        let attached: Vec<OpenSocket> = sockets.iter().map(|(_, socket)| *socket).collect();
+        let orphans = open
+            .orphans(&attached)
+            .into_iter()
+            .map(|who| Input::from(Event::SocketClosed { who }));
+        let stale = sockets
+            .into_iter()
             .filter(|(ws, socket)| is_stale(now, socket.since, last_ping(&self.state, ws)))
             .map(|(ws, socket)| Input {
                 event: Event::SocketClosed {
                     who: socket.participant,
                 },
-                close: Some((ws, Closing::Stale)),
+                close: Some((ws, CloseCode::Stale)),
             });
-        // The stale reports go first: they make no SFU call, while `AlarmFired` may (a grace
-        // that expires closes tracks), and a client could resume on a new socket during that
-        // call. `run` also drops a report whose socket the resume closed meanwhile.
-        let inputs: VecDeque<Input> = stale
+        // The reports go first: they make no SFU call, while `AlarmFired` may (a grace that
+        // expires closes tracks), and a client could resume on a new socket during that call.
+        // `run` also drops a report whose socket the resume closed meanwhile.
+        let inputs: VecDeque<Input> = orphans
+            .chain(stale)
             .chain(std::iter::once(Input::from(Event::AlarmFired)))
             .collect();
         self.run(inputs).await?;
-        if let Some(Record::Open(open)) = self.load().await? {
-            self.arm(open.alarm).await?;
-        }
-        Ok(())
+        self.arm().await
     }
 
     /// The alarm of an ended room: sends a pending `/end` once more and waits the retention
@@ -264,7 +280,7 @@ impl RoomObject {
     /// id; `owner` says whether the router verified the owner's session on it. Never refuses
     /// one, as it may be a client resuming its place (D35): to keep the sockets bounded, it
     /// closes the oldest sockets bound to nobody in the room instead ([`crowded_out`]), and the
-    /// alarm closes such a socket once [`JOIN_TIMEOUT_MS`] passed without a `Join`.
+    /// alarm closes such a socket once [`crate::record::JOIN_TIMEOUT_MS`] passed without a `Join`.
     async fn accept(&self, owner: bool) -> Result<Response> {
         let open = match self.load().await? {
             None => return Response::error("unknown meeting", 404),
@@ -277,24 +293,21 @@ impl RoomObject {
             .filter(|(_, socket)| is_unbound(socket, &present))
             .collect();
         for ws in crowded_out(unbound) {
-            close(&ws, Closing::Crowded.code(), Closing::Crowded.reason());
+            close(&ws, CloseCode::Crowded);
         }
-        let now = now();
-        let join_deadline = now.after(JOIN_TIMEOUT_MS + 1);
-        let alarm = open.alarm.map_or(join_deadline, |at| at.min(join_deadline));
         let (record, participant) = open.connect();
         self.store(&record).await?;
         let WebSocketPair { client, server } = WebSocketPair::new()?;
         self.state.accept_web_socket(&server);
         server.serialize_attachment(Attachment::Open(OpenSocket {
             participant,
-            since: now,
+            since: now(),
             owner,
             budget: MessageBudget::default(),
         }))?;
-        // Wakes the room when the socket's time to join is over; a spurious `AlarmFired` is
-        // harmless to the core.
-        self.arm(Some(alarm)).await?;
+        // Wakes the room when the socket's time to join is over, unless the alarm is due
+        // earlier anyway; a spurious `AlarmFired` is harmless to the core.
+        self.arm().await?;
         Response::from_websocket(client)
     }
 
@@ -340,18 +353,15 @@ impl RoomObject {
                 return Ok(());
             };
             let now = now();
-            let before = Before {
-                recorder: open.recorder.clone(),
-                meeting: open.room.meeting().clone(),
-                transcript: open.room.transcript().clone(),
-                next_request: open.first_recorder_request(now),
-            };
             let writer = match &event {
                 Event::Client { from, .. } => Some(*from),
                 _ => None,
             };
-            let (mut record, effects) = open.step(now, event);
-            let recorder = self.recorder_link(before, &mut record, &effects);
+            let Stepped {
+                mut record,
+                effects,
+                recorder,
+            } = open.step(now, event, || self.new_recorder());
             match write_for(&stored, &mut record, writer, now)? {
                 Write::Skip => {}
                 Write::Store(json) => self.state.storage().put(Record::KEY, json).await?,
@@ -364,14 +374,14 @@ impl RoomObject {
                             .filter(|(_, s)| s.participant == who)
                             .map(|(ws, _)| Input {
                                 event: Event::SocketClosed { who },
-                                close: Some((ws, Closing::OverBudget)),
+                                close: Some((ws, CloseCode::OverBudget)),
                             }),
                     );
                     continue;
                 }
             }
             if let Some((ws, why)) = close {
-                self::close(&ws, why.code(), why.reason());
+                self::close(&ws, why);
             }
             let replies = self.execute_step(effects, recorder, &mut sfu_calls).await?;
             queue.extend(
@@ -383,71 +393,24 @@ impl RoomObject {
         Ok(())
     }
 
-    /// What the room needs to carry out a step's recording effects, or `None` if it has none.
-    /// Creates the recorder's id at the first `StartRecording` and keeps it in the record;
-    /// `before` is what the record held before the step, which an ending step's record no
-    /// longer holds.
-    fn recorder_link(
-        &self,
-        before: Before,
-        record: &mut Record,
-        effects: &[Effect],
-    ) -> Option<RecorderLink> {
-        let Before {
-            recorder: id,
-            meeting,
-            transcript,
-            next_request,
-        } = before;
-        if !effects.iter().any(is_recording) {
-            return None;
-        }
-        let id = match id {
-            Some(id) => id,
-            None if effects
-                .iter()
-                .any(|e| matches!(e, Effect::StartRecording { .. })) =>
-            {
-                match self.new_recorder() {
-                    Ok(id) => id,
-                    Err(e) => {
-                        console_error!("creating the recorder failed: {e}");
-                        return None;
-                    }
+    /// A new `RecorderObject` id in the rooms' jurisdiction; `None`, logged, if the runtime
+    /// cannot make one. The meeting then goes on without its recording.
+    fn new_recorder(&self) -> Option<String> {
+        let id = || -> Result<String> {
+            let jurisdiction =
+                Jurisdiction::from_var(&self.env.var(ROOM_JURISDICTION)?.to_string())
+                    .map_err(worker::Error::RustError)?;
+            let recorders = self.env.durable_object(RECORDERS)?;
+            let id = match jurisdiction {
+                None => recorders.unique_id()?,
+                Some(jurisdiction) => {
+                    recorders.unique_id_with_jurisdiction(jurisdiction.as_str())?
                 }
-            }
-            None => {
-                console_error!("a recording effect without a recorder");
-                return None;
-            }
+            };
+            Ok(id.to_string())
         };
-        let (roster, consents) = match record {
-            Record::Open(open) => {
-                open.recorder = Some(id.clone());
-                (open.room.roster(), open.room.consents())
-            }
-            Record::Ended(_) => (Vec::new(), Vec::new()),
-        };
-        Some(RecorderLink {
-            id,
-            meeting,
-            transcript,
-            roster,
-            consents,
-            next_request,
-        })
-    }
-
-    /// A new `RecorderObject` id in the rooms' jurisdiction.
-    fn new_recorder(&self) -> Result<String> {
-        let jurisdiction = Jurisdiction::from_var(&self.env.var(ROOM_JURISDICTION)?.to_string())
-            .map_err(worker::Error::RustError)?;
-        let recorders = self.env.durable_object(RECORDERS)?;
-        let id = match jurisdiction {
-            None => recorders.unique_id()?,
-            Some(jurisdiction) => recorders.unique_id_with_jurisdiction(jurisdiction.as_str())?,
-        };
-        Ok(id.to_string())
+        id().inspect_err(|e| console_error!("creating the recorder failed: {e}"))
+            .ok()
     }
 
     /// Carries out one step's effects and returns the SFU replies to feed back.
@@ -458,20 +421,26 @@ impl RoomObject {
     /// replaced socket send a `Join` first and come back as a participant whose close is never
     /// reported. The core gets SFU replies back as events, so nothing it emits depends on how
     /// the two groups interleave. Recorder calls of different steps may still reach the
-    /// recorder out of order; each carries its number for that ([`RecorderLink::next_request`]).
+    /// recorder out of order; each carries its number for that
+    /// ([`RecorderLink::first_request`]).
     async fn execute_step(
         &self,
         effects: Vec<Effect>,
-        mut recorder: Option<RecorderLink>,
+        recorder: Option<RecorderLink>,
         sfu_calls: &mut usize,
     ) -> Result<Vec<SfuReply>> {
         // `partition` keeps the order, and every recorder call is remote, so the recorder calls
         // run in effect order and take their numbers in the order `OpenRoom::step` counted.
-        let (remote, local): (Vec<Effect>, Vec<Effect>) =
-            effects.into_iter().partition(is_remote_call);
+        let (remote, local): (Vec<Effect>, Vec<Effect>) = effects
+            .into_iter()
+            .partition(|effect| effect.target() != Target::Room);
+        let mut requests = recorder.map(|link| Requests {
+            next: link.first_request,
+            recorder: link.id,
+        });
         let mut replies = Vec::new();
         for effect in local.into_iter().chain(remote) {
-            replies.extend(self.execute(effect, recorder.as_mut(), sfu_calls).await?);
+            replies.extend(self.execute(effect, requests.as_mut(), sfu_calls).await?);
         }
         Ok(replies)
     }
@@ -480,15 +449,15 @@ impl RoomObject {
     async fn execute(
         &self,
         effect: Effect,
-        recorder: Option<&mut RecorderLink>,
+        recorder: Option<&mut Requests>,
         sfu_calls: &mut usize,
     ) -> Result<Option<SfuReply>> {
         match effect {
             Effect::Send { to, msg } => self.send_to(&[to], &msg)?,
             Effect::Broadcast { to, msg } => self.send_to(&to, &msg)?,
-            Effect::CloseSocket { who } => {
+            Effect::CloseSocket { who, why } => {
                 for (ws, _) in self.open_sockets().filter(|(_, s)| s.participant == who) {
-                    close(&ws, CLOSE_NORMAL, "closed by the room");
+                    close(&ws, why);
                 }
             }
             Effect::Rebind {
@@ -503,7 +472,8 @@ impl RoomObject {
                     }))?;
                 }
             }
-            Effect::SetAlarm { at } => self.arm(Some(at)).await?,
+            // The stored record holds the core's time; `arm` adds the sockets' times.
+            Effect::SetAlarm { .. } => self.arm().await?,
             Effect::StartRecording { .. }
             | Effect::RecordTrack { .. }
             | Effect::StopRecordingTrack { .. }
@@ -522,7 +492,7 @@ impl RoomObject {
             }
             Effect::EndMeeting => {
                 for (ws, _) in self.open_sockets() {
-                    close(&ws, CLOSE_NORMAL, "meeting ended");
+                    close(&ws, CloseCode::Ended);
                 }
                 // Replaces the core's last alarm; a failed `/end` re-arms it sooner.
                 self.delete_later().await?;
@@ -539,66 +509,65 @@ impl RoomObject {
 
     /// Carries out a recording effect at the recorder, with the effect's number. Failures are
     /// logged, not returned: the meeting goes on without its recording rather than failing.
-    async fn tell_recorder(&self, recorder: &mut RecorderLink, effect: Effect) {
+    async fn tell_recorder(&self, requests: &mut Requests, effect: Effect) {
         // Taken first, so every recording effect uses up its number as `OpenRoom::step` counted.
-        let seq = recorder.next_request;
-        recorder.next_request = seq.after(1);
+        let seq = requests.next;
+        requests.next = seq.after(1);
+        let recorder = requests.recorder.as_str();
         let told = match effect {
-            Effect::StartRecording { since } => {
+            Effect::StartRecording {
+                since,
+                meeting,
+                transcript,
+            } => {
                 // The link works from now on, showing "recording" until the meeting ends.
-                self.link_transcript(recorder).await;
-                let start = StartRecording {
-                    meeting: recorder.meeting.clone(),
-                    since,
-                };
-                self.post_recorder(&recorder.id, RECORDER_START, &start)
-                    .await
+                self.link_transcript(recorder, &meeting, &transcript).await;
+                let start = StartRecording { meeting, since };
+                self.post_recorder(recorder, RECORDER_START, &start).await
             }
-            Effect::RecordTrack { who, track } => {
-                let entry = recorder.roster.iter().find(|e| e.id == who);
-                let consent = recorder.consents.iter().find(|c| c.who == who);
-                let (Some(entry), Some(consent)) = (entry, consent) else {
-                    console_error!("recording {who:?}, who has no name or consent on record");
-                    return;
-                };
+            Effect::RecordTrack {
+                speaker,
+                consent,
+                track,
+            } => {
                 let request = TrackRecording {
-                    who,
-                    name: entry.name.clone(),
-                    role: entry.role,
-                    consent: consent.clone(),
+                    who: speaker.id,
+                    name: speaker.name,
+                    role: speaker.role,
+                    consent,
                     session: track.session,
                     track_name: track.name,
                 };
                 let body = Ordered { seq, request };
-                self.post_recorder(&recorder.id, RECORDER_TRACK, &body)
-                    .await
+                self.post_recorder(recorder, RECORDER_TRACK, &body).await
             }
-            Effect::StopRecordingTrack { who, track } => {
+            Effect::StopRecordingTrack {
+                who,
+                track,
+                consent,
+            } => {
                 let request = UntrackRecording {
                     who,
                     session: track.session,
                     track_name: track.name,
-                    consent: recorder.consents.iter().find(|c| c.who == who).cloned(),
+                    consent,
                 };
                 let body = Ordered { seq, request };
-                self.post_recorder(&recorder.id, RECORDER_UNTRACK, &body)
-                    .await
+                self.post_recorder(recorder, RECORDER_UNTRACK, &body).await
             }
             Effect::StopRecording => {
                 let body = Ordered {
                     seq,
                     request: Stop {},
                 };
-                self.post_recorder(&recorder.id, RECORDER_STOP, &body).await
+                self.post_recorder(recorder, RECORDER_STOP, &body).await
             }
             Effect::FinishRecording { roster, consents } => {
                 let finish = FinishRecording { roster, consents };
-                let finished = self
-                    .post_recorder(&recorder.id, RECORDER_END, &finish)
-                    .await;
+                let finished = self.post_recorder(recorder, RECORDER_END, &finish).await;
                 if finished.is_err() {
                     let pending = PendingFinish {
-                        recorder: recorder.id.clone(),
+                        recorder: recorder.to_owned(),
                         finish,
                     };
                     if let Err(e) = self.finish_later(pending).await {
@@ -649,20 +618,22 @@ impl RoomObject {
     /// Maps the transcript token to the recorder in KV, for `GET /api/transcript/:token`. The
     /// entry has no expiry: transcripts stay until the owner deletes them (D18). Logged on failure
     /// without the token, which is the link's only secret.
-    async fn link_transcript(&self, recorder: &RecorderLink) {
+    async fn link_transcript(
+        &self,
+        recorder: &str,
+        meeting: &MeetingId,
+        transcript: &TranscriptRef,
+    ) {
         let linked = async {
             self.env
                 .kv(MEETINGS)?
-                .put(&transcript_key(&recorder.transcript), &recorder.id)?
+                .put(&transcript_key(transcript), recorder)?
                 .execute()
                 .await?;
             Ok::<(), worker::Error>(())
         };
         if let Err(e) = linked.await {
-            console_error!(
-                "linking the transcript of {:?} failed: {e}",
-                recorder.meeting
-            );
+            console_error!("linking the transcript of {meeting:?} failed: {e}");
         }
     }
 
@@ -708,12 +679,19 @@ impl RoomObject {
         Ok(())
     }
 
-    /// Sets the object's alarm to the earlier of `core` and the next keepalive check.
-    async fn arm(&self, core: Option<Millis>) -> Result<()> {
-        let now = now();
-        let open_sockets = self.open_sockets().next().is_some();
-        if let Some(at) = alarm_time(core, open_sockets, now) {
-            let offset = i64::try_from(at.0.saturating_sub(now.0)).unwrap_or(i64::MAX);
+    /// Sets the object's alarm of an open room to [`OpenRoom::alarm_time`] over the stored
+    /// record and the open sockets. That time covers every reason the alarm serves, so it
+    /// replaces whatever was set before: an earlier time that is still needed is part of it.
+    async fn arm(&self) -> Result<()> {
+        let Some(Record::Open(open)) = self.load().await? else {
+            return Ok(());
+        };
+        let sockets: Vec<_> = self
+            .open_sockets()
+            .map(|(ws, socket)| (socket, last_ping(&self.state, &ws)))
+            .collect();
+        if let Some(at) = open.alarm_time(&sockets) {
+            let offset = i64::try_from(at.0.saturating_sub(now().0)).unwrap_or(i64::MAX);
             self.state.storage().set_alarm(offset).await?;
         }
         Ok(())
@@ -789,7 +767,7 @@ impl RoomObject {
 /// step reporting it is stored.
 struct Input {
     event: Event,
-    close: Option<(WebSocket, Closing)>,
+    close: Option<(WebSocket, CloseCode)>,
 }
 
 impl From<Event> for Input {
@@ -798,85 +776,11 @@ impl From<Event> for Input {
     }
 }
 
-/// Why the room closes a socket of its own accord.
-#[derive(Debug, Clone, Copy)]
-enum Closing {
-    /// The client stopped pinging.
-    Stale,
-    /// The client sent more than its message budget.
-    OverBudget,
-    /// The socket is bound to nobody in the room after [`JOIN_TIMEOUT_MS`].
-    NoJoin,
-    /// The socket is the oldest of too many bound to nobody in the room ([`crowded_out`]).
-    Crowded,
-}
-
-impl Closing {
-    fn code(self) -> u16 {
-        match self {
-            // Going away.
-            Self::Stale => 1001,
-            // Policy violation.
-            Self::OverBudget | Self::NoJoin | Self::Crowded => 1008,
-        }
-    }
-
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Stale => "no ping",
-            Self::OverBudget => "too many messages",
-            Self::NoJoin => "no join",
-            Self::Crowded => "too many sockets",
-        }
-    }
-}
-
-/// What the room needs to carry out one step's recording effects.
-struct RecorderLink {
+/// Where one step's recorder requests go: the recorder, and the number the next one carries.
+struct Requests {
     /// The `RecorderObject`'s id (hex).
-    id: String,
-    meeting: MeetingId,
-    transcript: TranscriptRef,
-    /// The room's roster after the step, for the speakers' names.
-    roster: Vec<RosterEntry>,
-    /// The room's consent record after the step.
-    consents: Vec<ConsentRecord>,
-    /// The number the step's next recorder call carries.
-    next_request: RequestSeq,
-}
-
-/// What [`RoomObject::recorder_link`] needs from the record as it was before the step.
-struct Before {
-    recorder: Option<String>,
-    meeting: MeetingId,
-    transcript: TranscriptRef,
-    /// The number of the step's first recorder call.
-    next_request: RequestSeq,
-}
-
-/// Whether `effect` is an SFU or recorder call, carried out after the step's other effects
-/// ([`RoomObject::execute_step`]).
-fn is_remote_call(effect: &Effect) -> bool {
-    match effect {
-        Effect::SfuNewSession { .. }
-        | Effect::SfuPublish { .. }
-        | Effect::SfuSubscribe { .. }
-        | Effect::SfuRenegotiate { .. }
-        | Effect::SfuCloseTracks { .. }
-        | Effect::SfuUpdateLayer { .. }
-        | Effect::StartRecording { .. }
-        | Effect::RecordTrack { .. }
-        | Effect::StopRecordingTrack { .. }
-        | Effect::StopRecording
-        | Effect::FinishRecording { .. } => true,
-        Effect::Send { .. }
-        | Effect::Broadcast { .. }
-        | Effect::CloseSocket { .. }
-        | Effect::Rebind { .. }
-        | Effect::SetAlarm { .. }
-        | Effect::ReleaseMeetingId { .. }
-        | Effect::EndMeeting => false,
-    }
+    recorder: String,
+    next: crate::recorder::RequestSeq,
 }
 
 /// Names the SFU call an effect makes, its participant and its session, for the log, e.g.
@@ -904,11 +808,12 @@ fn send(ws: &WebSocket, msg: &ServerMsg) -> Result<()> {
     ws.send_with_str(serde_json::to_string(msg)?)
 }
 
-/// Marks the socket closed, so it delivers no events, and closes it.
-fn close(ws: &WebSocket, code: u16, reason: &str) {
+/// Marks the socket closed, so it delivers no events, and closes it with the code and reason
+/// of `why`.
+fn close(ws: &WebSocket, why: CloseCode) {
     let closed = ws
         .serialize_attachment(Attachment::Closed)
-        .and_then(|()| ws.close(Some(code), Some(reason)));
+        .and_then(|()| ws.close(Some(why.code()), Some(why.reason())));
     if let Err(e) = closed {
         console_warn!("close failed: {e}");
     }

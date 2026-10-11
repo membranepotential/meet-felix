@@ -10,7 +10,7 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
     use crate::RoomView;
 
     assert!(ClientMsg::DECL.contains(
-        r#"{ type: "join"; name: DisplayName; consent: boolean; resume?: ResumeToken }"#
+        r#"{ type: "join"; name: DisplayName; consent: boolean; resume?: ResumeToken; protocol?: number }"#
     ));
     assert!(ClientMsg::DECL.contains(r#"{ type: "setConsent"; consent: boolean }"#));
     assert!(ClientMsg::DECL.contains(r#"{ type: "setMuted"; muted: boolean }"#));
@@ -32,6 +32,8 @@ fn declarations_use_camel_case_tags_fields_and_optional_options() {
             .contains(r#"{ type: "resetSession"; kind: SessionKind; epoch: SessionEpoch }"#)
     );
     assert!(crate::SessionKind::DECL.contains(r#""publish" | "subscribe""#));
+    assert!(crate::AfterClose::DECL.contains(r#""reconnect" | "stop" | "reload""#));
+    assert!(crate::ErrorCode::DECL.contains(r#""outdatedClient""#));
     assert!(ServerMsg::DECL.contains(r#"{ type: "subscribeReset"; epoch: SessionEpoch }"#));
     assert!(
         ServerMsg::DECL.contains(r#"{ type: "publishAnswer"; sdp: Sdp; rejected?: TrackKind[] }"#)

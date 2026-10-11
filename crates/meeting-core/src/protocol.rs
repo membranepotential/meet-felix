@@ -229,6 +229,120 @@ pub struct RoomView {
     pub participants: Vec<ParticipantView>,
 }
 
+/// The version of the socket protocol: [`ClientMsg`], [`ServerMsg`] and the close codes
+/// ([`CloseCode`]). Raise it with a change that would make an older client misbehave, and
+/// raise [`MIN_PROTOCOL_VERSION`] to it if the room must refuse such clients. A change older
+/// clients survive needs neither: a client ignores a server message it cannot parse, and the
+/// room answers a client message it cannot parse with [`ErrorCode::MalformedMessage`].
+///
+/// 1 is every client built before the version existed (2026-10-11); 2 sends it in `Join`.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// The oldest client protocol the room serves. A web app cached from before a deploy reconnects
+/// to the new Worker with its old protocol, in every meeting that runs during the deploy, so
+/// this stays as low as the room can serve.
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
+/// The protocol of a `Join` that names none: a client built before the version existed.
+const fn unversioned() -> u32 {
+    1
+}
+
+/// Why the room closes a client's socket. Each reason has its WebSocket close code, which tells
+/// the client what to do next ([`after_close`]), and a reason text for the close frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CloseCode {
+    /// The client sent [`ClientMsg::Leave`].
+    Left,
+    /// The client resumed its place on a new socket; this is the old one.
+    Replaced,
+    /// The client stopped pinging (the room's keepalive check).
+    Stale,
+    /// The socket sent more messages, or caused more writes, than its budget allows.
+    OverBudget,
+    /// The socket did not join in time.
+    NoJoin,
+    /// The socket was the oldest of too many that have not joined.
+    Crowded,
+    /// The SFU could not create a session for a participant who was not in yet.
+    TryLater,
+    /// A host removed the participant ([`ServerMsg::Kicked`] came first).
+    Kicked,
+    /// The meeting ended ([`ServerMsg::Ended`] came first).
+    Ended,
+    /// The room took nobody new ([`ErrorCode::RoomFull`] came first).
+    RoomFull,
+    /// The client's protocol is older than [`MIN_PROTOCOL_VERSION`]
+    /// ([`ErrorCode::OutdatedClient`] came first).
+    Outdated,
+}
+
+/// What a client does after the room closed its socket with a code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "wasm", derive(Tsify))]
+#[serde(rename_all = "camelCase")]
+pub enum AfterClose {
+    /// Open a new socket after a backoff, and resume with the token if it has one.
+    Reconnect,
+    /// The stay is over: reconnecting would not help.
+    Stop,
+    /// The page is out of date: load it again.
+    Reload,
+}
+
+/// The close code of [`CloseCode::Outdated`].
+const OUTDATED: u16 = 4004;
+
+impl CloseCode {
+    /// The WebSocket close code. The final ones lie in 4000–4099, which clients built before
+    /// protocol 2 already treat as final, so such a client stops on [`CloseCode::Outdated`] too
+    /// and shows its reason.
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::Left | Self::Replaced => 1000,
+            // Going away.
+            Self::Stale => 1001,
+            // Policy violation.
+            Self::OverBudget | Self::NoJoin | Self::Crowded => 1008,
+            // Try again later.
+            Self::TryLater => 1013,
+            Self::Kicked => 4001,
+            Self::Ended => 4002,
+            Self::RoomFull => 4003,
+            Self::Outdated => OUTDATED,
+        }
+    }
+
+    /// The close frame's reason (at most 123 bytes). A client shows it when its socket closes
+    /// for good without a message that says why, so the final ones are sentences for the user.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Replaced => "resumed on another socket",
+            Self::Stale => "no ping",
+            Self::OverBudget => "too many messages",
+            Self::NoJoin => "no join",
+            Self::Crowded => "too many sockets",
+            Self::TryLater => "the media server is not reachable",
+            Self::Kicked => "A host removed you from the meeting.",
+            Self::Ended => "The meeting has ended.",
+            Self::RoomFull => "This meeting is full. Try again later.",
+            Self::Outdated => "This page is out of date. Reload it to join the meeting.",
+        }
+    }
+}
+
+/// What a client does after its socket closed with `code`: codes 4000–4099 are final, the code
+/// of [`CloseCode::Outdated`] asks for a reload, and every other code means reconnect, also the
+/// codes a browser reports for a lost connection, such as 1006.
+pub fn after_close(code: u16) -> AfterClose {
+    match code {
+        OUTDATED => AfterClose::Reload,
+        4000..=4099 => AfterClose::Stop,
+        _ => AfterClose::Reconnect,
+    }
+}
+
 /// A message from a client to the room.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "wasm", derive(Tsify))]
@@ -250,6 +364,12 @@ pub enum ClientMsg {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "wasm", tsify(optional))]
         resume: Option<ResumeToken>,
+        /// The protocol version the client speaks: the [`PROTOCOL_VERSION`] of the core it was
+        /// built with. A client built before the field existed sends none and counts as
+        /// version 1. The room refuses a version below [`MIN_PROTOCOL_VERSION`] with
+        /// [`ErrorCode::OutdatedClient`] and [`CloseCode::Outdated`].
+        #[serde(default = "unversioned")]
+        protocol: u32,
     },
     /// Give or withdraw consent to recording. Withdrawing it while the room records stops the
     /// recording of your audio and mutes you.
@@ -441,14 +561,18 @@ pub enum ErrorCode {
     UnexpectedAnswer,
     /// You do not receive that track.
     NotSubscribed,
-    /// The SFU could not create a session for you. Before you joined, the room lets you go:
-    /// reconnect later. Once you are in, the room keeps trying to replace a lost session.
+    /// The SFU could not create a session for you. Before you joined, the room lets you go and
+    /// closes the socket ([`CloseCode::TryLater`]): reconnect later. Once you are in, the room keeps trying to replace a lost session.
     SfuUnavailable,
     /// The SFU rejected your publish offer, or did not answer it in time.
     PublishFailed,
     /// The SFU could not add remote tracks to your subscribe session.
     SubscribeFailed,
     /// The room takes nobody new: it has as many participants as it allows at once, or in all
-    /// ([`crate::MAX_PRESENT`], [`crate::MAX_ROSTER`]). Your `Join` changed nothing.
+    /// ([`crate::MAX_PRESENT`], [`crate::MAX_ROSTER`]). Your `Join` changed nothing, and the
+    /// socket closes next ([`CloseCode::RoomFull`]).
     RoomFull,
+    /// Your `Join` names a protocol older than the room serves ([`MIN_PROTOCOL_VERSION`]):
+    /// load the page again. The socket closes next ([`CloseCode::Outdated`]).
+    OutdatedClient,
 }

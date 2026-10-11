@@ -17,8 +17,13 @@
 //! - A [`RecordingPolicy::FromStart`] meeting starts recording when the first host joins.
 //! - Only hosts lock, admit, kick, mute, record and end.
 //! - A room holds at most [`MAX_PRESENT`] participants at once and [`MAX_ROSTER`] in all, those
-//!   who left included; beyond either, a new participant gets [`ErrorCode::RoomFull`]. A join
-//!   from the owner's socket and a resume are never refused.
+//!   who left after joining included; beyond either, a new participant gets
+//!   [`ErrorCode::RoomFull`]. A join from the owner's socket and a resume are never refused. A
+//!   participant who leaves before they joined is forgotten.
+//! - A `Join` names the client's [`PROTOCOL_VERSION`]; one older than
+//!   [`MIN_PROTOCOL_VERSION`] gets [`ErrorCode::OutdatedClient`]. Every socket the room closes
+//!   gets a [`CloseCode`], which tells the client whether to reconnect, stop or reload
+//!   ([`after_close`]).
 //! - Every change to the public [`RoomView`] reaches every joined client, so all of them see a
 //!   recording start; only consenting participants' audio is recorded.
 //! - Each participant has a publish session (the client offers) and a subscribe session (the SFU
@@ -27,7 +32,9 @@
 //!   longer recorded. A track stays wanted until a negotiation delivers it; a failed or
 //!   timed-out subscribe negotiation is retried after [`SUBSCRIBE_RETRY_MS`], and a track the
 //!   SFU did not find yet (its publisher's connection is not up) after [`FIRST_PULL_RETRY_MS`],
-//!   the first [`FIRST_PULL_RETRIES`] times. A publish offer
+//!   the first [`FIRST_PULL_RETRIES`] times. A participant the SFU does not give both sessions
+//!   within [`NEGOTIATION_TIMEOUT_MS`] is let go like one whose session request failed. A
+//!   publish offer
 //!   the SFU does not answer within [`NEGOTIATION_TIMEOUT_MS`] fails, so the client may offer
 //!   again. Only the tracks the SFU accepted are published; the client hears which kinds it
 //!   rejected, and an answer that rejects all of them fails the offer.
@@ -79,11 +86,13 @@ pub use ids::{
     ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId, TrackName, TranscriptRef,
 };
 pub use protocol::{
-    ClientMsg, ErrorCode, IncomingTrack, LocalTrack, ParticipantView, Phase, Presence, Recording,
-    RecordingPolicy, Rid, Role, RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind,
-    TrackRef,
+    AfterClose, ClientMsg, CloseCode, ErrorCode, IncomingTrack, LocalTrack, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION, ParticipantView, Phase, Presence, Recording, RecordingPolicy, Rid, Role,
+    RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind, TrackRef, after_close,
 };
-pub use shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
+pub use shell::{
+    Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply, Target,
+};
 pub use state::{
     EMPTY_ROOM_TIMEOUT_MS, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS, LEAVE_GRACE_MS, MAX_PRESENT,
     MAX_ROSTER, NEGOTIATION_TIMEOUT_MS, NOTICE_VERSION, RoomState, SCHEDULED_TTL_MS,

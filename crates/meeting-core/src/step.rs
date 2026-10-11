@@ -3,10 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use crate::ids::{Millis, NegotiationId, ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId};
+use crate::ids::{
+    DisplayName, Millis, NegotiationId, ParticipantId, ResumeToken, Sdp, SessionEpoch, SessionId,
+};
 use crate::protocol::{
-    ClientMsg, ErrorCode, IncomingTrack, LocalTrack, Recording, RecordingPolicy, Rid, Role,
-    RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind, TrackRef,
+    ClientMsg, CloseCode, ErrorCode, IncomingTrack, LocalTrack, MIN_PROTOCOL_VERSION, Recording,
+    RecordingPolicy, Rid, Role, RoomView, ServerMsg, SessionEpochs, SessionKind, TrackKind,
+    TrackRef,
 };
 use crate::shell::{Effect, Event, FailureCause, OfferedTrack, RemoteTrack, SfuCall, SfuReply};
 use crate::state::{
@@ -41,7 +44,12 @@ pub fn step(mut state: RoomState, now: Millis, event: Event) -> (RoomState, Vec<
             owner,
             fresh_token,
         } => {
-            if let Err(code) = state.on_client(now, from, msg, owner, fresh_token, &mut fx) {
+            let sender = Sender {
+                from,
+                owner,
+                fresh_token,
+            };
+            if let Err(code) = state.on_client(now, sender, msg, &mut fx) {
                 fx.send(from, ServerMsg::Error { code });
             }
         }
@@ -51,6 +59,13 @@ pub fn step(mut state: RoomState, now: Millis, event: Event) -> (RoomState, Vec<
     }
     let effects = fx.finish(&state, before);
     (state, effects)
+}
+
+/// The socket a client message came from, as the shell reports it in [`Event::Client`].
+struct Sender {
+    from: ParticipantId,
+    owner: bool,
+    fresh_token: ResumeToken,
 }
 
 /// What [`Effects::finish`] compares the new state with.
@@ -80,6 +95,16 @@ impl Effects {
         if !to.is_empty() {
             self.push(Effect::Broadcast { to, msg });
         }
+    }
+
+    fn close(&mut self, who: ParticipantId, why: CloseCode) {
+        self.push(Effect::CloseSocket { who, why });
+    }
+
+    /// Answers a `Join` the room does not take with `code`, then closes the socket with `why`.
+    fn refuse(&mut self, from: ParticipantId, code: ErrorCode, why: CloseCode) {
+        self.send(from, ServerMsg::Error { code });
+        self.close(from, why);
     }
 
     /// Prepends the welcomes and, if the view changed, the state broadcast to everyone with a
@@ -143,82 +168,64 @@ fn audio(owner: ParticipantId) -> TrackRef {
 }
 
 impl RoomState {
+    /// A message from `sender`'s socket. A `Join` from a socket that holds no place is refused
+    /// if the client is too old or the room is full, resumes the place its token names, or adds
+    /// a participant; everything else needs a participant in the room, and host commands a
+    /// joined host ([`RoomState::host_command`]).
     fn on_client(
         &mut self,
         now: Millis,
-        from: ParticipantId,
+        sender: Sender,
         msg: ClientMsg,
-        owner: bool,
-        fresh_token: ResumeToken,
         fx: &mut Effects,
     ) -> Result<(), ErrorCode> {
-        let present = self
+        let from = sender.from;
+        let Some(participant) = self
             .participants
-            .get(&from)
-            .filter(|p| p.connection.presence().is_some());
-        let Some(sender) = present else {
-            let left = self.participants.contains_key(&from);
+            .get_mut(&from)
+            .filter(|p| p.connection.presence().is_some())
+        else {
             return match msg {
                 ClientMsg::Join {
                     name,
                     consent,
                     resume,
+                    protocol,
                 } => {
-                    if let Some(old) = resume.and_then(|token| self.holder_of(&token)) {
-                        self.resume(now, from, old, owner, fx);
-                        return Ok(());
+                    if protocol < MIN_PROTOCOL_VERSION {
+                        fx.refuse(from, ErrorCode::OutdatedClient, CloseCode::Outdated);
+                    } else if let Some(old) = resume.and_then(|token| self.holder_of(&token)) {
+                        self.resume(now, from, old, sender.owner, fx);
+                    } else if !sender.owner && self.is_full() {
+                        fx.refuse(from, ErrorCode::RoomFull, CloseCode::RoomFull);
+                    } else {
+                        self.arrive(now, sender, name, consent, fx);
                     }
-                    if !owner && self.is_full() {
-                        return Err(ErrorCode::RoomFull);
-                    }
-                    let role = if owner { Role::Host } else { Role::Guest };
-                    self.participants.insert(
-                        from,
-                        Participant {
-                            name,
-                            role,
-                            consent: consent.then_some(Consent {
-                                at: now,
-                                notice_version: NOTICE_VERSION,
-                                withdrawn_at: None,
-                            }),
-                            resume: fresh_token,
-                            connection: Connection::Knocking,
-                            muted: false,
-                        },
-                    );
-                    self.enter(from, fx);
                     Ok(())
                 }
                 // Late messages from a participant who left change nothing.
-                _ if left => Ok(()),
+                _ if self.participants.contains_key(&from) => Ok(()),
                 _ => Err(ErrorCode::NotJoined),
             };
         };
         let (is_joined, is_host) = (
-            matches!(sender.connection, Connection::Joined { .. }),
-            sender.role == Role::Host,
+            matches!(participant.connection, Connection::Joined { .. }),
+            participant.role == Role::Host,
         );
-        // Hosts act only once joined, so every joined client sees the effect of their commands.
-        let require_host = || match (is_joined, is_host) {
-            (false, _) => Err(ErrorCode::NotJoined),
-            (true, false) => Err(ErrorCode::NotHost),
-            (true, true) => Ok(()),
-        };
         match msg {
+            ClientMsg::SetMuted { muted } => {
+                participant.muted = muted;
+                Ok(())
+            }
             ClientMsg::Join { .. } => {
-                if owner {
-                    self.promote(from, fx);
+                if sender.owner {
+                    self.promote(now, from, fx);
                 }
                 self.greet(from, fx);
                 Ok(())
             }
             ClientMsg::SetConsent { consent } => {
                 self.set_consent(now, from, consent, fx);
-                Ok(())
-            }
-            ClientMsg::SetMuted { muted } => {
-                self.participants.get_mut(&from).expect("present").muted = muted;
                 Ok(())
             }
             ClientMsg::PublishOffer { sdp, tracks } => {
@@ -236,11 +243,43 @@ impl RoomState {
             }
             ClientMsg::Leave => {
                 self.leave(now, from, fx);
-                fx.push(Effect::CloseSocket { who: from });
+                fx.close(from, CloseCode::Left);
                 Ok(())
             }
+            ClientMsg::Lock { .. }
+            | ClientMsg::Admit { .. }
+            | ClientMsg::Kick { .. }
+            | ClientMsg::Mute { .. }
+            | ClientMsg::SetRecording { .. }
+            | ClientMsg::End => match (is_joined, is_host) {
+                // Hosts act only once joined, so every joined client sees the effect of their
+                // commands.
+                (false, _) => Err(ErrorCode::NotJoined),
+                (true, false) => Err(ErrorCode::NotHost),
+                (true, true) => self.host_command(now, from, msg, fx),
+            },
+        }
+    }
+
+    /// Carries out a joined host's command.
+    fn host_command(
+        &mut self,
+        now: Millis,
+        host: ParticipantId,
+        msg: ClientMsg,
+        fx: &mut Effects,
+    ) -> Result<(), ErrorCode> {
+        // The participant a command names, if they are in a state it applies to.
+        let target =
+            |state: &Self, who: ParticipantId, applies: fn(&Connection) -> bool| match state
+                .participants
+                .get(&who)
+            {
+                Some(p) if applies(&p.connection) => Ok(()),
+                _ => Err(ErrorCode::InvalidTarget),
+            };
+        match msg {
             ClientMsg::Lock { on } => {
-                require_host()?;
                 self.locked = on;
                 if !on {
                     let knocking: Vec<_> = self
@@ -250,54 +289,41 @@ impl RoomState {
                         .map(|(&id, _)| id)
                         .collect();
                     for who in knocking {
-                        self.approve(who, fx);
+                        self.approve(now, who, fx);
                     }
                 }
-                Ok(())
             }
             ClientMsg::Admit { who } => {
-                require_host()?;
-                match self.participants.get(&who) {
-                    Some(p) if p.connection == Connection::Knocking => {
-                        self.approve(who, fx);
-                        Ok(())
-                    }
-                    _ => Err(ErrorCode::InvalidTarget),
-                }
+                target(self, who, |c| *c == Connection::Knocking)?;
+                self.approve(now, who, fx);
             }
             ClientMsg::Kick { who } => {
-                require_host()?;
-                match self.participants.get(&who) {
-                    Some(p) if who != from && p.connection.presence().is_some() => {
-                        fx.send(who, ServerMsg::Kicked);
-                        self.leave(now, who, fx);
-                        fx.push(Effect::CloseSocket { who });
-                        Ok(())
-                    }
-                    _ => Err(ErrorCode::InvalidTarget),
+                if who == host {
+                    return Err(ErrorCode::InvalidTarget);
                 }
+                target(self, who, |c| c.presence().is_some())?;
+                fx.send(who, ServerMsg::Kicked);
+                self.leave(now, who, fx);
+                fx.close(who, CloseCode::Kicked);
             }
             ClientMsg::Mute { who } => {
-                require_host()?;
-                match self.participants.get(&who) {
-                    Some(p) if matches!(p.connection, Connection::Joined { .. }) => {
-                        self.mute(who, fx);
-                        Ok(())
-                    }
-                    _ => Err(ErrorCode::InvalidTarget),
-                }
+                target(self, who, |c| matches!(c, Connection::Joined { .. }))?;
+                self.mute(who, fx);
             }
-            ClientMsg::SetRecording { on } => {
-                require_host()?;
-                self.set_recording(now, from, on, fx);
-                Ok(())
-            }
-            ClientMsg::End => {
-                require_host()?;
-                self.end(now, fx);
-                Ok(())
-            }
+            ClientMsg::SetRecording { on } => self.set_recording(now, host, on, fx),
+            ClientMsg::End => self.end(now, fx),
+            // Not host commands; `on_client` handles them.
+            ClientMsg::Join { .. }
+            | ClientMsg::SetConsent { .. }
+            | ClientMsg::SetMuted { .. }
+            | ClientMsg::PublishOffer { .. }
+            | ClientMsg::Unpublish { .. }
+            | ClientMsg::SubscribeAnswer { .. }
+            | ClientMsg::SetLayer { .. }
+            | ClientMsg::ResetSession { .. }
+            | ClientMsg::Leave => {}
         }
+        Ok(())
     }
 
     /// The participant who holds `token` and has not left.
@@ -322,7 +348,7 @@ impl RoomState {
         owner: bool,
         fx: &mut Effects,
     ) {
-        fx.push(Effect::CloseSocket { who: old });
+        fx.close(old, CloseCode::Replaced);
         fx.push(Effect::Rebind {
             socket,
             participant: old,
@@ -332,7 +358,7 @@ impl RoomState {
             _ => false,
         };
         if owner {
-            self.promote(old, fx);
+            self.promote(now, old, fx);
         }
         self.greet(old, fx);
         let unanswered = self.subscribe_session_mut(old).is_some_and(|subscribe| {
@@ -348,7 +374,7 @@ impl RoomState {
 
     /// The owner's socket took `who`'s place: a guest becomes a host and, if they wait outside,
     /// is let in, as hosts never wait.
-    fn promote(&mut self, who: ParticipantId, fx: &mut Effects) {
+    fn promote(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
         let Some(p) = self.participants.get_mut(&who) else {
             return;
         };
@@ -360,7 +386,7 @@ impl RoomState {
             p.connection,
             Connection::WaitingForHost | Connection::Knocking | Connection::AwaitingConsent
         ) {
-            self.approve(who, fx);
+            self.approve(now, who, fx);
         }
     }
 
@@ -403,68 +429,102 @@ impl RoomState {
         }
     }
 
-    /// A new participant arrives: a guest waits for the first host of a scheduled room or knocks
-    /// on a locked one; anyone else is let in.
-    fn enter(&mut self, who: ParticipantId, fx: &mut Effects) {
-        let guest = self.participants[&who].role == Role::Guest;
-        let scheduled = matches!(self.lifecycle, Lifecycle::Scheduled { .. });
-        if guest && scheduled {
-            self.participants.get_mut(&who).expect("arrived").connection =
-                Connection::WaitingForHost;
-            self.greet(who, fx);
+    /// A new participant arrives from `sender`'s socket: a guest waits for the first host of a
+    /// scheduled room, knocks on a locked one, or, while the room records without their consent,
+    /// waits for it; anyone else is let in.
+    fn arrive(
+        &mut self,
+        now: Millis,
+        sender: Sender,
+        name: DisplayName,
+        consent: bool,
+        fx: &mut Effects,
+    ) {
+        let who = sender.from;
+        let role = if sender.owner {
+            Role::Host
+        } else {
+            Role::Guest
+        };
+        let guest = role == Role::Guest;
+        let connection = if guest && matches!(self.lifecycle, Lifecycle::Scheduled { .. }) {
+            Connection::WaitingForHost
         } else if guest && self.locked {
-            self.participants.get_mut(&who).expect("arrived").connection = Connection::Knocking;
-            self.greet(who, fx);
+            Connection::Knocking
+        } else if guest && self.recording.current().is_some() && !consent {
+            Connection::AwaitingConsent
+        } else {
+            Connection::connecting(now)
+        };
+        let admitted = connection.is_admitted();
+        let knocking = connection == Connection::Knocking;
+        self.participants.insert(
+            who,
+            Participant {
+                name,
+                role,
+                consent: consent.then_some(Consent {
+                    at: now,
+                    notice_version: NOTICE_VERSION,
+                    withdrawn_at: None,
+                }),
+                resume: sender.fresh_token,
+                connection,
+                muted: false,
+            },
+        );
+        if admitted {
+            self.start_connecting(who, fx);
+            if self.lacks_consent(who) {
+                self.ask_consent(who, fx);
+            }
+            return;
+        }
+        self.greet(who, fx);
+        if knocking {
             let hosts = self
                 .joined()
                 .map(|(id, ..)| id)
                 .filter(|id| self.participants[id].role == Role::Host)
                 .collect();
             fx.broadcast(hosts, ServerMsg::Knock { who });
-        } else {
-            self.approve(who, fx);
         }
     }
 
-    /// Lets in a participant who waits outside or just arrived. While the room records, a guest
-    /// without consent waits for it instead; a host enters anyway but is muted and not recorded.
-    fn approve(&mut self, who: ParticipantId, fx: &mut Effects) {
-        let Some(p) = self.participants.get(&who) else {
+    /// Lets in a participant who waits outside. While the room records, a guest without consent
+    /// waits for it instead; a host enters anyway but is muted and not recorded.
+    fn approve(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
+        let recording = self.recording.current().is_some();
+        let Some(p) = self.participants.get_mut(&who) else {
             return;
         };
-        let guest = p.role == Role::Guest;
-        if guest && self.lacks_consent(who) {
-            self.participants
-                .get_mut(&who)
-                .expect("checked above")
-                .connection = Connection::AwaitingConsent;
+        if p.role == Role::Guest && recording && !p.consents() {
+            p.connection = Connection::AwaitingConsent;
             fx.send(who, ServerMsg::ConsentRequired);
         } else {
-            self.admit(who, fx);
+            self.admit(now, who, fx);
             if self.lacks_consent(who) {
                 self.ask_consent(who, fx);
             }
         }
     }
 
-    /// Admits a participant by creating their SFU sessions.
-    fn admit(&mut self, who: ParticipantId, fx: &mut Effects) {
+    /// Admits a participant: they connect from `now` on.
+    fn admit(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
         if let Some(p) = self.participants.get_mut(&who) {
-            p.connection = Connection::Connecting {
-                publish: None,
-                subscribe: None,
-            };
-            if let Lifecycle::Live { empty_since } = &mut self.lifecycle {
-                *empty_since = None;
-            }
-            fx.push(Effect::SfuNewSession {
-                who,
-                kind: SessionKind::Publish,
-            });
-            fx.push(Effect::SfuNewSession {
-                who,
-                kind: SessionKind::Subscribe,
-            });
+            p.connection = Connection::connecting(now);
+            self.start_connecting(who, fx);
+        }
+    }
+
+    /// Asks the SFU for the sessions of `who`, who just started connecting. The room is no
+    /// longer empty.
+    fn start_connecting(&mut self, who: ParticipantId, fx: &mut Effects) {
+        if let Lifecycle::Live { empty_since } = &mut self.lifecycle {
+            *empty_since = None;
+        }
+        for kind in [SessionKind::Publish, SessionKind::Subscribe] {
+            fx.push(Effect::SfuNewSession { who, kind });
         }
     }
 
@@ -513,12 +573,12 @@ impl RoomState {
             p.connection.is_admitted(),
         );
         if consent && awaiting {
-            self.admit(who, fx);
+            self.admit(now, who, fx);
         } else if consent {
             self.record_audio_of(who, fx);
         } else if admitted && self.recording.current().is_some() {
             if let Some(track) = self.resolve(audio(who)) {
-                fx.push(Effect::StopRecordingTrack { who, track });
+                fx.push(self.stop_recording_track(who, track));
             }
             self.ask_consent(who, fx);
         }
@@ -663,7 +723,7 @@ impl RoomState {
                     .map(|(&id, _)| id)
                     .collect();
                 for who in awaiting {
-                    self.admit(who, fx);
+                    self.admit(now, who, fx);
                 }
             }
             _ => {}
@@ -673,7 +733,11 @@ impl RoomState {
     /// Starts recording: records every consenting speaker and asks everyone else for consent.
     fn start_recording(&mut self, now: Millis, by: ParticipantId, fx: &mut Effects) {
         self.recording = RecordingStatus::On(Recording { since: now, by });
-        fx.push(Effect::StartRecording { since: now });
+        fx.push(Effect::StartRecording {
+            since: now,
+            meeting: self.meeting.clone(),
+            transcript: self.transcript.clone(),
+        });
         let present: Vec<_> = self.present().collect();
         for who in present {
             if self.lacks_consent(who) {
@@ -696,9 +760,34 @@ impl RoomState {
             .flatten()
     }
 
+    /// Records `who`'s audio track if [`RoomState::recordable_audio_of`] says so; the request
+    /// carries their name and consent, for the transcript.
     fn record_audio_of(&self, who: ParticipantId, fx: &mut Effects) {
-        if let Some(track) = self.recordable_audio_of(who) {
-            fx.push(Effect::RecordTrack { who, track });
+        let Some(track) = self.recordable_audio_of(who) else {
+            return;
+        };
+        let p = &self.participants[&who];
+        // Always there: only a participant who consents is recordable.
+        let Some(consent) = p.consent_record(who) else {
+            return;
+        };
+        fx.push(Effect::RecordTrack {
+            speaker: p.roster_entry(who),
+            consent,
+            track,
+        });
+    }
+
+    /// The request to stop recording `who`'s audio `track`, with their consent as it stands.
+    fn stop_recording_track(&self, who: ParticipantId, track: RemoteTrack) -> Effect {
+        let consent = self
+            .participants
+            .get(&who)
+            .and_then(|p| p.consent_record(who));
+        Effect::StopRecordingTrack {
+            who,
+            track,
+            consent,
         }
     }
 
@@ -726,7 +815,6 @@ impl RoomState {
                 session,
                 negotiation,
             } => self.renegotiated(now, who, &session, negotiation, fx),
-            SfuReply::TrackClosed { who, kind } => self.withdraw(who, &[kind], fx),
             SfuReply::Failed { who, call, cause } => self.sfu_failed(now, who, call, cause, fx),
         }
     }
@@ -743,7 +831,10 @@ impl RoomState {
             return;
         };
         let role = p.role;
-        let Connection::Connecting { publish, subscribe } = &mut p.connection else {
+        let Connection::Connecting {
+            publish, subscribe, ..
+        } = &mut p.connection
+        else {
             return self.session_replaced(now, who, kind, session, fx);
         };
         let slot = match kind {
@@ -894,21 +985,20 @@ impl RoomState {
         if self.recording_policy == RecordingPolicy::FromStart {
             self.start_recording(now, host, fx);
         }
-        let waiting: Vec<_> = self
-            .participants
-            .iter()
-            .filter(|(_, p)| p.connection == Connection::WaitingForHost)
-            .map(|(&id, _)| id)
-            .collect();
-        for guest in waiting {
-            if self.lacks_consent(guest) {
-                self.participants
-                    .get_mut(&guest)
-                    .expect("waiting")
-                    .connection = Connection::AwaitingConsent;
-            } else {
-                self.admit(guest, fx);
+        let recording = self.recording.current().is_some();
+        let mut admitted = Vec::new();
+        for (&guest, p) in &mut self.participants {
+            if p.connection != Connection::WaitingForHost {
+                continue;
             }
+            if recording && !p.consents() {
+                p.connection = Connection::AwaitingConsent;
+            } else {
+                admitted.push(guest);
+            }
+        }
+        for guest in admitted {
+            self.admit(now, guest, fx);
         }
     }
 
@@ -1130,24 +1220,10 @@ impl RoomState {
         fx: &mut Effects,
     ) {
         match call {
-            SfuCall::NewSession(kind) => {
-                let connecting = self
-                    .participants
-                    .get(&who)
-                    .is_some_and(|p| matches!(p.connection, Connection::Connecting { .. }));
-                if connecting {
-                    fx.send(
-                        who,
-                        ServerMsg::Error {
-                            code: ErrorCode::SfuUnavailable,
-                        },
-                    );
-                    self.leave(now, who, fx);
-                    fx.push(Effect::CloseSocket { who });
-                } else {
-                    self.replacement_failed(now, who, kind, fx);
-                }
-            }
+            SfuCall::NewSession(kind) => match self.participants.get(&who).map(|p| &p.connection) {
+                Some(Connection::Connecting { .. }) => self.connect_failed(now, who, fx),
+                _ => self.replacement_failed(now, who, kind, fx),
+            },
             SfuCall::Publish {
                 session,
                 negotiation,
@@ -1170,32 +1246,14 @@ impl RoomState {
                     FailureCause::TrackNotFound | FailureCause::Transient => {}
                 }
             }
-            SfuCall::Subscribe {
-                ref session,
-                negotiation,
-            }
-            | SfuCall::Renegotiate {
-                ref session,
-                negotiation,
-            } => {
+            SfuCall::Subscribe { ref session, .. } | SfuCall::Renegotiate { ref session, .. } => {
                 let Some(subscribe) = self.current_subscribe_session(who, session) else {
                     return;
                 };
                 if cause == FailureCause::SessionGone {
                     return self.replace_session(now, who, SessionKind::Subscribe, fx);
                 }
-                let running = subscribe.running(negotiation)
-                    && matches!(
-                        (&call, &subscribe.negotiation),
-                        (
-                            SfuCall::Subscribe { .. },
-                            SubscribeNegotiation::AwaitingOffer { .. }
-                        ) | (
-                            SfuCall::Renegotiate { .. },
-                            SubscribeNegotiation::Renegotiating { .. }
-                        )
-                    );
-                if running {
+                if subscribe.awaits(&call) {
                     let retry = match cause {
                         FailureCause::TrackNotFound => Wanted::not_found,
                         FailureCause::SessionGone | FailureCause::Transient => Wanted::failed,
@@ -1205,6 +1263,20 @@ impl RoomState {
                 }
             }
         }
+    }
+
+    /// The SFU did not create the sessions of `who`, who is connecting: it failed, or did not
+    /// answer within [`NEGOTIATION_TIMEOUT_MS`]. They leave, and their client may come back
+    /// later ([`CloseCode::TryLater`]).
+    fn connect_failed(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
+        fx.send(
+            who,
+            ServerMsg::Error {
+                code: ErrorCode::SfuUnavailable,
+            },
+        );
+        self.leave(now, who, fx);
+        fx.close(who, CloseCode::TryLater);
     }
 
     /// Drops `who`'s pending publish offer, if any, and tells the client it failed, so it may
@@ -1328,7 +1400,7 @@ impl RoomState {
         if kinds.contains(&TrackKind::Audio)
             && let Some(track) = self.recordable_audio_of(owner)
         {
-            fx.push(Effect::StopRecordingTrack { who: owner, track });
+            fx.push(self.stop_recording_track(owner, track));
         }
         let Some(publish) = self.publish_session_mut(owner) else {
             return;
@@ -1391,27 +1463,32 @@ impl RoomState {
     }
 
     /// `who` leaves: their tracks stop reaching everyone and stop being recorded, and the empty
-    /// timer starts if nobody admitted is left.
+    /// timer starts if nobody admitted is left. A participant who never joined is forgotten: they
+    /// spoke in no recording, and a client whose join the SFU refuses again and again must not
+    /// grow the roster with each attempt.
     fn leave(&mut self, now: Millis, who: ParticipantId, fx: &mut Effects) {
         let Some(p) = self.participants.get(&who) else {
             return;
         };
-        let published = match &p.connection {
+        match &p.connection {
             Connection::Left => return,
             Connection::WaitingForHost
             | Connection::Knocking
             | Connection::AwaitingConsent
-            | Connection::Connecting { .. } => Vec::new(),
-            Connection::Joined { publish, .. } => publish
-                .ready()
-                .map(PublishSession::kinds)
-                .unwrap_or_default(),
-        };
-        self.withdraw(who, &published, fx);
-        self.participants
-            .get_mut(&who)
-            .expect("checked above")
-            .connection = Connection::Left;
+            | Connection::Connecting { .. } => {
+                self.participants.remove(&who);
+            }
+            Connection::Joined { publish, .. } => {
+                let published = publish
+                    .ready()
+                    .map(PublishSession::kinds)
+                    .unwrap_or_default();
+                self.withdraw(who, &published, fx);
+                if let Some(p) = self.participants.get_mut(&who) {
+                    p.connection = Connection::Left;
+                }
+            }
+        }
         let anyone_admitted = self
             .participants
             .values()
@@ -1433,6 +1510,15 @@ impl RoomState {
         for reason in due {
             match reason {
                 AlarmReason::Expire | AlarmReason::EmptyRoom => return self.end(now, fx),
+                AlarmReason::Connect(who) => {
+                    let connecting = self
+                        .participants
+                        .get(&who)
+                        .is_some_and(|p| matches!(p.connection, Connection::Connecting { .. }));
+                    if connecting {
+                        self.connect_failed(now, who, fx);
+                    }
+                }
                 AlarmReason::Grace(who) => self.leave(now, who, fx),
                 // Due only once the pending offer timed out.
                 AlarmReason::Publish(who) => self.publish_failed(who, fx),
@@ -1448,14 +1534,13 @@ impl RoomState {
                     self.request_wanted(now, who, fx);
                 }
                 AlarmReason::Replace(who, kind) => {
-                    let Some(&mut replacement) = self.replacement_mut(who, kind) else {
+                    let Some(replacement) = self.replacement_mut(who, kind) else {
                         continue;
                     };
-                    match replacement {
+                    match *replacement {
                         _ if replacement.due() > now => {}
                         Replacement::Failed { .. } => {
-                            *self.replacement_mut(who, kind).expect("checked above") =
-                                Replacement::Retrying { since: now };
+                            *replacement = Replacement::Retrying { since: now };
                             fx.push(Effect::SfuNewSession { who, kind });
                         }
                         // No reply in time: the request counts as failed.
@@ -1483,9 +1568,11 @@ impl RoomState {
             fx.broadcast(admitted, ServerMsg::Ended { transcript });
             fx.broadcast(outside, ServerMsg::Ended { transcript: None });
         }
-        for &who in &present {
-            fx.push(Effect::CloseSocket { who });
-            self.participants.get_mut(&who).expect("present").connection = Connection::Left;
+        for (&who, p) in &mut self.participants {
+            if p.connection.presence().is_some() {
+                fx.close(who, CloseCode::Ended);
+                p.connection = Connection::Left;
+            }
         }
         if self.recording.current().is_some() {
             self.recording = RecordingStatus::Stopped;

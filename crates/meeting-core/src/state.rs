@@ -13,7 +13,7 @@ use crate::protocol::{
     SessionEpochs, SessionKind, TrackKind, TrackRef,
 };
 use crate::recording::{ConsentRecord, RosterEntry};
-use crate::shell::{Effect, RemoteTrack};
+use crate::shell::{Effect, RemoteTrack, SfuCall};
 
 /// How long a live room may have no admitted participant before it ends.
 pub const EMPTY_ROOM_TIMEOUT_MS: u64 = 2 * 60 * 1000;
@@ -52,8 +52,8 @@ pub const LEAVE_GRACE_MS: u64 = 60 * 1000;
 /// socket: a host is never locked out of their own room.
 pub const MAX_PRESENT: usize = 20;
 
-/// How many participants the room keeps in all, those who left included, as the roster keeps
-/// their names for the transcript. A new participant beyond it gets
+/// How many participants the room keeps in all, those who left after joining included, as the
+/// roster keeps their names for the transcript. A new participant beyond it gets
 /// [`crate::ErrorCode::RoomFull`], unless they join from the owner's socket. It bounds the
 /// stored record, which every step reads and writes whole, so that a script that joins and
 /// leaves in a loop cannot grow it towards the storage limit or the CPU limit per event.
@@ -129,6 +129,27 @@ impl Participant {
     pub(crate) fn consents(&self) -> bool {
         self.consent.is_some_and(|c| c.withdrawn_at.is_none())
     }
+
+    /// The participant `id` as the transcript names them.
+    pub(crate) fn roster_entry(&self, id: ParticipantId) -> RosterEntry {
+        RosterEntry {
+            id,
+            name: self.name.clone(),
+            role: self.role,
+        }
+    }
+
+    /// The consent record of participant `who`, if they ever consented.
+    pub(crate) fn consent_record(&self, who: ParticipantId) -> Option<ConsentRecord> {
+        let consent = self.consent?;
+        Some(ConsentRecord {
+            who,
+            name: self.name.clone(),
+            at: consent.at,
+            notice_version: consent.notice_version,
+            withdrawn_at: consent.withdrawn_at,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,10 +160,15 @@ pub(crate) enum Connection {
     Knocking,
     /// A guest let in while the room records, waiting for their own consent.
     AwaitingConsent,
-    /// Admitted; waiting for the SFU to create both sessions.
+    /// Admitted at `since`; waiting for the SFU to create both sessions, for at most
+    /// [`NEGOTIATION_TIMEOUT_MS`]. Records stored before the time existed load with time 0, so
+    /// their participants time out at the next alarm: the deploy that brought the field
+    /// restarted the room and lost the replies they waited for.
     Connecting {
         publish: Option<SessionId>,
         subscribe: Option<SessionId>,
+        #[serde(default = "epoch")]
+        since: Millis,
     },
     Joined {
         publish: SessionSlot<PublishSession>,
@@ -155,6 +181,11 @@ pub(crate) enum Connection {
         socket_lost: Option<Millis>,
     },
     Left,
+}
+
+/// Time 0, for a time that records stored before it existed lack.
+fn epoch() -> Millis {
+    Millis(0)
 }
 
 /// One of a joined participant's SFU sessions: in use, or being replaced because the SFU
@@ -296,6 +327,9 @@ pub(crate) enum AlarmReason {
     Expire,
     /// The live room has been empty for [`EMPTY_ROOM_TIMEOUT_MS`].
     EmptyRoom,
+    /// A participant has been connecting for [`NEGOTIATION_TIMEOUT_MS`]: the SFU did not create
+    /// both sessions in time, or a reply got lost.
+    Connect(ParticipantId),
     /// A participant's publish offer timed out.
     Publish(ParticipantId),
     /// A participant's subscribe negotiation timed out, or a wanted track is due for a retry.
@@ -351,16 +385,13 @@ impl RoomState {
         &self.transcript
     }
 
-    /// Everyone who ever joined the room, including those who left, ordered by id. Names stay
-    /// in the state after a participant leaves, so the transcript can name every speaker.
+    /// Everyone in the room and everyone who left after they joined, ordered by id. Names stay
+    /// in the state after a joined participant leaves, so the transcript can name every
+    /// speaker; a participant who leaves before they joined is forgotten, as they never spoke.
     pub fn roster(&self) -> Vec<RosterEntry> {
         self.participants
             .iter()
-            .map(|(&id, p)| RosterEntry {
-                id,
-                name: p.name.clone(),
-                role: p.role,
-            })
+            .map(|(&id, p)| p.roster_entry(id))
             .collect()
     }
 
@@ -369,16 +400,7 @@ impl RoomState {
     pub fn consents(&self) -> Vec<ConsentRecord> {
         self.participants
             .iter()
-            .filter_map(|(&who, p)| {
-                let consent = p.consent?;
-                Some(ConsentRecord {
-                    who,
-                    name: p.name.clone(),
-                    at: consent.at,
-                    notice_version: consent.notice_version,
-                    withdrawn_at: consent.withdrawn_at,
-                })
-            })
+            .filter_map(|(&who, p)| p.consent_record(who))
             .collect()
     }
 
@@ -551,10 +573,20 @@ impl RoomState {
             } => Some((since.after(EMPTY_ROOM_TIMEOUT_MS), AlarmReason::EmptyRoom)),
             Lifecycle::Live { empty_since: None } | Lifecycle::Ended { .. } => None,
         };
-        let grace = self.participants.iter().filter_map(|(&who, p)| {
-            let lost = p.connection.socket_lost()?;
-            Some((lost.after(LEAVE_GRACE_MS), AlarmReason::Grace(who)))
-        });
+        let waits = self
+            .participants
+            .iter()
+            .filter_map(|(&who, p)| match p.connection {
+                Connection::Connecting { since, .. } => Some((
+                    since.after(NEGOTIATION_TIMEOUT_MS),
+                    AlarmReason::Connect(who),
+                )),
+                Connection::Joined {
+                    socket_lost: Some(lost),
+                    ..
+                } => Some((lost.after(LEAVE_GRACE_MS), AlarmReason::Grace(who))),
+                _ => None,
+            });
         let sessions = self.joined().flat_map(|(who, publish, subscribe)| {
             let replace = |kind, r: &Replacement| Some((r.due(), AlarmReason::Replace(who, kind)));
 
@@ -575,7 +607,7 @@ impl RoomState {
             };
             publish.into_iter().chain(subscribe)
         });
-        end.into_iter().chain(grace).chain(sessions)
+        end.into_iter().chain(waits).chain(sessions)
     }
 
     /// The time for [`Effect::SetAlarm`]: the earliest of [`RoomState::alarms`].
@@ -720,6 +752,22 @@ impl SubscribeSession {
         self.negotiation != SubscribeNegotiation::Idle && self.last_negotiation == negotiation
     }
 
+    /// Whether `call` is the SFU step the running negotiation waits for: its `Subscribe` while it
+    /// awaits the SFU's offer, or its `Renegotiate` while it awaits the SFU's confirmation.
+    pub(crate) fn awaits(&self, call: &SfuCall) -> bool {
+        match (call, &self.negotiation) {
+            (
+                SfuCall::Subscribe { negotiation, .. },
+                SubscribeNegotiation::AwaitingOffer { .. },
+            )
+            | (
+                SfuCall::Renegotiate { negotiation, .. },
+                SubscribeNegotiation::Renegotiating { .. },
+            ) => self.running(*negotiation),
+            _ => false,
+        }
+    }
+
     /// When the running negotiation times out or, while idle, when the earliest wanted track
     /// may be requested.
     fn due(&self) -> Option<Millis> {
@@ -763,6 +811,15 @@ impl RecordingStatus {
 }
 
 impl Connection {
+    /// Admitted at `now`, with no SFU session yet.
+    pub(crate) fn connecting(now: Millis) -> Self {
+        Self::Connecting {
+            publish: None,
+            subscribe: None,
+            since: now,
+        }
+    }
+
     /// `None` once the participant left.
     pub(crate) fn presence(&self) -> Option<Presence> {
         match self {

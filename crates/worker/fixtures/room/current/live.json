@@ -42,7 +42,7 @@
                 "subscribe": {
                   "Replacing": {
                     "Requested": {
-                      "since": 1022000
+                      "since": 1024000
                     }
                   }
                 }
@@ -84,7 +84,7 @@
                     "published": {}
                   }
                 },
-                "socket_lost": 1023000,
+                "socket_lost": 1025000,
                 "subscribe": {
                   "Ready": {
                     "id": "Subscribe-1",
@@ -155,6 +155,7 @@
             "connection": {
               "Connecting": {
                 "publish": "Publish-4",
+                "since": 1016000,
                 "subscribe": null
               }
             },
@@ -193,7 +194,7 @@
       "writeBudgets": [
         [
           0,
-          1024000
+          1026000
         ]
       ]
     }

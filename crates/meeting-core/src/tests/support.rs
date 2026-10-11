@@ -3,8 +3,8 @@
 use crate::state::{Connection, SessionSlot};
 use crate::{
     ClientMsg, DisplayName, Effect, Event, LocalTrack, MeetingId, Mid, Millis, NegotiationId,
-    ParticipantId, RecordingPolicy, ResumeToken, RoomState, Sdp, SessionId, SessionKind, SfuReply,
-    TrackKind, TrackName, TranscriptRef, step,
+    ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, RoomState, Sdp, SessionId,
+    SessionKind, SfuReply, TrackKind, TrackName, TranscriptRef, step,
 };
 
 pub(super) const T0: Millis = Millis(1_700_000_000_000);
@@ -130,12 +130,41 @@ impl Room {
         self.client_from(
             who,
             ClientMsg::Join {
+                protocol: crate::PROTOCOL_VERSION,
                 name: name(&format!("P{}", who.0)),
                 consent,
                 resume: None,
             },
             host,
         )
+    }
+
+    /// The request that starts recording now.
+    pub(super) fn start_recording(&self) -> Effect {
+        Effect::StartRecording {
+            since: self.now,
+            meeting: meeting(),
+            transcript: transcript(),
+        }
+    }
+
+    /// The request to record `who`'s `track`, with their name and consent as they stand.
+    pub(super) fn record_track(&self, who: ParticipantId, track: RemoteTrack) -> Effect {
+        let p = &self.state.participants[&who];
+        Effect::RecordTrack {
+            speaker: p.roster_entry(who),
+            consent: p.consent_record(who).expect("a recorded speaker consented"),
+            track,
+        }
+    }
+
+    /// The request to stop recording `who`'s `track`, with their consent as it stands.
+    pub(super) fn stop_track(&self, who: ParticipantId, track: RemoteTrack) -> Effect {
+        Effect::StopRecordingTrack {
+            who,
+            track,
+            consent: self.state.participants[&who].consent_record(who),
+        }
     }
 
     /// Delivers both session replies; returns the effects of the second.

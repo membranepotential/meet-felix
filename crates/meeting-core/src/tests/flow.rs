@@ -2,7 +2,7 @@
 
 use super::support::{Room, T0, local_track, meeting, session, track_name};
 use crate::{
-    ClientMsg, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, LEAVE_GRACE_MS, Mid,
+    ClientMsg, CloseCode, EMPTY_ROOM_TIMEOUT_MS, Effect, Event, IncomingTrack, LEAVE_GRACE_MS, Mid,
     NEGOTIATION_TIMEOUT_MS, NegotiationId, OfferedTrack, ParticipantId, Phase, Presence,
     RemoteTrack, Rid, SCHEDULED_TTL_MS, Sdp, ServerMsg, SessionKind, SfuReply, TrackKind, TrackRef,
 };
@@ -177,6 +177,7 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
 
     // Days later, the owner joins from their authenticated socket and becomes the host.
     room.now = T0.after(3 * 24 * 60 * 60 * 1000);
+    // The SFU has `NEGOTIATION_TIMEOUT_MS` to create the host's sessions.
     assert_eq!(
         room.join(HOST, true, true),
         [
@@ -187,6 +188,9 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
             Effect::SfuNewSession {
                 who: HOST,
                 kind: SessionKind::Subscribe
+            },
+            Effect::SetAlarm {
+                at: room.now.after(NEGOTIATION_TIMEOUT_MS)
             },
         ]
     );
@@ -209,7 +213,9 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
 
     // The guest joins; the host sees them connect, then join.
     let effects = room.join(GUEST, false, true);
-    assert!(matches!(effects.as_slice(), [Effect::Broadcast { to, .. }, _, _] if to == &[HOST]));
+    assert!(
+        matches!(effects.as_slice(), [Effect::Broadcast { to, .. }, _, _, Effect::SetAlarm { .. }] if to == &[HOST])
+    );
     let effects = room.connect(GUEST);
     assert!(matches!(
         effects.as_slice(),
@@ -253,7 +259,10 @@ fn host_and_guest_meet_publish_subscribe_leave_and_the_room_ends() {
             msg: ServerMsg::State { state },
         },
         close,
-        Effect::CloseSocket { who: GUEST },
+        Effect::CloseSocket {
+            who: GUEST,
+            why: CloseCode::Left,
+        },
     ] = effects.as_slice()
     else {
         panic!("unexpected effects {effects:#?}");

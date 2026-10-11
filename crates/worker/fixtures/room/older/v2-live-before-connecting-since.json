@@ -1,0 +1,202 @@
+{
+  "record": {
+    "open": {
+      "alarm": 1028000,
+      "nextParticipant": 6,
+      "nextRecorderRequest": 1004000002,
+      "recorder": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "room": {
+        "lifecycle": {
+          "Live": {
+            "empty_since": null
+          }
+        },
+        "locked": true,
+        "meeting": "acorn-acre-action",
+        "participants": {
+          "0": {
+            "connection": {
+              "Joined": {
+                "epochs": {
+                  "publish": 0,
+                  "subscribe": 0
+                },
+                "publish": {
+                  "Ready": {
+                    "id": "Publish-0",
+                    "last_negotiation": 1,
+                    "negotiation": "Idle",
+                    "published": {
+                      "audio": {
+                        "mid": "0",
+                        "name": "Audio-0"
+                      },
+                      "video": {
+                        "mid": "1",
+                        "name": "Video-0"
+                      }
+                    }
+                  }
+                },
+                "socket_lost": null,
+                "subscribe": {
+                  "Replacing": {
+                    "Requested": {
+                      "since": 1022000
+                    }
+                  }
+                }
+              }
+            },
+            "consent": {
+              "at": 1001000,
+              "notice_version": 1,
+              "withdrawn_at": null
+            },
+            "muted": false,
+            "name": "Person 0",
+            "resume": "01010101010101010101010101010101",
+            "role": "host"
+          },
+          "1": {
+            "connection": {
+              "Joined": {
+                "epochs": {
+                  "publish": 0,
+                  "subscribe": 0
+                },
+                "publish": {
+                  "Ready": {
+                    "id": "Publish-1",
+                    "last_negotiation": 1,
+                    "negotiation": {
+                      "OfferPending": {
+                        "since": 1013000,
+                        "tracks": [
+                          {
+                            "kind": "audio",
+                            "mid": "0",
+                            "name": "Audio-1"
+                          }
+                        ]
+                      }
+                    },
+                    "published": {}
+                  }
+                },
+                "socket_lost": 1023000,
+                "subscribe": {
+                  "Ready": {
+                    "id": "Subscribe-1",
+                    "last_negotiation": 1,
+                    "negotiation": "Idle",
+                    "receiving": [
+                      [
+                        {
+                          "kind": "audio",
+                          "owner": 0
+                        },
+                        {
+                          "mid": "0",
+                          "remote": {
+                            "name": "Audio-0",
+                            "session": "Publish-0"
+                          },
+                          "rid": "f"
+                        }
+                      ],
+                      [
+                        {
+                          "kind": "video",
+                          "owner": 0
+                        },
+                        {
+                          "mid": "1",
+                          "remote": {
+                            "name": "Video-0",
+                            "session": "Publish-0"
+                          },
+                          "rid": "f"
+                        }
+                      ]
+                    ],
+                    "wanted": []
+                  }
+                }
+              }
+            },
+            "consent": {
+              "at": 1005000,
+              "notice_version": 1,
+              "withdrawn_at": 1014000
+            },
+            "muted": true,
+            "name": "Person 1",
+            "resume": "02020202020202020202020202020202",
+            "role": "guest"
+          },
+          "2": {
+            "connection": "Knocking",
+            "consent": null,
+            "muted": false,
+            "name": "Person 2",
+            "resume": "03030303030303030303030303030303",
+            "role": "guest"
+          },
+          "3": {
+            "connection": "AwaitingConsent",
+            "consent": null,
+            "muted": false,
+            "name": "Person 3",
+            "resume": "04040404040404040404040404040404",
+            "role": "guest"
+          },
+          "4": {
+            "connection": {
+              "Connecting": {
+                "publish": "Publish-4",
+                "subscribe": null
+              }
+            },
+            "consent": {
+              "at": 1016000,
+              "notice_version": 1,
+              "withdrawn_at": null
+            },
+            "muted": false,
+            "name": "Person 4",
+            "resume": "05050505050505050505050505050505",
+            "role": "guest"
+          },
+          "5": {
+            "connection": "Left",
+            "consent": {
+              "at": 1018000,
+              "notice_version": 1,
+              "withdrawn_at": null
+            },
+            "muted": false,
+            "name": "Person 5",
+            "resume": "06060606060606060606060606060606",
+            "role": "guest"
+          }
+        },
+        "recording": {
+          "On": {
+            "by": 0,
+            "since": 1004000
+          }
+        },
+        "recording_policy": "hostDecides",
+        "transcript": "fedcba9876543210fedcba9876543210"
+      },
+      "writeBudgets": [
+        [
+          0,
+          1024000
+        ]
+      ]
+    }
+  },
+  "version": 2
+}

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{
     MeetingId, Mid, Millis, NegotiationId, ParticipantId, ResumeToken, Sdp, SessionId, TrackName,
+    TranscriptRef,
 };
-use crate::protocol::{ClientMsg, LocalTrack, Rid, ServerMsg, SessionKind, TrackKind};
+use crate::protocol::{ClientMsg, CloseCode, LocalTrack, Rid, ServerMsg, SessionKind, TrackKind};
 use crate::recording::{ConsentRecord, RosterEntry};
 
 /// Something that happened to the room.
@@ -153,13 +154,6 @@ pub enum SfuReply {
         /// The subscribe negotiation.
         negotiation: NegotiationId,
     },
-    /// The SFU no longer serves one of a participant's published tracks.
-    TrackClosed {
-        /// The publisher.
-        who: ParticipantId,
-        /// Which track.
-        kind: TrackKind,
-    },
     /// An SFU call failed.
     Failed {
         /// The participant the call was made for.
@@ -188,11 +182,13 @@ pub enum Effect {
         /// The message.
         msg: ServerMsg,
     },
-    /// Close a socket. The shell delivers no further events from it, not even
-    /// [`Event::SocketClosed`].
+    /// Close a socket with the code and reason of `why`. The shell delivers no further events
+    /// from it, not even [`Event::SocketClosed`].
     CloseSocket {
         /// Whose socket.
         who: ParticipantId,
+        /// Why; it tells the client whether to come back.
+        why: CloseCode,
     },
     /// A client resumed on a new socket: bind that socket to its participant. From now on the
     /// shell delivers the socket's messages and its close as coming from `participant`, and
@@ -282,15 +278,23 @@ pub enum Effect {
         /// When.
         at: Millis,
     },
-    /// Start the recorder. [`Effect::RecordTrack`] effects name the tracks to record.
+    /// Start the recorder, or start it again after [`Effect::StopRecording`].
+    /// [`Effect::RecordTrack`] effects name the tracks to record. From now on the transcript
+    /// link works.
     StartRecording {
         /// The recording's start time.
         since: Millis,
+        /// The meeting's words.
+        meeting: MeetingId,
+        /// The transcript link token.
+        transcript: TranscriptRef,
     },
     /// Record this audio track of a participant who consented.
     RecordTrack {
-        /// The speaker.
-        who: ParticipantId,
+        /// The speaker, as the transcript names them.
+        speaker: RosterEntry,
+        /// Their consent, as it stands now.
+        consent: ConsentRecord,
         /// Their audio track.
         track: RemoteTrack,
     },
@@ -301,6 +305,9 @@ pub enum Effect {
         who: ParticipantId,
         /// Their audio track.
         track: RemoteTrack,
+        /// Their consent as it stands now, with the withdrawal if they withdrew it; `None` if
+        /// they never gave it.
+        consent: Option<ConsentRecord>,
     },
     /// Stop recording all tracks.
     StopRecording,
@@ -321,4 +328,41 @@ pub enum Effect {
     /// The room is over: start the transcript job and accept no more sockets. Always the last
     /// effect the room produces.
     EndMeeting,
+}
+
+/// Who carries out an [`Effect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// The room's own shell: its sockets, its alarm, its storage, the meeting's words.
+    Room,
+    /// The SFU, through its HTTPS API.
+    Sfu,
+    /// The meeting's recorder.
+    Recorder,
+}
+
+impl Effect {
+    /// Who carries out this effect.
+    pub fn target(&self) -> Target {
+        match self {
+            Self::Send { .. }
+            | Self::Broadcast { .. }
+            | Self::CloseSocket { .. }
+            | Self::Rebind { .. }
+            | Self::SetAlarm { .. }
+            | Self::ReleaseMeetingId { .. }
+            | Self::EndMeeting => Target::Room,
+            Self::SfuNewSession { .. }
+            | Self::SfuPublish { .. }
+            | Self::SfuSubscribe { .. }
+            | Self::SfuRenegotiate { .. }
+            | Self::SfuCloseTracks { .. }
+            | Self::SfuUpdateLayer { .. } => Target::Sfu,
+            Self::StartRecording { .. }
+            | Self::RecordTrack { .. }
+            | Self::StopRecordingTrack { .. }
+            | Self::StopRecording
+            | Self::FinishRecording { .. } => Target::Recorder,
+        }
+    }
 }

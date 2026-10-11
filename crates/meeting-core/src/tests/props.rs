@@ -12,11 +12,11 @@ use crate::state::{
     AlarmReason, Connection, Lifecycle, PublishNegotiation, SessionSlot, SubscribeNegotiation,
 };
 use crate::{
-    ClientMsg, Effect, ErrorCode, Event, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS, FailureCause,
-    LEAVE_GRACE_MS, LocalTrack, Mid, Millis, NEGOTIATION_TIMEOUT_MS, NegotiationId, OfferedTrack,
-    ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, Rid, Role, RoomState, RoomView,
-    SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpochs, SessionId, SessionKind,
-    SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
+    ClientMsg, CloseCode, Effect, ErrorCode, Event, FIRST_PULL_RETRIES, FIRST_PULL_RETRY_MS,
+    FailureCause, LEAVE_GRACE_MS, LocalTrack, Mid, Millis, NEGOTIATION_TIMEOUT_MS, NegotiationId,
+    OfferedTrack, ParticipantId, RecordingPolicy, RemoteTrack, ResumeToken, Rid, Role, RoomState,
+    RoomView, SCHEDULED_TTL_MS, SUBSCRIBE_RETRY_MS, Sdp, ServerMsg, SessionEpochs, SessionId,
+    SessionKind, SfuCall, SfuReply, TrackKind, TrackName, TrackRef,
 };
 
 const POOL: u32 = 6;
@@ -73,10 +73,6 @@ enum Action {
     /// A client answers a pending subscribe offer.
     Answer {
         pick: usize,
-    },
-    TrackClosed {
-        who: u32,
-        kind: TrackKind,
     },
     SocketClosed {
         who: u32,
@@ -178,7 +174,6 @@ fn action() -> impl Strategy<Value = Action> {
             .prop_map(|(who, kinds, fail)| Action::Reoffer { who, kinds, fail }),
         1 => any::<usize>().prop_map(|pick| Action::Lose { pick }),
         6 => any::<usize>().prop_map(|pick| Action::Answer { pick }),
-        1 => (who(), kind()).prop_map(|(who, kind)| Action::TrackClosed { who, kind }),
         2 => who().prop_map(|who| Action::SocketClosed { who }),
         1 => (0..8u8).prop_map(|n| if n == 0 { Action::Expire } else { Action::Alarm }),
         1 => Just(Action::NegotiationDue),
@@ -318,6 +313,7 @@ impl Sim {
             } => self.client(
                 id(who),
                 ClientMsg::Join {
+                    protocol: crate::PROTOCOL_VERSION,
                     name: name("Someone"),
                     consent,
                     resume: None,
@@ -333,6 +329,7 @@ impl Sim {
                 self.client(
                     id(socket),
                     ClientMsg::Join {
+                        protocol: crate::PROTOCOL_VERSION,
                         name: name("Someone"),
                         consent: true,
                         resume,
@@ -577,9 +574,6 @@ impl Sim {
                     },
                     false,
                 )
-            }
-            Action::TrackClosed { who, kind } => {
-                Event::Sfu(SfuReply::TrackClosed { who: id(who), kind })
             }
             Action::SocketClosed { who } => Event::SocketClosed { who: id(who) },
             Action::Alarm => Event::AlarmFired,
@@ -918,8 +912,12 @@ impl Sim {
             } => (Some(*from), *owner && matches!(msg, ClientMsg::Join { .. })),
             _ => (None, false),
         };
-        let known =
-            |who: &ParticipantId| after.participants.contains_key(who) || Some(*who) == sender;
+        // A participant who leaves before they joined is no longer in `after`.
+        let known = |who: &ParticipantId| {
+            after.participants.contains_key(who)
+                || before.participants.contains_key(who)
+                || Some(*who) == sender
+        };
         let present_in = |state: &RoomState, who: &ParticipantId| {
             state
                 .participants
@@ -982,7 +980,7 @@ impl Sim {
                 Effect::Broadcast { to, .. } => {
                     prop_assert!(!to.is_empty() && to.iter().all(known), "{effect:?}")
                 }
-                Effect::CloseSocket { who } => prop_assert!(known(who), "{effect:?}"),
+                Effect::CloseSocket { who, .. } => prop_assert!(known(who), "{effect:?}"),
                 Effect::Rebind {
                     socket,
                     participant,
@@ -1049,7 +1047,9 @@ impl Sim {
                         effect
                     );
                 }
-                Effect::RecordTrack { who, .. } => prop_assert!(present(who), "{effect:?}"),
+                Effect::RecordTrack { speaker, .. } => {
+                    prop_assert!(present(&speaker.id), "{effect:?}")
+                }
                 // A participant who leaves in this step stops being recorded.
                 Effect::StopRecordingTrack { who, .. } => {
                     prop_assert!(present_in(before, who), "{effect:?}")
@@ -1407,15 +1407,17 @@ impl Sim {
             .joined()
             .any(|(id, ..)| after.participants[&id].role == Role::Host);
         match after.lifecycle {
-            // Nobody is joined in a scheduled room, and its only timer is the expiry.
+            // Nobody is joined in a scheduled room, and its only timer for the room is the
+            // expiry; a host who connects has a timer of their own.
             Lifecycle::Scheduled { since } => {
                 prop_assert!(after.joined().next().is_none());
-                prop_assert!(
-                    after
-                        .alarms()
-                        .all(|(_, reason)| reason != AlarmReason::EmptyRoom)
-                );
-                prop_assert_eq!(after.next_alarm(), Some(since.after(SCHEDULED_TTL_MS)));
+                let expected = |(at, reason): (Millis, AlarmReason)| match reason {
+                    AlarmReason::Expire => at == since.after(SCHEDULED_TTL_MS),
+                    AlarmReason::Connect(_) => true,
+                    _ => false,
+                };
+                prop_assert!(after.alarms().all(expected));
+                prop_assert!(after.next_alarm() <= Some(since.after(SCHEDULED_TTL_MS)));
             }
             // No room is live without a host having joined. The empty timer runs exactly while
             // nobody is admitted.
@@ -1456,8 +1458,11 @@ impl Sim {
             (Lifecycle::Scheduled { .. }, after_lifecycle) => {
                 // Otherwise waiting guests keep waiting until they leave, the room expires, or
                 // the owner's socket makes them a host.
+                // A guest who leaves before they joined is forgotten.
                 for (who, _) in waiting {
-                    let now = &after.participants[who];
+                    let Some(now) = after.participants.get(who) else {
+                        continue;
+                    };
                     prop_assert!(
                         matches!(
                             now.connection,
@@ -1672,7 +1677,6 @@ fn reply_session(
             ..
         } => Some((*who, SessionKind::Subscribe, session, Some(*negotiation))),
         SfuReply::SessionCreated { .. }
-        | SfuReply::TrackClosed { .. }
         | SfuReply::Failed {
             call: SfuCall::NewSession(_),
             ..
@@ -1848,18 +1852,29 @@ fn run_crowd(from_start: bool, actions: Vec<Crowd>) -> Result<(bool, bool), Test
                 if before.is_full() {
                     prop_assert_eq!(
                         effects,
-                        vec![Effect::Send {
-                            to: who,
-                            msg: ServerMsg::Error {
-                                code: ErrorCode::RoomFull
+                        vec![
+                            Effect::Send {
+                                to: who,
+                                msg: ServerMsg::Error {
+                                    code: ErrorCode::RoomFull
+                                }
+                            },
+                            Effect::CloseSocket {
+                                who,
+                                why: CloseCode::RoomFull
                             }
-                        }]
+                        ]
                     );
                     prop_assert_eq!(&room.state, &before, "a refused join changes nothing");
                     refused_present |= before.present().count() >= crate::MAX_PRESENT;
                     refused_roster |= before.participants.len() >= crate::MAX_ROSTER;
                 } else {
-                    prop_assert!(room.state.participants[&who].connection.presence().is_some());
+                    let connection = &room.state.participants[&who].connection;
+                    prop_assert!(connection.presence().is_some());
+                    // Only those who joined stay on the roster once they leave.
+                    if matches!(connection, Connection::Connecting { .. }) {
+                        room.connect(who);
+                    }
                 }
             }
             Crowd::Owner => {

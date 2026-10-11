@@ -12,7 +12,8 @@
 use std::fmt;
 
 use meeting_core::{
-    Effect, Event, MAX_PRESENT, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, step,
+    Effect, Event, MAX_PRESENT, Millis, ParticipantId, Phase, RecordingPolicy, RoomState, Target,
+    step,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -132,8 +133,8 @@ pub fn decode(json: &str) -> Result<Decoded, DecodeError> {
     }
 }
 
-/// How long a socket may go without an auto-response ping before the room closes it, and how
-/// often the room checks while sockets are open.
+/// How long a socket may go without an auto-response ping before the room closes it; the alarm
+/// fires when the first open socket's time is up ([`OpenRoom::alarm_time`]).
 pub const KEEPALIVE_MS: u64 = 60 * 1000;
 
 /// The room's single storage value, kept as JSON under [`Record::KEY`]. No record means the
@@ -281,23 +282,39 @@ pub struct OpenRoom {
     pub write_budgets: Vec<(ParticipantId, MessageBudget)>,
 }
 
-/// Whether `effect` is a request to the recorder.
-pub fn is_recording(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::StartRecording { .. }
-            | Effect::RecordTrack { .. }
-            | Effect::StopRecordingTrack { .. }
-            | Effect::StopRecording
-            | Effect::FinishRecording { .. }
-    )
+/// What one step of an open room produced.
+#[derive(Debug)]
+pub struct Stepped {
+    /// The record to store.
+    pub record: Record,
+    /// The effects to carry out, in order.
+    pub effects: Vec<Effect>,
+    /// Where the recorder requests among `effects` go; `None` if there are none, or if the room
+    /// has no recorder for them.
+    pub recorder: Option<RecorderLink>,
+}
+
+/// The meeting's `RecorderObject` and the number of a step's first request to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecorderLink {
+    /// The `RecorderObject`'s id (hex).
+    pub id: String,
+    /// The number the step's first recorder request carries; each further one counts up.
+    pub first_request: RequestSeq,
 }
 
 impl OpenRoom {
-    /// Runs one event through the core; returns the record to store and the effects to carry
-    /// out. The recorder requests among the effects take the numbers from
-    /// [`OpenRoom::first_recorder_request`] on, in order; an open record counts on after them.
-    pub fn step(self, now: Millis, event: Event) -> (Record, Vec<Effect>) {
+    /// Runs one event through the core; returns the record to store, the effects to carry out
+    /// and where their recorder requests go. The first `StartRecording` of a room without a
+    /// recorder takes the id from `new_recorder`, and the record keeps it. The recorder requests
+    /// take the numbers from [`OpenRoom::first_recorder_request`] on, in order; an open record
+    /// counts on after them.
+    pub fn step(
+        self,
+        now: Millis,
+        event: Event,
+        new_recorder: impl FnOnce() -> Option<String>,
+    ) -> Stepped {
         // A fired alarm is used up. The core sets it again after every `AlarmFired` if anything
         // is still due; keeping the old time would re-arm a time in the past, and the alarm
         // would fire again at once, forever.
@@ -305,23 +322,40 @@ impl OpenRoom {
             Event::AlarmFired => None,
             _ => self.alarm,
         };
-        let first = self.first_recorder_request(now);
+        let first_request = self.first_recorder_request(now);
         let (room, effects) = step(self.room, now, event);
-        let requests = effects.iter().filter(|e| is_recording(e)).count();
+        let requests = effects
+            .iter()
+            .filter(|e| e.target() == Target::Recorder)
+            .count();
+        let starts = effects
+            .iter()
+            .any(|e| matches!(e, Effect::StartRecording { .. }));
+        let recorder = match self.recorder {
+            None if starts => new_recorder(),
+            kept => kept,
+        };
+        let link = recorder
+            .clone()
+            .filter(|_| requests > 0)
+            .map(|id| RecorderLink { id, first_request });
         let next_recorder_request = match requests {
             0 => self.next_recorder_request,
-            n => Some(first.after(n)),
+            n => Some(first_request.after(n)),
         };
-        (
-            Self {
-                room,
-                alarm,
-                next_recorder_request,
-                ..self
-            }
-            .settle(&effects),
+        let record = Self {
+            room,
+            alarm,
+            recorder,
+            next_recorder_request,
+            ..self
+        }
+        .settle(&effects);
+        Stepped {
+            record,
             effects,
-        )
+            recorder: link,
+        }
     }
 
     /// The number a step at `now` gives its first recorder request.
@@ -335,6 +369,38 @@ impl OpenRoom {
         self.room.view().participants.iter().map(|p| p.id).collect()
     }
 
+    /// The participants in the room that no open socket belongs to, and whose socket the room
+    /// has not reported gone yet (they would be reconnecting). The runtime lost their socket
+    /// without a close event: a deploy restarts the object and disconnects every socket, or an
+    /// object reset in the middle of a handler loses what it was doing. The room reports them as
+    /// `SocketClosed`, so they get their grace or leave, and the room can empty and end.
+    pub fn orphans(&self, sockets: &[OpenSocket]) -> Vec<ParticipantId> {
+        self.room
+            .view()
+            .participants
+            .iter()
+            .filter(|p| !p.reconnecting && !sockets.iter().any(|s| s.participant == p.id))
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// When the object's alarm must fire: the earliest of the core's alarm, the time the first
+    /// of the open `sockets` goes stale ([`is_stale`]), each with when it last pinged, and the
+    /// time the first socket bound to nobody has had its time to join ([`join_overdue`]).
+    /// Derived from everything the alarm serves, so setting it may replace whatever was set
+    /// before, however much earlier.
+    pub fn alarm_time(&self, sockets: &[(OpenSocket, Option<Millis>)]) -> Option<Millis> {
+        let present = self.present();
+        let socket_times = sockets.iter().flat_map(|(socket, last_ping)| {
+            let last = last_ping.map_or(socket.since, |ping| ping.max(socket.since));
+            let stale = last.after(KEEPALIVE_MS + 1);
+            let join =
+                is_unbound(socket, &present).then(|| socket.since.after(JOIN_TIMEOUT_MS + 1));
+            std::iter::once(stale).chain(join)
+        });
+        self.alarm.into_iter().chain(socket_times).min()
+    }
+
     /// Charges participant `who` at `now` for one write of the record that their message
     /// caused; `false` if they used up their budget, and the room must drop the step. Only
     /// participants on the roster are charged, so the budgets stay as bounded as the roster
@@ -344,7 +410,11 @@ impl OpenRoom {
     /// that overspends resumes on a new socket with a full one. This budget belongs to the
     /// participant and is stored with the record, in the write it charges for.
     pub fn charge_write(&mut self, who: ParticipantId, now: Millis) -> bool {
-        if !self.room.roster().iter().any(|entry| entry.id == who) {
+        let roster = self.room.roster();
+        let on_roster = |id: &ParticipantId| roster.iter().any(|entry| entry.id == *id);
+        // A participant who left before they joined is off the roster: their budget goes too.
+        self.write_budgets.retain(|(id, _)| on_roster(id));
+        if !on_roster(&who) {
             return true;
         }
         let entry = match self.write_budgets.iter().position(|(id, _)| *id == who) {
@@ -462,16 +532,6 @@ impl MessageBudget {
     }
 }
 
-/// When the object's alarm must fire: the earlier of the core's alarm and, while sockets are
-/// open, the next keepalive check.
-pub fn alarm_time(core: Option<Millis>, open_sockets: bool, now: Millis) -> Option<Millis> {
-    let keepalive = open_sockets.then(|| now.after(KEEPALIVE_MS));
-    match (core, keepalive) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
-
 /// Whether a socket has been silent for longer than [`KEEPALIVE_MS`]: no auto-response ping
 /// since it connected, or none in that time.
 pub fn is_stale(now: Millis, since: Millis, last_ping: Option<Millis>) -> bool {
@@ -544,14 +604,22 @@ pub fn write_for(
 #[cfg(test)]
 pub(crate) mod tests {
     use meeting_core::{
-        ClientMsg, DisplayName, LEAVE_GRACE_MS, LocalTrack, MeetingId, Mid, OfferedTrack,
-        ResumeToken, SCHEDULED_TTL_MS, Sdp, SessionEpoch, SessionId, SessionKind, SfuReply,
-        TrackKind, TrackName, TranscriptRef,
+        ClientMsg, DisplayName, LEAVE_GRACE_MS, LocalTrack, MeetingId, Mid, NEGOTIATION_TIMEOUT_MS,
+        OfferedTrack, PROTOCOL_VERSION, ResumeToken, SCHEDULED_TTL_MS, Sdp, SessionEpoch,
+        SessionId, SessionKind, SfuReply, TrackKind, TrackName, TranscriptRef,
     };
 
     use super::*;
 
     const T0: Millis = Millis(1_000_000);
+
+    /// Steps `open` through `event`; a first `StartRecording` gets [`RECORDER_ID`].
+    fn run(open: OpenRoom, now: Millis, event: Event) -> (Record, Vec<Effect>) {
+        let Stepped {
+            record, effects, ..
+        } = open.step(now, event, || Some(RECORDER_ID.into()));
+        (record, effects)
+    }
 
     fn open_room() -> OpenRoom {
         let (room, effects) = RoomState::new(
@@ -594,6 +662,7 @@ pub(crate) mod tests {
                 name: DisplayName::parse("Ada").unwrap(),
                 consent: true,
                 resume: None,
+                protocol: PROTOCOL_VERSION,
             },
             owner: true,
             fresh_token: ResumeToken::from_random([7; 16]),
@@ -611,7 +680,7 @@ pub(crate) mod tests {
             })
         });
         for event in std::iter::once(join).chain(created) {
-            let (Record::Open(next), _) = open.step(T0, event) else {
+            let (Record::Open(next), _) = run(open, T0, event) else {
                 panic!("joining keeps the room open")
             };
             open = next;
@@ -622,11 +691,12 @@ pub(crate) mod tests {
 
     #[test]
     fn a_fired_alarm_is_forgotten_unless_the_core_sets_it_again() {
-        let fired_at = T0.after(SCHEDULED_TTL_MS);
+        let fired_at = T0.after(NEGOTIATION_TIMEOUT_MS);
         let room = room_with_host();
-        // Going live cancelled the scheduled room's expiry, but the core never clears an alarm.
+        // Connecting replaced the scheduled room's expiry with the host's deadline to connect.
+        // The host connected in time, but the core never clears an alarm.
         assert_eq!(room.alarm, Some(fired_at));
-        let (Record::Open(open), effects) = room.step(fired_at, Event::AlarmFired) else {
+        let (Record::Open(open), effects) = run(room, fired_at, Event::AlarmFired) else {
             panic!("an alarm in an occupied room keeps it open")
         };
         let set = effects.iter().find_map(|effect| match effect {
@@ -653,18 +723,27 @@ pub(crate) mod tests {
         assert_eq!(open.next_recorder_request, None);
         let first = RequestSeq::starting_at(T0);
         assert_eq!(open.first_recorder_request(T0), first);
-        let (Record::Open(open), effects) = open.step(T0, record(true)) else {
+        let stepped = open.step(T0, record(true), || Some(RECORDER_ID.into()));
+        // The first `StartRecording` creates the recorder, which the record keeps.
+        assert_eq!(
+            stepped.recorder,
+            Some(RecorderLink {
+                id: RECORDER_ID.into(),
+                first_request: first
+            })
+        );
+        let Record::Open(open) = stepped.record else {
             panic!("still open")
         };
-        assert_eq!(effects.iter().filter(|e| is_recording(e)).count(), 1);
+        assert_eq!(open.recorder.as_deref(), Some(RECORDER_ID));
         assert_eq!(open.next_recorder_request, Some(first.after(1)));
         // A step without recorder requests keeps the number, even at a later time.
         let later = T0.after(60_000);
-        let (Record::Open(open), _) = open.step(later, Event::AlarmFired) else {
+        let (Record::Open(open), _) = run(open, later, Event::AlarmFired) else {
             panic!("still open")
         };
         assert_eq!(open.next_recorder_request, Some(first.after(1)));
-        let (Record::Open(open), _) = open.step(later, record(false)) else {
+        let (Record::Open(open), _) = run(open, later, record(false)) else {
             panic!("still open")
         };
         assert_eq!(open.next_recorder_request, Some(first.after(2)));
@@ -672,9 +751,12 @@ pub(crate) mod tests {
 
     #[test]
     fn a_room_that_lost_its_counter_numbers_above_everything_it_numbered_before() {
-        // The rooms production holds were stored before the counter existed; older code also
-        // drops it when it rewrites a record, as after a rollback.
-        for (name, json) in fixtures::read("room", "older") {
+        // Rooms were stored before the counter existed; older code also drops it when it
+        // rewrites a record, as after a rollback.
+        let before_numbers = fixtures::read("room", "older")
+            .into_iter()
+            .filter(|(name, _)| name.contains("before-recorder-numbers"));
+        for (name, json) in before_numbers {
             if let Ok(Decoded::Current(Record::Open(open))) = decode(&json) {
                 assert_eq!(open.next_recorder_request, None, "{name}");
             }
@@ -732,13 +814,13 @@ pub(crate) mod tests {
             fresh_token: ResumeToken::from_random([9; 16]),
         };
         // Unmuted already: nothing changes, nothing is written or charged.
-        let (mut record, _) = open.clone().step(T0, muted(false));
+        let (mut record, _) = run(open.clone(), T0, muted(false));
         assert_eq!(
             write_for(&stored, &mut record, Some(HOST), T0).unwrap(),
             Write::Skip
         );
         // A change is written, with the writer's budget charged in the same record.
-        let (mut record, _) = open.step(T0, muted(true));
+        let (mut record, _) = run(open, T0, muted(true));
         let Write::Store(json) = write_for(&stored, &mut record, Some(HOST), T0).unwrap() else {
             panic!("a change is stored")
         };
@@ -747,7 +829,7 @@ pub(crate) mod tests {
         };
         assert_eq!(written.write_budgets.len(), 1);
         // A step no participant caused (an SFU reply, an alarm) charges nobody.
-        let (mut record, _) = written.clone().step(T0, Event::AlarmFired);
+        let (mut record, _) = run(written.clone(), T0, Event::AlarmFired);
         let stored = encode(&Record::Open(written.clone())).unwrap();
         if let Write::Store(json) = write_for(&stored, &mut record, None, T0).unwrap() {
             let Decoded::Current(Record::Open(after)) = decode(&json).unwrap() else {
@@ -768,14 +850,14 @@ pub(crate) mod tests {
             owner: true,
             fresh_token: ResumeToken::from_random([9; 16]),
         };
-        let (mut record, _) = open.clone().step(T0, mute.clone());
+        let (mut record, _) = run(open.clone(), T0, mute.clone());
         assert_eq!(
             write_for(&stored, &mut record, Some(HOST), T0).unwrap(),
             Write::Refuse(HOST)
         );
         // A second later the budget allows one more write.
         let later = T0.after(MESSAGE_INTERVAL_MS);
-        let (mut record, _) = open.step(later, mute);
+        let (mut record, _) = run(open, later, mute);
         assert!(matches!(
             write_for(&stored, &mut record, Some(HOST), later).unwrap(),
             Write::Store(_)
@@ -785,7 +867,7 @@ pub(crate) mod tests {
     #[test]
     fn a_dropped_socket_arms_the_grace_alarm_and_keeps_the_room_open() {
         let dropped = T0.after(1_000);
-        let (record, _) = room_with_host().step(dropped, Event::SocketClosed { who: HOST });
+        let (record, _) = run(room_with_host(), dropped, Event::SocketClosed { who: HOST });
         assert_eq!(record.phase(), Phase::Live);
         let Record::Open(open) = record else {
             panic!("a host in the grace period keeps the room open")
@@ -801,7 +883,7 @@ pub(crate) mod tests {
             owner: true,
             fresh_token: ResumeToken::from_random([8; 16]),
         };
-        let (record, effects) = room_with_host().step(T0, end);
+        let (record, effects) = run(room_with_host(), T0, end);
         assert_eq!(effects.last(), Some(&Effect::EndMeeting));
         assert_eq!(record.phase(), Phase::Ended);
         let ended = EndedRoom {
@@ -997,6 +1079,7 @@ pub(crate) mod tests {
                 name,
                 consent,
                 resume: None,
+                protocol: PROTOCOL_VERSION,
             },
             owner,
         )
@@ -1012,7 +1095,7 @@ pub(crate) mod tests {
 
     /// Steps `open` through `event`; returns the open room and the effects.
     fn drive(open: OpenRoom, now: Millis, event: Event) -> (OpenRoom, Vec<Effect>) {
-        match open.step(now, event) {
+        match run(open, now, event) {
             (Record::Open(open), effects) => (open, effects),
             (ended, _) => panic!("the fixture room ended: {ended:?}"),
         }
@@ -1145,6 +1228,8 @@ pub(crate) mod tests {
             join(connecting, false, true),
             created(connecting, SessionKind::Publish),
             join(left, false, true),
+            created(left, SessionKind::Publish),
+            created(left, SessionKind::Subscribe),
             client(left, ClientMsg::Leave, false),
             client(host, ClientMsg::Lock { on: true }, true),
             join(knocking, false, false),
@@ -1297,17 +1382,54 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn alarm_is_the_earlier_of_core_and_keepalive() {
-        let soon = T0.after(1_000);
-        let late = T0.after(10 * KEEPALIVE_MS);
-        assert_eq!(alarm_time(Some(soon), true, T0), Some(soon));
+    fn the_alarm_is_the_earliest_of_the_core_the_keepalive_and_the_time_to_join() {
+        let mut open = room_with_host();
+        open.alarm = None;
+        assert_eq!(open.alarm_time(&[]), None);
+        // The host's socket goes stale a minute after its last ping.
+        let host = socket(HOST.0, T0, true);
+        let pinged = T0.after(30_000);
         assert_eq!(
-            alarm_time(Some(late), true, T0),
-            Some(T0.after(KEEPALIVE_MS))
+            open.alarm_time(&[(host, Some(pinged))]),
+            Some(pinged.after(KEEPALIVE_MS + 1))
         );
-        assert_eq!(alarm_time(Some(late), false, T0), Some(late));
-        assert_eq!(alarm_time(None, true, T0), Some(T0.after(KEEPALIVE_MS)));
-        assert_eq!(alarm_time(None, false, T0), None);
+        // A socket bound to nobody must join within its time.
+        let stranger = socket(7, T0.after(5_000), false);
+        let join_by = T0.after(5_000 + JOIN_TIMEOUT_MS + 1);
+        assert_eq!(
+            open.alarm_time(&[(host, Some(pinged)), (stranger, None)]),
+            Some(join_by)
+        );
+        // Sockets that connect later never move that time back: every upgrade 9 s apart once
+        // pushed the join and keepalive checks out for good.
+        let later: Vec<_> = (1..10)
+            .map(|i| {
+                (
+                    socket(10 + i, T0.after(5_000 + 9_000 * u64::from(i)), false),
+                    None,
+                )
+            })
+            .chain([(host, Some(pinged)), (stranger, None)])
+            .collect();
+        assert_eq!(open.alarm_time(&later), Some(join_by));
+        // The core's own time wins when it is earlier.
+        open.alarm = Some(T0.after(1_000));
+        assert_eq!(open.alarm_time(&later), Some(T0.after(1_000)));
+    }
+
+    #[test]
+    fn participants_without_a_socket_are_found_unless_already_reported() {
+        let mut open = room_with_host();
+        let host = socket(HOST.0, T0, true);
+        assert!(open.orphans(&[host]).is_empty());
+        // After a deploy the runtime holds no socket for the host, and reported no close.
+        assert_eq!(open.orphans(&[]), [HOST]);
+        // Once reported, the host waits to resume and is no orphan any more.
+        open = match run(open, T0, Event::SocketClosed { who: HOST }) {
+            (Record::Open(open), _) => open,
+            (ended, _) => panic!("the grace keeps the room open: {ended:?}"),
+        };
+        assert!(open.orphans(&[]).is_empty());
     }
 
     #[test]
